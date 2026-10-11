@@ -12,8 +12,11 @@ import kotlin.math.min
 /**
  * Pure, immutable timeline operations for the single-layer editor.
  *
- * The timeline is an ordered [Clip] list; positions are prefix sums of clip
- * durations, so the layout is always ripple (no gaps, no overlaps).
+ * Timeline v3 — GAPS: each clip carries a `gapBeforeUs` hole, so positions are
+ * prefix sums of (gapBeforeUs + durationUs). Deleting a middle clip KEEPS a
+ * black gap (the hole is transferred to the following clip); deleting the last
+ * clip drops its tail (no endless black tail). Trim still ripples the tail
+ * forward (standard NLE trim behavior), split inserts the right half tightly.
  *
  * Conventions (from studying OpenCut / LibreCuts):
  *  - All times are integer microseconds.
@@ -29,14 +32,19 @@ object TimelineOps {
     const val MIN_SOURCE_SPAN_US: Long = 100_000L
 
     // ------------------------------------------------------------------
-    // Position mapping (prefix sums)
+    // Position mapping (prefix sums, gap-aware)
     // ------------------------------------------------------------------
 
-    /** Cumulative start time of each clip, microseconds. clips.size + 1 entries. */
+    /**
+     * Cumulative start time of each clip on the timeline, microseconds.
+     * clips.size + 1 entries; entry i includes clips[i].gapBeforeUs (the hole
+     * in front of clip i belongs to the timeline span BEFORE the clip).
+     */
     fun starts(clips: List<Clip>): LongArray {
         val out = LongArray(clips.size + 1)
         var acc = 0L
         for (i in clips.indices) {
+            acc += clips[i].gapBeforeUs
             out[i] = acc
             acc += clips[i].durationUs
         }
@@ -81,8 +89,23 @@ object TimelineOps {
         if (asset.isImage) IMAGE_MAX_DURATION_US else asset.durationUs
 
     // ------------------------------------------------------------------
-    // Structural operations (all return new lists, ripple by construction)
+    // Structural operations (gap-aware: deleting a middle clip leaves a hole)
     // ------------------------------------------------------------------
+
+    /**
+     * Remove clips[index] transferring its hole (gapBeforeUs + durationUs) to
+     * the clip that follows; removing the LAST clip drops the tail entirely
+     * (no endless black tail at the end of the timeline).
+     */
+    private fun removeWithHole(clips: List<Clip>, index: Int): MutableList<Clip> {
+        val out = clips.toMutableList()
+        val removed = out.removeAt(index)
+        if (index < out.size) {
+            val next = out[index]
+            out[index] = next.copy(gapBeforeUs = next.gapBeforeUs + removed.gapBeforeUs + removed.durationUs)
+        }
+        return out
+    }
 
     fun insert(clips: List<Clip>, clip: Clip, atIndex: Int): List<Clip> {
         val idx = atIndex.coerceIn(0, clips.size)
@@ -91,34 +114,67 @@ object TimelineOps {
 
     fun append(clips: List<Clip>, clip: Clip): List<Clip> = clips + clip
 
-    /** Ripple delete: the following clips close the gap automatically. */
+    /**
+     * Delete keeping the hole: a middle clip turns into a black gap the user
+     * can lay text over; the tail clips STAY WHERE THEY ARE.
+     */
     fun delete(clips: List<Clip>, index: Int): List<Clip> {
         if (index < 0 || index >= clips.size) return clips
-        return clips.filterIndexed { i, _ -> i != index }
+        return removeWithHole(clips, index)
     }
 
-    fun deleteById(clips: List<Clip>, clipId: String): List<Clip> =
-        clips.filter { it.id != clipId }
+    fun deleteById(clips: List<Clip>, clipId: String): List<Clip> {
+        val index = clips.indexOfFirst { it.id == clipId }
+        if (index < 0) return clips
+        return removeWithHole(clips, index)
+    }
 
     /**
-     * Move a clip (reorder): remove it, then insert at [toIndex] of the
-     * remaining list (0..clips.size-1). Ripple semantics keep the timeline
-     * contiguous.
+     * Remove clips[index] transferring ONLY its pre-existing hole (gapBeforeUs)
+     * to the follower — the clip's own time span does NOT become a hole. Used
+     * by [move]: relocating content must not punch new holes into the timeline.
+     */
+    private fun removeTransferringGapOnly(clips: List<Clip>, index: Int): MutableList<Clip> {
+        val out = clips.toMutableList()
+        val removed = out.removeAt(index)
+        if (index < out.size) {
+            val next = out[index]
+            out[index] = next.copy(gapBeforeUs = next.gapBeforeUs + removed.gapBeforeUs)
+        }
+        return out
+    }
+
+    /**
+     * Move a clip (reorder) with holes staying in place: the removed clip's
+     * existing hole stays at its position (transferred to the follower); at the
+     * destination slot the moved clip TAKES OVER the slot's gap and the
+     * pushed-back clip hugs it. Semantics: content moves, holes don't, and no
+     * NEW holes appear (a compact list stays compact after a reorder).
      */
     fun move(clips: List<Clip>, fromIndex: Int, toIndex: Int): List<Clip> {
         if (fromIndex !in clips.indices) return clips
         if (toIndex !in 0 until clips.size) return clips
         if (fromIndex == toIndex) return clips
         val item = clips[fromIndex]
-        val without = clips.toMutableList().apply { removeAt(fromIndex) }
-        // After removal the valid insertion range is 0..without.size.
-        without.add(toIndex.coerceIn(0, without.size), item)
-        return without
+        val without = removeTransferringGapOnly(clips, fromIndex)
+        val idx = toIndex.coerceIn(0, without.size)
+        val slotGap = without.getOrNull(idx)?.gapBeforeUs ?: 0L
+        val out = without.toMutableList()
+        if (idx < out.size) {
+            // The clip that used to start at this slot is pushed right; its
+            // leading hole now belongs to the moved clip.
+            out[idx] = out[idx].copy(gapBeforeUs = 0L)
+            out.add(idx, item.copy(gapBeforeUs = slotGap))
+        } else {
+            out.add(item.copy(gapBeforeUs = 0L))
+        }
+        return out
     }
 
     fun duplicate(clips: List<Clip>, index: Int, newId: String): List<Clip> {
         if (index !in clips.indices) return clips
-        val copy = clips[index].copy(id = newId)
+        // The copy is inserted tightly after the original (no copied hole).
+        val copy = clips[index].copy(id = newId, gapBeforeUs = 0L)
         return clips.subList(0, index + 1) + copy + clips.subList(index + 1, clips.size)
     }
 
@@ -217,7 +273,7 @@ object TimelineOps {
         if (clip.sourceOutUs - boundary < MIN_SOURCE_SPAN_US) return null
 
         val left = clip.copy(sourceOutUs = boundary)
-        val right = clip.copy(id = newId, sourceInUs = boundary)
+        val right = clip.copy(id = newId, sourceInUs = boundary, gapBeforeUs = 0L)
         val out = clips.toMutableList()
         out[idx] = left
         out.add(idx + 1, right)
@@ -280,11 +336,17 @@ object TimelineOps {
             // Still inside this clip -> convert back to timeline.
             st[idx] + ((nextSource - clip.sourceInUs).toDouble() / clip.speed).toLong()
         } else {
-            // Cross the boundary.
+            // Cross the boundary. Going backwards from INSIDE the gap after
+            // this clip, land on this clip's END (not its start).
             if (forward) {
                 if (idx + 1 < clips.size) st[idx + 1] else total
             } else {
-                if (idx - 1 >= 0) st[idx] else 0L
+                val clipEnd = st[idx] + clips[idx].durationUs
+                when {
+                    timelineUs > clipEnd -> clipEnd
+                    idx - 1 >= 0 -> st[idx]
+                    else -> 0L
+                }
             }
         }
     }

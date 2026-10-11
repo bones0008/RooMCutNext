@@ -41,6 +41,8 @@ class TimelineOpsTest {
         val clips = listOf(clip(outUs = 2_000_000), clip(inUs = 0, outUs = 1_000_000))
         val st = TimelineOps.starts(clips)
         assertEquals(longArrayOf(0, 2_000_000, 3_000_000).toList(), st.toList())
+        // zero gaps (legacy compact projects) keep the exact old layout
+        assertEquals(0L, clips.sumOf { it.gapBeforeUs })
     }
 
     @Test
@@ -139,14 +141,37 @@ class TimelineOpsTest {
     // ---------------- delete / move / duplicate ----------------
 
     @Test
-    fun `ripple delete closes the gap`() {
+    fun `delete keeps a black gap in the middle`() {
+        // v1.0.8: deleting a middle clip leaves the hole — the tail clips
+        // STAY WHERE THEY ARE (the user lays text over the black segment).
         val clips = listOf(clip("a", 0, 2_000_000), clip("a", 0, 3_000_000), clip("a", 0, 1_000_000))
         val after = TimelineOps.delete(clips, 1)
         assertEquals(2, after.size)
         val st = TimelineOps.starts(after)
+        // st[1] is the third clip's REAL start (2s of A + 3s hole), not 2s.
         assertEquals(0L, st[0])
-        assertEquals(2_000_000L, st[1]) // second clip starts right after the first
-        assertEquals(3_000_000L, st[2])
+        assertEquals(5_000_000L, st[1])
+        assertEquals(6_000_000L, st[2])
+        assertEquals(3_000_000L, after[1].gapBeforeUs)
+    }
+
+    @Test
+    fun `delete last clip drops the tail`() {
+        val clips = listOf(clip("a", 0, 2_000_000), clip("a", 0, 3_000_000))
+        val after = TimelineOps.delete(clips, 1)
+        assertEquals(1, after.size)
+        assertEquals(0L, after[0].gapBeforeUs)
+        assertEquals(2_000_000L, TimelineOps.starts(after)[1])
+    }
+
+    @Test
+    fun `delete merges the hole with an existing gap`() {
+        // A | hole(1s) | B : deleting A leaves ONE 3s hole before B.
+        val a = clip("a", 0, 2_000_000)
+        val b = clip("b", 0, 1_000_000).copy(gapBeforeUs = 1_000_000L)
+        val after = TimelineOps.delete(listOf(a, b), 0)
+        assertEquals(1, after.size)
+        assertEquals(3_000_000L, after[0].gapBeforeUs)
     }
 
     @Test
@@ -159,12 +184,87 @@ class TimelineOpsTest {
     }
 
     @Test
+    fun `move on a compact list stays compact`() {
+        // Reordering must NOT punch new holes: B|C|A with all gaps zero.
+        val clips = listOf(clip("a", 0, 1_000_000), clip("b", 0, 1_000_000), clip("c", 0, 1_000_000))
+        val after = TimelineOps.move(clips, 0, 2)
+        assertEquals(0L, after.sumOf { it.gapBeforeUs })
+        assertEquals(3_000_000L, TimelineOps.starts(after)[3])
+    }
+
+    @Test
+    fun `move leaves existing holes in place`() {
+        // A | hole(1s) | B : moving A to the end keeps the 1s hole at its position.
+        val a = clip("a", 0, 1_000_000)
+        val b = clip("b", 0, 1_000_000).copy(gapBeforeUs = 1_000_000L)
+        val after = TimelineOps.move(listOf(a, b), 0, 1)
+        assertEquals(listOf("b", "a"), after.map { it.assetId })
+        // hole stayed in front of B
+        assertEquals(1_000_000L, after[0].gapBeforeUs)
+        assertEquals(0L, after[1].gapBeforeUs)
+        assertEquals(3_000_000L, TimelineOps.starts(after)[2])
+    }
+
+    @Test
     fun `duplicate inserts copy right after`() {
         val clips = listOf(clip("a", 0, 1_000_000), clip("b", 0, 1_000_000))
         val after = TimelineOps.duplicate(clips, 0, "dup1")
         assertEquals(3, after.size)
         assertEquals("dup1", after[1].id)
         assertEquals(after[0].copy(id = "dup1"), after[1])
+    }
+
+    @Test
+    fun `duplicate does not copy the leading hole`() {
+        val a = clip("a", 0, 1_000_000).copy(gapBeforeUs = 2_000_000L)
+        val b = clip("b", 0, 1_000_000)
+        val after = TimelineOps.duplicate(listOf(a, b), 0, "dup1")
+        assertEquals(0L, after[1].gapBeforeUs) // copy hugs the original
+        assertEquals(2_000_000L, after[0].gapBeforeUs) // original keeps its hole
+    }
+
+    // ---------------- gaps (v1.0.8) ----------------
+
+    @Test
+    fun `starts include leading gaps`() {
+        val a = clip("a", 0, 1_000_000)
+        val b = clip("b", 0, 2_000_000).copy(gapBeforeUs = 500_000L)
+        val st = TimelineOps.starts(listOf(a, b))
+        assertEquals(0L, st[0])
+        // st[1] = b's REAL start on the timeline (after its leading hole)
+        assertEquals(1_500_000L, st[1])
+        assertEquals(3_500_000L, st[2]) // 1s + 0.5s gap + 2s
+    }
+
+    @Test
+    fun `clipIndexAt maps gap positions to the previous clip`() {
+        val a = clip("a", 0, 1_000_000)
+        val b = clip("b", 0, 1_000_000).copy(gapBeforeUs = 1_000_000L)
+        val clips = listOf(a, b)
+        assertEquals(0, TimelineOps.clipIndexAt(clips, 1_499_999)) // inside the gap
+        assertEquals(1, TimelineOps.clipIndexAt(clips, 2_000_000)) // clip b start
+    }
+
+    @Test
+    fun `split right half is tight`() {
+        val a = clip("a1", 0, 4_000_000).copy(gapBeforeUs = 700_000L)
+        val res = TimelineOps.splitAtTimeline(listOf(a), lookup, 2_700_000L, "new1")
+        assertNotNull(res)
+        assertEquals(700_000L, res!!.clips[0].gapBeforeUs) // left keeps the hole
+        assertEquals(0L, res.clips[1].gapBeforeUs)          // right hugs the left
+    }
+
+    @Test
+    fun `stepFrame backwards from inside a gap lands on the clip end`() {
+        val a = clip("a", 0, 1_000_000)
+        val b = clip("b", 0, 1_000_000).copy(gapBeforeUs = 1_000_000L)
+        val clips = listOf(a, b)
+        // playhead in the middle of the gap (1.5s); stepping back -> 1s (A's end)
+        val back = TimelineOps.stepFrame(clips, lookup, 1_500_000L, forward = false)
+        assertEquals(1_000_000L, back)
+        // forward from inside the gap -> B's start (2s), skipping the gap tail
+        val fwd = TimelineOps.stepFrame(clips, lookup, 1_500_000L, forward = true)
+        assertEquals(2_000_000L, fwd)
     }
 
     // ---------------- speed ----------------

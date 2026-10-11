@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.transformer.CompositionPlayer
+import androidx.media3.ui.PlayerView
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.ops.TimelineOps
 import com.RooMCutNext.export.CompositionBuilder
@@ -60,6 +61,10 @@ class PlaybackController(
     private var lastSyncedClipsHash: Int = 0
     private var lastSyncedTextsHash: Int = 0
     private var lastSyncedAudiosHash: Int = 0
+
+    /** Preview view bound from the UI layer; the player is created eagerly so
+     *  its output surface is attached BEFORE the first composition prepare. */
+    private var boundView: PlayerView? = null
 
     /** True while the user drags the playhead: Media3 scrubbing mode on. */
     @Volatile
@@ -135,6 +140,27 @@ class PlaybackController(
         diag("player created")
         startPolling()
         return p
+    }
+
+    /**
+     * Bind the preview [PlayerView] from the UI layer (AndroidView factory).
+     *
+     * v1.0.8 black-screen fix: on a FRESH project the player used to be created
+     * only when the first import finished — i.e. setComposition()/prepare()
+     * ran while the view still had player == null, so the GL pipeline was
+     * configured with no output surface and rendered nothing (black). Leaving
+     * and re-entering worked because the init-refresh then ran before the view
+     * bound. Creating the player HERE (view factory time) and attaching it to
+     * the view guarantees surface-before-prepare in every entry path.
+     */
+    fun bindView(view: PlayerView) {
+        boundView = view
+        view.player = ensurePlayer()
+    }
+
+    fun unbindView() {
+        boundView?.player = null
+        boundView = null
     }
 
     /**
@@ -263,6 +289,9 @@ class PlaybackController(
     /** Set by the ViewModel right before refresh(); kept for error retries. */
     @Volatile
     var currentProjectRef: Project? = null
+
+    /** The preview PlayerView, if bound (surface attachment diagnostics). */
+    val hasBoundView: Boolean get() = boundView != null
 
     // ---------------------------------------------------------------
     // Transport

@@ -8,8 +8,8 @@ import kotlinx.serialization.Serializable
  * Persistence format is JSON (see data/ProjectRepository); media files live in
  * the app's private directory, referenced by [MediaAsset.fileName].
  *
- * Timeline model (v2):
- *  - [clips]: video/image clips, ripple layout (prefix-sum positions).
+ * Timeline model (v3):
+ *  - [clips]: video/image clips with optional leading gaps ([Clip.gapBeforeUs]).
  *  - [texts]: text overlays, independent layer anchored to the timeline.
  *  - [audios]: audio clips, independent layer anchored to the timeline.
  */
@@ -30,8 +30,8 @@ data class Project(
     val updatedAtMs: Long = 0L,
     val schemaVersion: Int = 2,
 ) {
-    /** Video track duration (prefix sum of clips). */
-    val clipsDurationUs: Long get() = clips.fold(0L) { acc, c -> acc + c.durationUs }
+    /** Video track duration (gaps + clips). */
+    val clipsDurationUs: Long get() = clips.fold(0L) { acc, c -> acc + c.gapBeforeUs + c.durationUs }
 
     /** Total timeline duration: the longest of video, texts and audio. */
     val totalDurationUs: Long get() = maxOf(

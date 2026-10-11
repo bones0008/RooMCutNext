@@ -269,11 +269,24 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                         useController = false
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                         setShutterBackgroundColor(android.graphics.Color.BLACK)
+                    }.also { view ->
+                        // v1.0.8 black-screen fix: create + bind the player at
+                        // view-factory time so the output surface exists BEFORE
+                        // the first setComposition()/prepare() (see
+                        // PlaybackController.bindView). The update block below
+                        // keeps the binding correct across recompositions.
+                        vm.playback.bindView(view)
                     }
                 },
                 update = { view ->
-                    view.player = vm.playback.player
+                    if (view.player !== vm.playback.player) {
+                        view.player = vm.playback.player
+                    }
                     vm.reportPreviewViewSize(view.width, view.height)
+                },
+                onRelease = { view ->
+                    view.player = null
+                    vm.playback.unbindView()
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -439,7 +452,14 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
 
 @Composable
 private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+    // v1.0.8: breathing room between the video area and the transport row —
+    // the blue play button used to touch the bottom edge of the preview.
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp, bottom = 2.dp)
+            .padding(horizontal = 8.dp)
+    ) {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,

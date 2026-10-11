@@ -33,20 +33,27 @@ import java.io.File
  * and the exporter (Transformer) — one source of truth, so the preview is
  * exactly what gets exported (WYSIWYG by construction).
  *
- *  ⚠ Coordinate bases differ between the two consumers (verified against
- * Media3 1.11.1 bytecode) and [forPreview] selects the right one:
+ *  ⚠ Media3 1.11.1 gotchas verified against the shipped bytecode (v1.0.8):
  *
- *  - PREVIEW (CompositionPlayer): PlaybackVideoGraphWrapper$InputVideoSink adds
- *    each item's window offset (period.positionInWindowUs via
- *    MediaCodecVideoRenderer.getBufferTimestampAdjustmentUs) to every frame, so
- *    GL effects receive GLOBAL sequence (= app timeline) timestamps.
+ *  - CROP: `Crop(left, right, bottom, top)` — the THIRD constructor argument
+ *    is stored into the `bottom` field and the FOURTH into `top` (the ctor
+ *    checks arg4 > arg3). Passing (left, right, top, bottom) in the intuitive
+ *    order throws "top value X should be greater than bottom value Y".
+ *    CropSpec stores GL-style (top=1..bottom=0), so we pass
+ *    Crop(spec.left, spec.right, spec.bottom, spec.top).
  *
- *  - EXPORT (Transformer): SequenceAssetLoader queues each item's samples with
- *    their ITEM-LOCAL timestamps (globalTimestampUs is only used for looping
- *    bounds), so effects receive timestamps relative to the item start.
+ *  - SATURATION: HslAdjustment.Builder.adjustSaturation takes [-100, 100]
+ *    (Brightness/Contrast take [-1, 1]). Passing a [-1, 1] slider value
+ *    directly is a 1% change — invisible to the eye.
  *
- *  Timed text overlay windows are therefore computed in global coordinates for
- *  preview and in item-local coordinates for export.
+ *  - TIMED OVERLAYS: GL effects receive GLOBAL composition timestamps in BOTH
+ *    consumers. For preview this follows from the window offset added by
+ *    PlaybackVideoGraphWrapper's InputVideoSink. For export it was believed
+ *    (v1.0.7) that SequenceAssetLoader feeds ITEM-LOCAL timestamps, but
+ *    real-device behavior proves otherwise: text beyond the FIRST clip
+ *    boundary disappeared in exports (the item-local window on clip 2 never
+ *    matched the global presentation timestamps). Windows are therefore
+ *    always computed in GLOBAL timeline coordinates.
  *
  * Effects chain per clip (order matters):
  *   rotate/flip -> crop -> color adjust -> text overlays
@@ -82,26 +89,36 @@ object CompositionBuilder {
         val items = mutableListOf<EditedMediaItem>()
 
         // ---- primary (video) sequence ----
+        // Gap-aware: a clip's leading hole becomes a black background item,
+        // so the hole renders as true black (text overlays can sit on it) in
+        // BOTH preview and export.
+        var emittedEndUs = 0L
         project.clips.forEachIndexed { index, clip ->
+            val clipStartUs = starts[index]
+            if (clip.gapBeforeUs >= MIN_GAP_US) {
+                items += buildBlackPadItem(
+                    project, mediaDir, clipStartUs - clip.gapBeforeUs, clip.gapBeforeUs, stripEffects,
+                )
+                emittedEndUs = clipStartUs
+            }
             val asset = project.assetById(clip.assetId)
             val file = asset?.let { File(mediaDir, it.fileName) }
             if (asset == null || file == null || !file.exists()) {
                 skipped += clip.id
                 return@forEachIndexed
             }
-            items += buildItem(project, clip, asset, file, starts[index], stripEffects, forPreview)
+            items += buildItem(project, clip, asset, file, clipStartUs, stripEffects)
+            emittedEndUs = clipStartUs + clip.durationUs
         }
 
         // Video track duration; the composition must be as long as the longest
         // layer (texts / audios are independent layers now) — pad with a black
         // background item so text and audio tails have frames to attach to.
-        val clipsDurationUs = project.clipsDurationUs
         val totalDurationUs = project.totalDurationUs
-        var videoSequenceEndUs = clipsDurationUs
-        if (totalDurationUs > clipsDurationUs + MIN_GAP_US) {
-            val padUs = totalDurationUs - clipsDurationUs
-            items += buildBlackPadItem(project, mediaDir, clipsDurationUs, padUs, stripEffects, forPreview)
-            videoSequenceEndUs = clipsDurationUs + padUs
+        if (totalDurationUs > emittedEndUs + MIN_GAP_US) {
+            items += buildBlackPadItem(
+                project, mediaDir, emittedEndUs, totalDurationUs - emittedEndUs, stripEffects,
+            )
         }
 
         if (items.isEmpty()) {
@@ -148,7 +165,6 @@ object CompositionBuilder {
         file: File,
         clipStartUs: Long,
         stripEffects: Boolean,
-        forPreview: Boolean,
     ): EditedMediaItem {
         val uri = Uri.fromFile(file)
 
@@ -181,16 +197,22 @@ object CompositionBuilder {
                     .setRotationDegrees(clip.rotationDeg.toFloat())
                     .build()
             }
-            clip.crop?.let { videoEffects += Crop(it.left, it.right, it.top, it.bottom) }
+            // ⚠ Crop argument order in Media3 1.11.1 is (left, right, BOTTOM, TOP)
+            // — see class doc. CropSpec stores GL-style top/bottom.
+            clip.crop?.let { videoEffects += Crop(it.left, it.right, it.bottom, it.top) }
             if (clip.adjust.brightness != 0f) videoEffects += Brightness(clip.adjust.brightness)
             if (clip.adjust.contrast != 0f) videoEffects += Contrast(clip.adjust.contrast)
             if (clip.adjust.saturation != 0f) {
-                videoEffects += HslAdjustment.Builder().adjustSaturation(clip.adjust.saturation).build()
+                // HslAdjustment saturation domain is [-100, 100] (unlike
+                // Brightness/Contrast which are [-1, 1]): scale the slider.
+                videoEffects += HslAdjustment.Builder()
+                    .adjustSaturation((clip.adjust.saturation * 100f).coerceIn(-100f, 100f))
+                    .build()
             }
 
             // ---- text overlays whose window overlaps this clip ----
-            // Windows use GLOBAL coordinates in preview and ITEM-LOCAL
-            // coordinates on export (see class doc for the Media3 asymmetry).
+            // Windows are in GLOBAL timeline coordinates for BOTH preview and
+            // export (see class doc for the v1.0.8 real-device verification).
             val clipEndUs = clipStartUs + clip.durationUs
             val overlapping = project.texts
                 .filter { it.startUs < clipEndUs && it.endUs > clipStartUs }
@@ -200,16 +222,8 @@ object CompositionBuilder {
                     chunk.map { text ->
                         TimedTextOverlay(
                             item = text,
-                            windowStartUs = if (forPreview) {
-                                text.startUs
-                            } else {
-                                (text.startUs - clipStartUs).coerceAtLeast(0L)
-                            },
-                            windowEndUs = if (forPreview) {
-                                text.endUs
-                            } else {
-                                (text.endUs - clipStartUs).coerceAtMost(clip.durationUs)
-                            },
+                            windowStartUs = text.startUs,
+                            windowEndUs = text.endUs,
                         )
                     }
                 )
@@ -262,8 +276,9 @@ object CompositionBuilder {
 
     /**
      * Black background item covering [padUs] starting at [padStartUs] on the
-     * timeline. Text overlays overlapping this window are attached here so
-     * text beyond the last video clip (or on an empty timeline) still renders.
+     * timeline (gap holes AND the tail pad use this). Text overlays overlapping
+     * this window are attached here in GLOBAL coordinates so text renders on
+     * black gaps and beyond the last video clip, in preview AND export.
      */
     private fun buildBlackPadItem(
         project: Project,
@@ -271,7 +286,6 @@ object CompositionBuilder {
         padStartUs: Long,
         padUs: Long,
         stripEffects: Boolean,
-        forPreview: Boolean,
     ): EditedMediaItem {
         val black = GeneratedMedia.blackPng(mediaDir, project.width, project.height)
         val mediaItem = MediaItem.Builder()
@@ -290,16 +304,8 @@ object CompositionBuilder {
                     chunk.map { text ->
                         TimedTextOverlay(
                             item = text,
-                            windowStartUs = if (forPreview) {
-                                text.startUs
-                            } else {
-                                (text.startUs - padStartUs).coerceAtLeast(0L)
-                            },
-                            windowEndUs = if (forPreview) {
-                                text.endUs
-                            } else {
-                                (text.endUs - padStartUs).coerceAtMost(padUs)
-                            },
+                            windowStartUs = text.startUs,
+                            windowEndUs = text.endUs,
                         )
                     }
                 )

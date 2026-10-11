@@ -5,8 +5,11 @@ import kotlinx.serialization.Serializable
 /**
  * A single clip on the (single-layer) timeline.
  *
- * The timeline is an ordered list of [Clip]s whose positions are the prefix sum
- * of their durations (ripple model: no gaps, no overlaps by construction).
+ * Timeline v3 — GAPS: each clip carries a [gapBeforeUs] hole in front of it,
+ * so positions are the prefix sum of (gapBeforeUs + durationUs). Deleting a
+ * middle clip leaves a black gap (classic NLE behavior) instead of rippling
+ * the tail closed. Old project JSON (schema v2, no gap field) deserializes
+ * with gapBeforeUs = 0 everywhere = the old compact layout.
  *
  * Source-side coordinates: [sourceInUs]/[sourceOutUs] address the source media
  * file directly; [durationUs] is the timeline duration after speed is applied.
@@ -15,6 +18,8 @@ import kotlinx.serialization.Serializable
 data class Clip(
     val id: String,
     val assetId: String,
+    /** Black hole in front of this clip on the timeline, microseconds. */
+    val gapBeforeUs: Long = 0L,
     /** Trim-in point in the source media, microseconds. */
     val sourceInUs: Long,
     /** Trim-out point in the source media, microseconds (exclusive). */

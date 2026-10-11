@@ -78,12 +78,15 @@ private const val BADGE_TEXT_DP = 8.5f
 /** Window in which two taps on the same text clip count as a double tap. */
 private const val TEXT_DOUBLE_TAP_MS = 400L
 
-/** One clip's screen layout. */
+/** One clip's screen layout. [gapLeft]/[gapWidth] describe the black hole in
+ *  front of the clip (v1.0.8 gaps), zero-width when the clip is tight. */
 private data class ClipLayout(
     val clip: Clip,
     val index: Int,
     val left: Float,
     val width: Float,
+    val gapLeft: Float = 0f,
+    val gapWidth: Float = 0f,
 )
 
 private data class TextLayout(
@@ -465,15 +468,20 @@ fun TimelineView(
         var acc = 0f
         val out = mutableListOf<ClipLayout>()
         snap.project.clips.forEachIndexed { index, clip ->
+            // The black hole in front of the clip (v1.0.8 gaps).
+            val gapWidth = clip.gapBeforeUs / 1_000_000f * pps
             val inUs = preview?.takeIf { it.clipId == clip.id }?.sourceInUs ?: clip.sourceInUs
             val outUs = preview?.takeIf { it.clipId == clip.id }?.sourceOutUs ?: clip.sourceOutUs
             val durUs = ((outUs - inUs) / clip.speed).toLong()
             val width = durUs / 1_000_000f * pps
-            out += ClipLayout(clip.copy(sourceInUs = inUs, sourceOutUs = outUs), index, acc, width)
-            acc += width
+            out += ClipLayout(
+                clip.copy(sourceInUs = inUs, sourceOutUs = outUs), index, acc + gapWidth, width,
+                gapLeft = acc, gapWidth = gapWidth,
+            )
+            acc += gapWidth + width
         }
         val scroll = clampedScroll()
-        return out.map { it.copy(left = it.left - scroll) }
+        return out.map { it.copy(left = it.left - scroll, gapLeft = it.gapLeft - scroll) }
     }
 
     // ------------------------------------------------------------------
@@ -622,6 +630,13 @@ fun TimelineView(
             val moved = dragState.value as? DragMode.ClipMove
             for (layout in clips) {
                 if (moved != null && layout.clip.id == moved.clipId) continue
+                drawGap(
+                    gapLeft = layout.gapLeft,
+                    gapWidth = layout.gapWidth,
+                    trackTop = g.trackTop,
+                    trackBottom = g.trackBottom,
+                    dp = dp,
+                )
                 drawClip(
                     layout = layout,
                     asset = snap.project.assetById(layout.clip.assetId),
@@ -885,6 +900,45 @@ private fun DrawScope.drawTrackBackground(g: GeometryHolder, hasTextLanes: Boole
             size = Size(g.viewportW, g.audioRegionBottom - g.audioRegionTop),
         )
     }
+}
+
+/**
+ * The black hole in front of a clip (v1.0.8 gaps): renders as a solid black
+ * slab with a dashed-ish border and a tiny "黑场" badge so it reads as an
+ * intentional black segment the user can lay text over. Invisible when the
+ * gap is (almost) zero-width.
+ */
+private fun DrawScope.drawGap(
+    gapLeft: Float,
+    gapWidth: Float,
+    trackTop: Float,
+    trackBottom: Float,
+    dp: Float,
+) {
+    if (gapWidth <= 1.5f * dp) return
+    val top = trackTop
+    val height = TRACK_HEIGHT_DP * dp - 4f * dp
+    val corner = CornerRadius(6f * dp)
+    drawRoundRect(
+        color = Color(0xFF000000),
+        topLeft = Offset(gapLeft, top),
+        size = Size(gapWidth, height),
+        cornerRadius = corner,
+    )
+    drawRoundRect(
+        color = Color(0xFF37474F),
+        topLeft = Offset(gapLeft, top),
+        size = Size(gapWidth, height),
+        cornerRadius = corner,
+        style = Stroke(width = 1.dp.toPx()),
+    )
+    // Center slash marks: three short diagonal strokes signaling "black".
+    val cx = gapLeft + gapWidth / 2f
+    val cy = top + height / 2f
+    val slash = 3.2f * dp
+    drawLine(Color(0xFF546E7A), Offset(cx - slash, cy + slash / 2), Offset(cx - slash / 2, cy - slash / 2), 1.5f * dp)
+    drawLine(Color(0xFF546E7A), Offset(cx, cy + slash / 2), Offset(cx + slash / 2, cy - slash / 2), 1.5f * dp)
+    drawLine(Color(0xFF546E7A), Offset(cx + slash, cy + slash / 2), Offset(cx + slash * 1.5f, cy - slash / 2), 1.5f * dp)
 }
 
 private fun DrawScope.drawClip(
