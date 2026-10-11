@@ -13,9 +13,21 @@ android {
         applicationId = "com.RooMCutNext"
         minSdk = 31
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 6
+        versionName = "1.0.5"
         vectorDrawables { useSupportLibrary = true }
+    }
+
+    signingConfigs {
+        // Stable key committed with the repo so every environment reset can
+        // still produce upgrade-compatible APKs (the original auto-generated
+        // debug keystore died with the machine that created it).
+        create("stable") {
+            storeFile = rootProject.file("keystore/release.keystore")
+            storePassword = "***REMOVED***"
+            keyAlias = "roocmcutnext"
+            keyPassword = "***REMOVED***"
+        }
     }
 
     buildTypes {
@@ -23,6 +35,10 @@ android {
             // V1 keeps minify off for maximum stability; enable later with proper keep rules.
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("stable")
+        }
+        debug {
+            signingConfig = signingConfigs.getByName("stable")
         }
     }
     compileOptions {

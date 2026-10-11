@@ -48,6 +48,7 @@ import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.core.ops.TimelineOps
 import com.RooMCutNext.core.util.TimeCode
 import com.RooMCutNext.ui.editor.EditorViewModel
+import com.RooMCutNext.ui.editor.PanelKind
 import com.RooMCutNext.ui.theme.AccentColor
 import com.RooMCutNext.ui.theme.ClipBgColor
 import com.RooMCutNext.ui.theme.ClipBorderColor
@@ -239,7 +240,9 @@ fun TimelineView(
         }
         if (y <= g.rulerBottom) return DragMode.Scrub
         if (y in g.trackTop..g.trackBottom) {
-            if (!g.hasClips) return DragMode.TapGallery
+            // Empty video track (text/audio-only project) behaves like blank
+            // space: tap deselects, press-and-drag scrubs.
+            if (!g.hasClips) return DragMode.Scrub
             val selected = snapshot?.selectedClipId
             if (selected != null) {
                 val sel = g.clips.firstOrNull { it.clip.id == selected }
@@ -410,11 +413,21 @@ fun TimelineView(
         when (mode) {
             is DragMode.TapGallery -> currentOnAddMedia()
             is DragMode.TapFiles -> currentOnFiles()
-            is DragMode.Scrub -> v.seekTo(xToTimeUs(x))
+            // Blank space (ruler, empty track areas): drop the selection.
+            // Scrolling/scrubbing only happens via press-and-drag.
+            is DragMode.Scrub -> v.clearSelection()
             is DragMode.Trim -> v.selectClip(mode.clipId)
             is DragMode.ClipMove -> v.selectClip(mode.clipId)
-            is DragMode.TextMove -> v.selectText(mode.textId)
-            is DragMode.TextTrim -> v.selectText(mode.textId)
+            // Tapping a text clip opens its editing sheet (content, color,
+            // size, position, ...) so texts stay modifiable after creation.
+            is DragMode.TextMove -> {
+                v.selectText(mode.textId)
+                v.openPanel(PanelKind.TEXT)
+            }
+            is DragMode.TextTrim -> {
+                v.selectText(mode.textId)
+                v.openPanel(PanelKind.TEXT)
+            }
             is DragMode.AudioMove -> v.selectAudio(mode.audioId)
             is DragMode.AudioTrim -> v.selectAudio(mode.audioId)
             is DragMode.Pinch -> Unit
@@ -548,16 +561,32 @@ fun TimelineView(
             val audioLanes = TimelineOps.laneIndexes(snap.project.audios.map { it.startUs to it.endUs })
             val audioLaneCount = (audioLanes.maxOrNull() ?: -1) + 1
 
+            // LibreCut-style stack: text lanes ABOVE the video track, audio
+            // lanes below it. Regions are disjoint; zero-height when unused.
             g.rulerBottom = RULER_HEIGHT_DP * dp
-            g.trackTop = g.rulerBottom + TRACK_GAP_DP * dp
-            g.trackBottom = g.trackTop + TRACK_HEIGHT_DP * dp
             g.textLaneStride = TEXT_LANE_HEIGHT_DP * dp
             g.audioLaneStride = AUDIO_LANE_HEIGHT_DP * dp
-            g.textRegionTop = g.trackBottom + TRACK_GAP_DP * dp
-            g.textRegionBottom = g.textRegionTop + textLaneCount * g.textLaneStride
-            g.audioRegionTop = g.textRegionBottom + TRACK_GAP_DP * dp
-            g.audioRegionBottom = g.audioRegionTop + audioLaneCount * g.audioLaneStride
-            g.playheadBottom = max(g.trackBottom, max(g.textRegionBottom, g.audioRegionBottom))
+            var yCursor = g.rulerBottom
+            if (textLaneCount > 0) {
+                g.textRegionTop = yCursor + TRACK_GAP_DP * dp
+                g.textRegionBottom = g.textRegionTop + textLaneCount * g.textLaneStride
+                yCursor = g.textRegionBottom
+            } else {
+                g.textRegionTop = 0f
+                g.textRegionBottom = 0f
+            }
+            g.trackTop = yCursor + TRACK_GAP_DP * dp
+            g.trackBottom = g.trackTop + TRACK_HEIGHT_DP * dp
+            yCursor = g.trackBottom
+            if (audioLaneCount > 0) {
+                g.audioRegionTop = yCursor + TRACK_GAP_DP * dp
+                g.audioRegionBottom = g.audioRegionTop + audioLaneCount * g.audioLaneStride
+                yCursor = g.audioRegionBottom
+            } else {
+                g.audioRegionTop = 0f
+                g.audioRegionBottom = 0f
+            }
+            g.playheadBottom = yCursor
 
             val clips = displayClips(snap)
             g.clips = clips

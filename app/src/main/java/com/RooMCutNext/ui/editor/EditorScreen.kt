@@ -425,13 +425,13 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                TimeCode.formatClock(state.playheadUs),
-                style = MaterialTheme.typography.titleLarge,
+                TimeCode.formatClockFrames(state.playheadUs, state.project.fps),
+                style = MaterialTheme.typography.titleMedium,
                 color = AccentColor,
             )
             Text(
-                " / ${TimeCode.formatClock(state.totalDurationUs)}",
-                style = MaterialTheme.typography.titleLarge,
+                " / ${TimeCode.formatClockFrames(state.totalDurationUs, state.project.fps)}",
+                style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.weight(1f))

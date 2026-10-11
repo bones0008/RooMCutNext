@@ -396,7 +396,25 @@ class EditorViewModel(
         _state.update { it.copy(selectedAudioId = id, selectedClipId = null, selectedTextId = null) }
     }
 
+    /** Tap on empty timeline space: drop every selection. */
+    fun clearSelection() {
+        if (_state.value.hasSelection) {
+            _state.update { it.copy(selectedClipId = null, selectedTextId = null, selectedAudioId = null) }
+        }
+    }
+
     fun openPanel(panel: PanelKind?) {
+        // Reopening the export sheet must never show a stale finished result
+        // from an earlier run: only a live RUNNING export is kept, everything
+        // else (COMPLETED / FAILED / CANCELLED) is cleared so the "start
+        // export" action is available again after timeline edits.
+        if (panel == PanelKind.EXPORT) {
+            val es = _state.value.exportState
+            if (es != null && es.phase != ExportBus.Phase.RUNNING) {
+                ExportBus.clear()
+                _state.update { it.copy(exportState = null) }
+            }
+        }
         _state.update { it.copy(activePanel = panel) }
     }
 

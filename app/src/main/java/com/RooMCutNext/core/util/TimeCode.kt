@@ -37,10 +37,10 @@ object TimeCode {
     }
 
     /** Frame index of [us] on the grid (the frame whose window contains [us]). */
-    fun frameIndex(us: Long, fps: Int): Long = us / frameDurationUs(fps)
+    fun frameIndex(us: Long, fps: Int): Long = (us.coerceAtLeast(0L) * fps) / 1_000_000L
 
-    /** Total number of frames covered by [us] on the grid. */
-    fun frameCount(us: Long, fps: Int): Long = (us + frameDurationUs(fps) - 1) / frameDurationUs(fps)
+    /** Total number of frames covered by [us] on the grid (ceiling). */
+    fun frameCount(us: Long, fps: Int): Long = (us.coerceAtLeast(0L) * fps + 999_999L) / 1_000_000L
 
     /** "M:SS" or "H:MM:SS" compact label for clip badges. */
     fun formatShort(us: Long): String {
@@ -85,12 +85,32 @@ object TimeCode {
         else "%02d:%02d.%03d".format(m, s, ms)
     }
 
+    /**
+     * "MM:SS:FF" (or "H:MM:SS:FF" past the hour) — the transport clock with
+     * the frame number, e.g. `00:04:12` on a 30fps project reads as 4 seconds
+     * and 12 frames. The frame field follows the project fps automatically
+     * (00-23 on a 24fps project, 00-29 on 30fps, 00-59 on 60fps, ...).
+     */
+    fun formatClockFrames(us: Long, fps: Int): String {
+        val safeFps = fps.coerceAtLeast(1)
+        // Multiply before dividing once: truncating 1e6/fps to an integer
+        // frame duration would drift a visible amount at hour-scale us.
+        val frames = us.coerceAtLeast(0L) * safeFps / 1_000_000L
+        val frameInSec = frames % safeFps
+        val totalSec = frames / safeFps
+        val h = totalSec / 3600
+        val m = (totalSec % 3600) / 60
+        val s = totalSec % 60
+        return if (h > 0) "%d:%02d:%02d:%02d".format(h, m, s, frameInSec)
+        else "%02d:%02d:%02d".format(m, s, frameInSec)
+    }
+
     /** "HH:MM:SS:FF" SMPTE-like timecode including the frame number. */
     fun formatTimecodeFrames(us: Long, fps: Int): String {
-        val fd = frameDurationUs(fps)
-        val frames = us / fd
-        val frameInSec = frames % fps
-        val totalSec = frames / fps
+        val safeFps = fps.coerceAtLeast(1)
+        val frames = us.coerceAtLeast(0L) * safeFps / 1_000_000L
+        val frameInSec = frames % safeFps
+        val totalSec = frames / safeFps
         val h = totalSec / 3600
         val m = (totalSec % 3600) / 60
         val s = totalSec % 60

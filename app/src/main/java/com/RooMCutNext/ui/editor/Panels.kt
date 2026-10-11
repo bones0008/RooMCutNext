@@ -50,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.RooMCutNext.R
 import com.RooMCutNext.core.model.CropSpec
+import com.RooMCutNext.core.model.snapProjectFps
 import com.RooMCutNext.core.util.FileSize
 import com.RooMCutNext.core.util.TimeCode
 import com.RooMCutNext.export.ExportBus
@@ -523,10 +524,13 @@ fun InfoSheet(vm: EditorViewModel, state: EditorUiState, onReplace: () -> Unit =
                 if (asset.fps > 0f) "${"%.2f".format(asset.fps)} FPS (${stringResource(R.string.panel_info_speed_fmt, "1x")} → ${state.project.fps}FPS)"
                 else "${state.project.fps} FPS"
             )
-            InfoRow(stringResource(R.string.panel_info_duration), TimeCode.formatPrecise(asset.durationUs))
+            // Frame timecode (no milliseconds); source-side values use the
+            // asset's own snapped grid, timeline values the project grid.
+            val srcFps = if (asset.fps > 0f) snapProjectFps(asset.fps) else state.project.fps
+            InfoRow(stringResource(R.string.panel_info_duration), TimeCode.formatTimecodeFrames(asset.durationUs, srcFps))
             InfoRow(
                 stringResource(R.string.panel_info_used),
-                "${TimeCode.formatPrecise(clip.sourceInUs)} → ${TimeCode.formatPrecise(clip.sourceOutUs)}",
+                "${TimeCode.formatTimecodeFrames(clip.sourceInUs, srcFps)} → ${TimeCode.formatTimecodeFrames(clip.sourceOutUs, srcFps)}",
             )
             InfoRow(stringResource(R.string.panel_info_speed), stringResource(R.string.panel_info_speed_fmt, speedLabel(clip.speed)))
             InfoRow(stringResource(R.string.panel_info_codec), asset.videoCodec ?: "-")
@@ -535,7 +539,7 @@ fun InfoSheet(vm: EditorViewModel, state: EditorUiState, onReplace: () -> Unit =
                 if (asset.hasAudio) (asset.audioCodec ?: "AAC") else stringResource(R.string.clip_badge_muted),
             )
         } else {
-            InfoRow(stringResource(R.string.panel_info_duration), TimeCode.formatShort(clip.durationUs))
+            InfoRow(stringResource(R.string.panel_info_duration), TimeCode.formatTimecodeFrames(clip.durationUs, state.project.fps))
         }
         InfoRow(stringResource(R.string.panel_info_size), FileSize.format(asset.fileBytes))
         if (clip.assetId in state.missingAssetIds) {
