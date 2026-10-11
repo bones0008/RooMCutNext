@@ -33,6 +33,8 @@ data class MediaAsset(
     val audioCodec: String? = null,
     val fileBytes: Long = 0L,
     val addedAtMs: Long = 0L,
+    /** MediaFormat COLOR_TRANSFER_* of the source video (6=ST2084 HDR10, 7=HLG); 0 = unknown/SDR. */
+    val colorTransfer: Int = 0,
 ) {
     val isImage: Boolean get() = type == MediaType.IMAGE
     val isAudio: Boolean get() = type == MediaType.AUDIO

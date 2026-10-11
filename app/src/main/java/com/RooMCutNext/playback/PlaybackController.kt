@@ -48,6 +48,14 @@ class PlaybackController(
     /** Fired once, right before the automatic compatibility-mode retry. */
     var onDegraded: (() -> Unit)? = null
 
+    /** Diagnostic event stream for the on-screen DIAG overlay (v1.0.6-diag). */
+    var onDiag: ((String) -> Unit)? = null
+
+    private fun diag(line: String) {
+        Log.i(TAG, "DIAG $line")
+        onDiag?.invoke(line)
+    }
+
     private var pollJob: Job? = null
     private var lastSyncedClipsHash: Int = 0
     private var lastSyncedTextsHash: Int = 0
@@ -70,17 +78,36 @@ class PlaybackController(
     private var lastMediaDir: File? = null
     private var lastPositionUs: Long = 0L
 
+    /** Frames that reached the output surface (from onRenderedFirstFrame). */
+    private var firstFrameCount = 0
+
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            diag("playing=$isPlaying")
             onIsPlaying?.invoke(isPlaying)
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
+            diag("state=${stateName(playbackState)}")
             if (playbackState == Player.STATE_ENDED) onEnded?.invoke()
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            diag("pwr=$playWhenReady")
+        }
+
+        override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+            diag("video=${videoSize.width}x${videoSize.height}")
+        }
+
+        override fun onRenderedFirstFrame() {
+            firstFrameCount++
+            diag("FIRSTFRAME #$firstFrameCount ✓")
         }
 
         override fun onPlayerError(error: PlaybackException) {
             Log.e(TAG, "CompositionPlayer playback error", error)
+            diag("ERR ${error.errorCodeName}")
             val detail = describeError(error)
             if (!degraded && lastProject != null && lastMediaDir != null) {
                 degradeAndRetry()
@@ -90,12 +117,22 @@ class PlaybackController(
         }
     }
 
+    private fun stateName(state: Int): String = when (state) {
+        Player.STATE_IDLE -> "IDLE"
+        Player.STATE_BUFFERING -> "BUFFERING"
+        Player.STATE_READY -> "READY"
+        Player.STATE_ENDED -> "ENDED"
+        else -> "UNKNOWN($state)"
+    }
+
     fun ensurePlayer(): CompositionPlayer {
         if (player != null) return player!!
         val p = CompositionPlayer.Builder(context).build()
         p.addListener(listener)
         p.volume = 1f
         player = p
+        firstFrameCount = 0
+        diag("player created")
         startPolling()
         return p
     }
@@ -126,6 +163,7 @@ class PlaybackController(
             // CompositionPlayer (see CompositionBuilder class doc).
             CompositionBuilder.build(project, mediaDir, stripEffects = degraded, forPreview = true)
         } catch (e: Exception) {
+            diag("build FAIL: ${e.message?.take(80) ?: e.javaClass.simpleName}")
             onError?.invoke(e.message ?: "composition build failed")
             return
         }
@@ -133,11 +171,15 @@ class PlaybackController(
         val wasPlaying = p.isPlaying
         val totalUs = project.totalDurationUs
         val seekUs = preservePositionUs.coerceIn(0L, if (totalUs > 0) totalUs else 0L)
+        val seqCount = buildResult.composition.sequences.size
+        val itemCount = buildResult.composition.sequences.sumOf { it.editedMediaItems.size }
+        diag("setComp: ${seqCount}seq/${itemCount}item dur=${totalUs / 1000}ms seek=${seekUs / 1000}ms")
         try {
             p.setComposition(buildResult.composition)
             p.prepare()
             if (seekUs > 0) p.seekTo(seekUs / 1000L)
             if (wasPlaying) p.play() else p.pause()
+            diag("prepare OK")
         } catch (e: Exception) {
             Log.e(TAG, "setComposition/prepare failed", e)
             // Media3 throws several message-less checkState/checkArgument
@@ -164,6 +206,7 @@ class PlaybackController(
     /** One-shot automatic fallback: rebuild without per-clip effects. */
     private fun degradeAndRetry() {
         degraded = true
+        diag("DEGRADED retry (effects stripped)")
         onDegraded?.invoke()
         val project = lastProject ?: return
         val mediaDir = lastMediaDir ?: return

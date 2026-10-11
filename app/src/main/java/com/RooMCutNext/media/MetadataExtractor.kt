@@ -147,6 +147,7 @@ object MetadataExtractor {
             var videoCodec: String? = null
             var audioCodec: String? = null
             var audioTrackFound = false
+            var colorTransfer = 0
             try {
                 val extractor = MediaExtractor()
                 extractor.setDataSource(file.absolutePath)
@@ -156,6 +157,9 @@ object MetadataExtractor {
                     if (mime.startsWith("video/")) {
                         videoCodec = prettifyVideoMime(mime)
                         fps = fmt.frameRate()
+                        if (fmt.containsKey(MediaFormat.KEY_COLOR_TRANSFER)) {
+                            colorTransfer = fmt.getInteger(MediaFormat.KEY_COLOR_TRANSFER)
+                        }
                     } else if (mime.startsWith("audio/")) {
                         audioCodec = prettifyAudioMime(mime)
                         audioTrackFound = true
@@ -185,6 +189,7 @@ object MetadataExtractor {
                 audioCodec = audioCodec,
                 fileBytes = file.length(),
                 addedAtMs = System.currentTimeMillis(),
+                colorTransfer = colorTransfer,
             )
         } finally {
             runCatching { mmr.release() }

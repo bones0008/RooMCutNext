@@ -69,6 +69,8 @@ data class EditorUiState(
     val audioTrimPreview: AudioTrimPreview? = null,
     val missingAssetIds: Set<String> = emptySet(),
     val exportState: ExportBus.ExportState? = null,
+    /** On-screen diagnostic log for the v1.0.6-diag build (last lines shown). */
+    val diagLog: List<String> = emptyList(),
 ) {
     val totalDurationUs: Long get() = project.totalDurationUs
     val selectedClip: Clip? get() = selectedClipId?.let { project.clipById(it) }
@@ -160,6 +162,7 @@ class EditorViewModel(
             playback.pause()
         }
         playback.onError = { msg -> _state.update { it.copy(playbackError = msg) } }
+        playback.onDiag = { line -> appendDiag(line) }
         playback.onDegraded = {
             _state.update {
                 it.copy(
@@ -239,6 +242,22 @@ class EditorViewModel(
         }
     }
 
+    /** Append a diagnostic line to the on-screen log (kept to last 9 lines). */
+    private fun appendDiag(line: String) {
+        _state.update { it.copy(diagLog = (it.diagLog + line).takeLast(9)) }
+    }
+
+    /** Called from the preview AndroidView update: reports the PlayerView pixel size. */
+    fun reportPreviewViewSize(w: Int, h: Int) {
+        val line = "view=${w}x${h}"
+        if (_state.value.diagLog.lastOrNull() != line && lastReportedViewSize != line) {
+            lastReportedViewSize = line
+            appendDiag(line)
+        }
+    }
+
+    private var lastReportedViewSize: String? = null
+
     private fun refreshPlayback(force: Boolean = false) {
         val project = _state.value.project
         playback.currentProjectRef = project
@@ -276,6 +295,13 @@ class EditorViewModel(
             _state.update { it.copy(importing = null) }
 
             if (outcome.assets.isNotEmpty()) {
+                // Diagnostics: one line per imported asset (resolution/fps/HDR marker).
+                outcome.assets.forEach { a ->
+                    val hdr = if (a.colorTransfer == 6 || a.colorTransfer == 7) " HDR(ct=${a.colorTransfer})" else ""
+                    appendDiag(
+                        "asset ${a.type.name.lowercase()} ${a.width}x${a.height}@${if (a.fps > 0f) "${a.fps.toInt()}fps" else "-"}$hdr"
+                    )
+                }
                 mutate("导入素材") { p ->
                     var np = p.copy(assets = p.assets + outcome.assets)
                     val visuals = outcome.assets.filter { !it.isAudio }

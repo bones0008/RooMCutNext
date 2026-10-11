@@ -72,6 +72,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -236,9 +237,33 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                         setShutterBackgroundColor(android.graphics.Color.BLACK)
                     }
                 },
-                update = { view -> view.player = vm.playback.player },
+                update = { view ->
+                    view.player = vm.playback.player
+                    vm.reportPreviewViewSize(view.width, view.height)
+                },
                 modifier = Modifier.fillMaxSize(),
             )
+
+            // ---- DIAG overlay (v1.0.6-diag): player lifecycle events on screen ----
+            if (state.diagLog.isNotEmpty()) {
+                Column(
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .padding(4.dp)
+                        .background(Color(0xB2000000), MaterialTheme.shapes.small)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    state.diagLog.forEach { line ->
+                        Text(
+                            line,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = Color(0xFF69F0AE),
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
 
             state.importing?.let { imp ->
                 Surface(
