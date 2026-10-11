@@ -24,8 +24,11 @@ object MetadataExtractor {
 
     fun extract(file: File): MediaAsset? = try {
         val name = file.name
-        val isImage = isImageName(name)
-        if (isImage) extractImage(file) else extractVideo(file)
+        when {
+            isImageName(name) -> extractImage(file)
+            isAudioName(name) -> extractAudio(file)
+            else -> extractVideo(file)
+        }
     } catch (e: Exception) {
         null
     }
@@ -34,6 +37,14 @@ object MetadataExtractor {
         val lower = name.lowercase()
         return listOf(".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp", ".gif")
             .any { lower.endsWith(it) }
+    }
+
+    private fun isAudioName(name: String): Boolean {
+        val lower = name.lowercase()
+        return listOf(
+            ".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".oga", ".opus",
+            ".amr", ".aiff", ".aif", ".wma", ".mid", ".mka", ".3ga", ".awb",
+        ).any { lower.endsWith(it) }
     }
 
     private fun extractImage(file: File): MediaAsset? {
@@ -50,6 +61,61 @@ object MetadataExtractor {
             height = bounds.outHeight,
             fps = 0f,
             hasAudio = false,
+            fileBytes = file.length(),
+            addedAtMs = System.currentTimeMillis(),
+        )
+    }
+
+    /**
+     * Audio-only file: duration and codec come from MediaExtractor (MMR is
+     * unreliable for exotic containers like FLAC/OGG/Opus).
+     */
+    private fun extractAudio(file: File): MediaAsset? {
+        var durationUs = 0L
+        var audioCodec: String? = null
+        try {
+            val extractor = MediaExtractor()
+            extractor.setDataSource(file.absolutePath)
+            for (i in 0 until extractor.trackCount) {
+                val fmt = extractor.getTrackFormat(i)
+                val mime = fmt.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) {
+                    audioCodec = prettifyAudioMime(mime)
+                    if (fmt.containsKey(MediaFormat.KEY_DURATION)) {
+                        durationUs = maxOf(durationUs, fmt.getLong(MediaFormat.KEY_DURATION))
+                    }
+                }
+            }
+            extractor.release()
+        } catch (e: Exception) {
+            // fall through to MMR below
+        }
+        if (durationUs <= 0L) {
+            try {
+                val mmr = MediaMetadataRetriever()
+                try {
+                    mmr.setDataSource(file.absolutePath)
+                    durationUs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        ?.toLongOrNull()?.times(1000L) ?: 0L
+                } finally {
+                    runCatching { mmr.release() }
+                }
+            } catch (e: Exception) {
+                // leave at 0
+            }
+        }
+        if (durationUs <= 0L) return null
+        return MediaAsset(
+            id = IdGen.new("ast"),
+            fileName = file.name,
+            displayName = file.name,
+            type = MediaType.AUDIO,
+            durationUs = durationUs,
+            width = 0,
+            height = 0,
+            fps = 0f,
+            hasAudio = true,
+            audioCodec = audioCodec,
             fileBytes = file.length(),
             addedAtMs = System.currentTimeMillis(),
         )

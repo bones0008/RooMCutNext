@@ -51,6 +51,7 @@ class PlaybackController(
     private var pollJob: Job? = null
     private var lastSyncedClipsHash: Int = 0
     private var lastSyncedTextsHash: Int = 0
+    private var lastSyncedAudiosHash: Int = 0
 
     /** True while the user drags the playhead: Media3 scrubbing mode on. */
     @Volatile
@@ -112,15 +113,18 @@ class PlaybackController(
         lastPositionUs = preservePositionUs
         val clipsHash = project.clips.hashCode()
         val textsHash = project.texts.hashCode()
-        if (!force && clipsHash == lastSyncedClipsHash && textsHash == lastSyncedTextsHash) {
-            applyPerClipPreviewVolume(project, preservePositionUs)
+        val audiosHash = project.audios.hashCode()
+        if (!force && clipsHash == lastSyncedClipsHash && textsHash == lastSyncedTextsHash && audiosHash == lastSyncedAudiosHash) {
             return
         }
         lastSyncedClipsHash = clipsHash
         lastSyncedTextsHash = textsHash
+        lastSyncedAudiosHash = audiosHash
 
         val buildResult = try {
-            CompositionBuilder.build(project, mediaDir, stripEffects = degraded)
+            // forPreview=true: GL effects receive GLOBAL timeline timestamps in
+            // CompositionPlayer (see CompositionBuilder class doc).
+            CompositionBuilder.build(project, mediaDir, stripEffects = degraded, forPreview = true)
         } catch (e: Exception) {
             onError?.invoke(e.message ?: "composition build failed")
             return
@@ -134,7 +138,6 @@ class PlaybackController(
             p.prepare()
             if (seekUs > 0) p.seekTo(seekUs / 1000L)
             if (wasPlaying) p.play() else p.pause()
-            applyPerClipPreviewVolume(project, seekUs)
         } catch (e: Exception) {
             Log.e(TAG, "setComposition/prepare failed", e)
             // Media3 throws several message-less checkState/checkArgument
@@ -153,6 +156,7 @@ class PlaybackController(
         // Nothing to play; keep the player idle.
         lastSyncedClipsHash = 0
         lastSyncedTextsHash = 0
+        lastSyncedAudiosHash = 0
         lastProject = null
         lastMediaDir = null
     }
@@ -199,12 +203,6 @@ class PlaybackController(
                     if (p.isPlaying) {
                         onPositionUs?.invoke(posMs * 1000L)
                     }
-                    // Per-clip preview volume (incl. fades) driven from the timeline
-                    // so it stays live even without rebuilding the composition.
-                    val project = currentProjectRef
-                    if (project != null && !scrubbing) {
-                        applyPerClipPreviewVolume(project, posMs * 1000L)
-                    }
                 } catch (e: Exception) {
                     // player released concurrently; exit quietly
                 }
@@ -213,44 +211,15 @@ class PlaybackController(
         }
     }
 
-    /** Set by the ViewModel right before refresh(); used by the volume poll. */
+    // Per-clip volume / fades / mute are applied inside the composition via
+    // GainAudioProcessor and setRemoveAudio (both honored by the preview audio
+    // graph — verified in AudioGraphInput). The former player.volume polling
+    // hack was removed: it zeroed ALL audio on muted video clips, which would
+    // now also kill independent background audio clips.
+
+    /** Set by the ViewModel right before refresh(); kept for error retries. */
     @Volatile
     var currentProjectRef: Project? = null
-
-    private fun applyPerClipPreviewVolume(project: Project, timelineUs: Long) {
-        val p = player ?: return
-        val idx = TimelineOps.clipIndexAt(project.clips, timelineUs)
-        if (idx == -1) {
-            p.volume = 1f
-            return
-        }
-        val clip = project.clips[idx]
-        val asset = project.assetById(clip.assetId)
-        // Only a deliberate mute forces silence. A missing/"no audio" asset flag
-        // must NOT zero the volume: the hasAudio metadata is device-dependent
-        // (OEMs return "yes"/"true"/"1") and a false negative silently killed
-        // ALL preview audio in v1.0.0-v1.0.2. With no real audio track the
-        // volume setting is simply a no-op.
-        if (clip.muted) {
-            p.volume = 0f
-            return
-        }
-        var vol = clip.volume
-        // Fade curves only make sense when the clip actually spans this time.
-        val assetRef = asset
-        if (assetRef != null) {
-            val start = TimelineOps.starts(project.clips)[idx]
-            val local = timelineUs - start
-            val fadeInUs = clip.fadeInMs * 1000L
-            val fadeOutUs = clip.fadeOutMs * 1000L
-            if (fadeInUs > 0 && local < fadeInUs) vol *= local.toFloat() / fadeInUs
-            if (fadeOutUs > 0) {
-                val fadeStart = clip.durationUs - fadeOutUs
-                if (local > fadeStart) vol *= ((clip.durationUs - local).toFloat() / fadeOutUs).coerceIn(0f, 1f)
-            }
-        }
-        p.volume = vol.coerceIn(0f, 2f)
-    }
 
     // ---------------------------------------------------------------
     // Transport
@@ -331,7 +300,11 @@ class PlaybackController(
 
     fun stepFrame(project: Project, timelineUs: Long, forward: Boolean): Long {
         val assetLookup: (String) -> com.RooMCutNext.core.model.MediaAsset? = { id -> project.assetById(id) }
-        val target = TimelineOps.stepFrame(project.clips, assetLookup, timelineUs, forward)
+        val target = TimelineOps.stepFrame(
+            project.clips, assetLookup, timelineUs, forward,
+            totalDurationUs = project.totalDurationUs,
+            frameDurationUs = project.frameDurationUs,
+        )
         seekTo(target)
         return target
     }

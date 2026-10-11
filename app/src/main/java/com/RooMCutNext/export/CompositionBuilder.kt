@@ -17,6 +17,7 @@ import androidx.media3.transformer.Effects
 import androidx.media3.transformer.Composition
 import androidx.media3.common.SpeedParameters
 import androidx.media3.common.audio.SpeedProvider
+import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.Project
@@ -26,11 +27,26 @@ import com.RooMCutNext.export.effects.TimedTextOverlay
 import java.io.File
 
 /**
- * Builds the single Media3 [Composition] that describes the whole timeline.
+ * Builds the Media3 [Composition] that describes the whole timeline.
  *
  * The SAME builder output feeds both the preview player (CompositionPlayer)
  * and the exporter (Transformer) — one source of truth, so the preview is
  * exactly what gets exported (WYSIWYG by construction).
+ *
+ *  ⚠ Coordinate bases differ between the two consumers (verified against
+ * Media3 1.11.1 bytecode) and [forPreview] selects the right one:
+ *
+ *  - PREVIEW (CompositionPlayer): PlaybackVideoGraphWrapper$InputVideoSink adds
+ *    each item's window offset (period.positionInWindowUs via
+ *    MediaCodecVideoRenderer.getBufferTimestampAdjustmentUs) to every frame, so
+ *    GL effects receive GLOBAL sequence (= app timeline) timestamps.
+ *
+ *  - EXPORT (Transformer): SequenceAssetLoader queues each item's samples with
+ *    their ITEM-LOCAL timestamps (globalTimestampUs is only used for looping
+ *    bounds), so effects receive timestamps relative to the item start.
+ *
+ *  Timed text overlay windows are therefore computed in global coordinates for
+ *  preview and in item-local coordinates for export.
  *
  * Effects chain per clip (order matters):
  *   rotate/flip -> crop -> color adjust -> text overlays
@@ -40,6 +56,12 @@ object CompositionBuilder {
     class BuildException(message: String) : IllegalStateException(message)
 
     data class BuildResult(val composition: Composition, val skippedClipIds: List<String>)
+
+    /** Max overlays per OverlayEffect (shader sampler limit is 15; stay safe). */
+    private const val MAX_OVERLAYS_PER_EFFECT = 12
+
+    /** Gaps below this are treated as adjacent (no silence padding item). */
+    private const val MIN_GAP_US = 20_000L
 
     /** Constant-speed provider for per-clip speed (pitch preserved). */
     private class ConstantSpeedProvider(private val speed: Float) : SpeedProvider {
@@ -53,11 +75,13 @@ object CompositionBuilder {
         mediaDir: File,
         exportHeight: Int? = null,
         stripEffects: Boolean = false,
+        forPreview: Boolean = false,
     ): BuildResult {
         val starts = TimelineOps.starts(project.clips)
         val skipped = mutableListOf<String>()
         val items = mutableListOf<EditedMediaItem>()
 
+        // ---- primary (video) sequence ----
         project.clips.forEachIndexed { index, clip ->
             val asset = project.assetById(clip.assetId)
             val file = asset?.let { File(mediaDir, it.fileName) }
@@ -65,15 +89,36 @@ object CompositionBuilder {
                 skipped += clip.id
                 return@forEachIndexed
             }
-            items += buildItem(project, clip, asset, file, starts[index], stripEffects)
+            items += buildItem(project, clip, asset, file, starts[index], stripEffects, forPreview)
+        }
+
+        // Video track duration; the composition must be as long as the longest
+        // layer (texts / audios are independent layers now) — pad with a black
+        // background item so text and audio tails have frames to attach to.
+        val clipsDurationUs = project.clipsDurationUs
+        val totalDurationUs = project.totalDurationUs
+        var videoSequenceEndUs = clipsDurationUs
+        if (totalDurationUs > clipsDurationUs + MIN_GAP_US) {
+            val padUs = totalDurationUs - clipsDurationUs
+            items += buildBlackPadItem(project, mediaDir, clipsDurationUs, padUs, stripEffects, forPreview)
+            videoSequenceEndUs = clipsDurationUs + padUs
         }
 
         if (items.isEmpty()) {
             throw BuildException("No playable clips (media files missing?)")
         }
 
-        val sequence = EditedMediaItemSequence.Builder(items).build()
-        val builder = Composition.Builder(sequence)
+        val sequences = mutableListOf<EditedMediaItemSequence>()
+        sequences += EditedMediaItemSequence.Builder(items).build()
+
+        // ---- audio sequences (one per non-overlapping lane) ----
+        if (!stripEffects || project.audios.isNotEmpty()) {
+            TimelineOps.audioLanes(project.audios).forEach { lane ->
+                buildAudioSequence(project, mediaDir, lane)?.let { sequences += it }
+            }
+        }
+
+        val builder = Composition.Builder(sequences)
         // HDR footage (HLG/HDR10, the default on modern phone cameras) must be
         // tone-mapped to SDR in the GL pipeline: the library default
         // HDR_MODE_KEEP_HDR crashes at first prepare on devices whose GL stack
@@ -92,6 +137,10 @@ object CompositionBuilder {
         return BuildResult(builder.build(), skipped)
     }
 
+    // ------------------------------------------------------------------
+    // Video items
+    // ------------------------------------------------------------------
+
     private fun buildItem(
         project: Project,
         clip: Clip,
@@ -99,6 +148,7 @@ object CompositionBuilder {
         file: File,
         clipStartUs: Long,
         stripEffects: Boolean,
+        forPreview: Boolean,
     ): EditedMediaItem {
         val uri = Uri.fromFile(file)
 
@@ -139,15 +189,27 @@ object CompositionBuilder {
             }
 
             // ---- text overlays whose window overlaps this clip ----
+            // Windows use GLOBAL coordinates in preview and ITEM-LOCAL
+            // coordinates on export (see class doc for the Media3 asymmetry).
             val clipEndUs = clipStartUs + clip.durationUs
-            val overlapping = project.texts.filter { it.startUs < clipEndUs && it.endUs > clipStartUs }
-            if (overlapping.isNotEmpty()) {
+            val overlapping = project.texts
+                .filter { it.startUs < clipEndUs && it.endUs > clipStartUs }
+                .sortedBy { it.startUs }
+            overlapping.chunked(MAX_OVERLAYS_PER_EFFECT).forEach { chunk ->
                 videoEffects += OverlayEffect(
-                    overlapping.map { text ->
+                    chunk.map { text ->
                         TimedTextOverlay(
                             item = text,
-                            windowStartUs = (text.startUs - clipStartUs).coerceAtLeast(0L),
-                            windowEndUs = (text.endUs - clipStartUs).coerceAtMost(clip.durationUs),
+                            windowStartUs = if (forPreview) {
+                                text.startUs
+                            } else {
+                                (text.startUs - clipStartUs).coerceAtLeast(0L)
+                            },
+                            windowEndUs = if (forPreview) {
+                                text.endUs
+                            } else {
+                                (text.endUs - clipStartUs).coerceAtMost(clip.durationUs)
+                            },
                         )
                     }
                 )
@@ -189,5 +251,124 @@ object CompositionBuilder {
             if (clip.muted) builder.setRemoveAudio(true)
         }
         return builder.build()
+    }
+
+    /**
+     * Black background item covering [padUs] starting at [padStartUs] on the
+     * timeline. Text overlays overlapping this window are attached here so
+     * text beyond the last video clip (or on an empty timeline) still renders.
+     */
+    private fun buildBlackPadItem(
+        project: Project,
+        mediaDir: File,
+        padStartUs: Long,
+        padUs: Long,
+        stripEffects: Boolean,
+        forPreview: Boolean,
+    ): EditedMediaItem {
+        val black = GeneratedMedia.blackPng(mediaDir, project.width, project.height)
+        val mediaItem = MediaItem.Builder()
+            .setUri(Uri.fromFile(black))
+            .setImageDurationMs((padUs / 1000L).coerceAtLeast(1L))
+            .build()
+
+        val videoEffects = mutableListOf<Effect>()
+        if (!stripEffects) {
+            val padEndUs = padStartUs + padUs
+            val overlapping = project.texts
+                .filter { it.startUs < padEndUs && it.endUs > padStartUs }
+                .sortedBy { it.startUs }
+            overlapping.chunked(MAX_OVERLAYS_PER_EFFECT).forEach { chunk ->
+                videoEffects += OverlayEffect(
+                    chunk.map { text ->
+                        TimedTextOverlay(
+                            item = text,
+                            windowStartUs = if (forPreview) {
+                                text.startUs
+                            } else {
+                                (text.startUs - padStartUs).coerceAtLeast(0L)
+                            },
+                            windowEndUs = if (forPreview) {
+                                text.endUs
+                            } else {
+                                (text.endUs - padStartUs).coerceAtMost(padUs)
+                            },
+                        )
+                    }
+                )
+            }
+        }
+
+        return EditedMediaItem.Builder(mediaItem)
+            .setEffects(Effects(emptyList<AudioProcessor>(), videoEffects))
+            .setDurationUs(padUs)
+            .build()
+    }
+
+    // ------------------------------------------------------------------
+    // Audio sequences
+    // ------------------------------------------------------------------
+
+    /**
+     * One EditedMediaItemSequence per non-overlapping lane. Items inside a
+     * sequence are strictly concatenated, so gaps become silence padding items
+     * (generated PCM WAV) and each audio clip is trimmed via clipping.
+     */
+    private fun buildAudioSequence(
+        project: Project,
+        mediaDir: File,
+        lane: List<AudioClip>,
+    ): EditedMediaItemSequence? {
+        val items = mutableListOf<EditedMediaItem>()
+        var cursorUs = 0L
+        lane.sortedBy { it.startUs }.forEach { audio ->
+            val gap = audio.startUs - cursorUs
+            if (gap >= MIN_GAP_US) {
+                val silence = GeneratedMedia.silenceWav(mediaDir, gap)
+                val silenceUs = GeneratedMedia.silenceDurationUs(gap)
+                items += EditedMediaItem.Builder(
+                    MediaItem.Builder().setUri(Uri.fromFile(silence)).build()
+                )
+                    .setDurationUs(silenceUs)
+                    .build()
+                cursorUs += silenceUs
+            } else if (gap < 0) {
+                // Lane packing guarantees no overlap; defensive clamp.
+                return@forEach
+            }
+
+            val asset = project.assetById(audio.assetId)
+            val file = asset?.let { File(mediaDir, it.fileName) }
+            if (asset == null || file == null || !file.exists()) return@forEach
+
+            val mediaItem = MediaItem.Builder()
+                .setUri(Uri.fromFile(file))
+                .setClippingConfiguration(
+                    MediaItem.ClippingConfiguration.Builder()
+                        .setStartPositionUs(audio.sourceInUs)
+                        .setEndPositionUs(audio.sourceOutUs)
+                        .build()
+                )
+                .build()
+
+            val audioEffects = mutableListOf<AudioProcessor>()
+            if (!audio.muted && (audio.volume != 1f || audio.fadeInMs > 0 || audio.fadeOutMs > 0)) {
+                audioEffects += GainAudioProcessor(
+                    audio.volume,
+                    audio.fadeInMs * 1000L,
+                    audio.fadeOutMs * 1000L,
+                    audio.durationUs,
+                )
+            }
+
+            items += EditedMediaItem.Builder(mediaItem)
+                .setEffects(Effects(audioEffects, emptyList<Effect>()))
+                .setDurationUs(maxOf(asset.durationUs, audio.sourceOutUs).coerceAtLeast(1L))
+                .apply { if (audio.muted) setRemoveAudio(true) }
+                .build()
+            cursorUs = audio.endUs
+        }
+        if (items.isEmpty()) return null
+        return EditedMediaItemSequence.Builder(items).build()
     }
 }

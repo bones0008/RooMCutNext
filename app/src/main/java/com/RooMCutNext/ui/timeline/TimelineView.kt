@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.RooMCutNext.RooMCutNextApp
 import com.RooMCutNext.R
+import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.Project
@@ -68,7 +69,8 @@ import kotlin.math.sqrt
 
 private const val RULER_HEIGHT_DP = 26f
 private const val TRACK_HEIGHT_DP = 56f
-private const val TEXT_TRACK_HEIGHT_DP = 24f
+private const val TEXT_LANE_HEIGHT_DP = 24f
+private const val AUDIO_LANE_HEIGHT_DP = 30f
 private const val TRACK_GAP_DP = 6f
 private const val TRIM_HIT_PX = 26f
 private const val BADGE_TEXT_DP = 8.5f
@@ -83,6 +85,14 @@ private data class ClipLayout(
 
 private data class TextLayout(
     val item: TextOverlayItem,
+    val lane: Int,
+    val left: Float,
+    val width: Float,
+)
+
+private data class AudioLayout(
+    val clip: AudioClip,
+    val lane: Int,
     val left: Float,
     val width: Float,
 )
@@ -95,24 +105,41 @@ private class GeometryHolder {
     var rulerBottom: Float = 0f
     var trackTop: Float = 0f
     var trackBottom: Float = 0f
-    var textTop: Float = 0f
-    var textBottom: Float = 0f
+    var textRegionTop: Float = 0f
+    var textRegionBottom: Float = 0f
+    var audioRegionTop: Float = 0f
+    var audioRegionBottom: Float = 0f
+    var playheadBottom: Float = 0f
+    var textLaneStride: Float = 0f
+    var audioLaneStride: Float = 0f
     var clips: List<ClipLayout> = emptyList()
     var texts: List<TextLayout> = emptyList()
+    var audios: List<AudioLayout> = emptyList()
     var hasClips: Boolean = false
+    var hasAnyContent: Boolean = false
 
     fun timeToX(us: Long): Float = us / 1_000_000f * pps - scrollX
     fun xToTimeUs(x: Float): Long = ((x + scrollX) / pps * 1_000_000f).toLong().coerceAtLeast(0)
+
+    /** Y span of the given text lane. */
+    fun textLaneRect(lane: Int): Rect =
+        Rect(0f, textRegionTop + lane * textLaneStride, viewportW, textRegionTop + (lane + 1) * textLaneStride)
+
+    /** Y span of the given audio lane. */
+    fun audioLaneRect(lane: Int): Rect =
+        Rect(0f, audioRegionTop + lane * audioLaneStride, viewportW, audioRegionTop + (lane + 1) * audioLaneStride)
 }
 
 private sealed class DragMode {
-    data object Scroll : DragMode()
-    data object Playhead : DragMode()
+    /** Drag the timeline content under the fixed playhead (scrub). */
+    data object Scrub : DragMode()
+    data object Pinch : DragMode()
     data class Trim(val clipId: String, val isLeft: Boolean) : DragMode()
     data class ClipMove(val clipId: String, val fromIndex: Int) : DragMode()
     data class TextMove(val textId: String) : DragMode()
     data class TextTrim(val textId: String, val isLeft: Boolean) : DragMode()
-    data object Pinch : DragMode()
+    data class AudioMove(val audioId: String) : DragMode()
+    data class AudioTrim(val audioId: String, val isLeft: Boolean) : DragMode()
     data object TapGallery : DragMode()
     data object TapFiles : DragMode()
 }
@@ -121,6 +148,13 @@ private sealed class DragMode {
 // Main composable
 // ---------------------------------------------------------------------------
 
+/**
+ * LibreCut-style timeline: the PLAYHEAD IS FIXED at the horizontal center of
+ * the viewport; the timeline content scrolls underneath it. Dragging any
+ * empty area (or the ruler) scrubs — the frame under the fixed playhead
+ * changes as the content follows the finger. Pinch zoom keeps the playhead
+ * time anchored at the center.
+ */
 @Composable
 fun TimelineView(
     vm: EditorViewModel,
@@ -142,9 +176,12 @@ fun TimelineView(
 
     val scrollXState = remember { mutableFloatStateOf(0f) }
     val dragState = remember { mutableStateOf<DragMode?>(null) }
+    /** True while a Scrub drag owns the scroll (auto-sync disabled). */
+    val scrubbingActive = remember { mutableStateOf(false) }
     val geom = remember { GeometryHolder() }
     val thumbRevision = remember { mutableIntStateOf(0) }
     val fingerX = remember { mutableFloatStateOf(Float.NaN) }
+    val viewportWState = remember { mutableFloatStateOf(0f) }
 
     val currentOnAddMedia by rememberUpdatedState(onAddMedia)
     val currentOnFiles by rememberUpdatedState(onImportFromFileManager)
@@ -165,19 +202,33 @@ fun TimelineView(
         }
     }
 
-    fun maxScroll(): Float {
-        val contentW = (snapshot?.project?.totalDurationUs ?: 0L) / 1_000_000f * pps
-        return max(0f, contentW - geom.viewportW + 40f * dp)
-    }
+    /** The playhead is always drawn at this fixed screen X. */
+    fun playheadScreenX(): Float = viewportWState.floatValue * 0.5f
 
-    fun clampedScroll(): Float = scrollXState.floatValue.coerceIn(0f, maxScroll())
+    fun contentEndPx(): Float = (snapshot?.project?.totalDurationUs ?: 0L) / 1_000_000f * pps
+
+    fun clampedScroll(): Float = scrollXState.floatValue
 
     fun xToTimeUs(x: Float): Long = ((x + clampedScroll()) / pps * 1_000_000f).toLong().coerceAtLeast(0)
+
+    /** Time currently under the fixed playhead for a given scroll value. */
+    fun timeAtPlayhead(scroll: Float): Long =
+        (((scroll + playheadScreenX()) / pps * 1_000_000f).toLong()).coerceAtLeast(0L)
+
+    // ---------------- auto-sync scroll to the playhead ----------------
+    // Whenever the playhead moves for any reason other than an active scrub
+    // drag (playback, tap-seek, frame step, zoom change), the content scrolls
+    // so the playhead time stays at the fixed center X.
+    LaunchedEffect(playhead, pps, viewportWState.floatValue, scrubbingActive.value, snapshot?.project?.totalDurationUs) {
+        if (!scrubbingActive.value) {
+            scrollXState.floatValue = playhead / 1_000_000f * pps - playheadScreenX()
+        }
+    }
 
     // ---------------- hit testing ----------------
     fun hitTest(x: Float, y: Float): DragMode {
         val g = geom
-        if (!g.hasClips) {
+        if (!g.hasAnyContent) {
             val cx = g.viewportW / 2f
             val cy = g.viewportH / 2f
             val galleryRect = Rect(cx - 70f * dp, cy - 74f * dp, cx + 70f * dp, cy + 26f * dp)
@@ -186,8 +237,9 @@ fun TimelineView(
             if (filesRect.contains(Offset(x, y))) return DragMode.TapFiles
             return DragMode.TapGallery
         }
-        if (y <= g.rulerBottom) return DragMode.Playhead
+        if (y <= g.rulerBottom) return DragMode.Scrub
         if (y in g.trackTop..g.trackBottom) {
+            if (!g.hasClips) return DragMode.TapGallery
             val selected = snapshot?.selectedClipId
             if (selected != null) {
                 val sel = g.clips.firstOrNull { it.clip.id == selected }
@@ -198,9 +250,9 @@ fun TimelineView(
             }
             val hit = g.clips.firstOrNull { x >= it.left && x <= it.left + it.width }
             if (hit != null) return DragMode.ClipMove(hit.clip.id, hit.index)
-            return DragMode.Scroll
+            return DragMode.Scrub
         }
-        if (y in g.textTop..g.textBottom) {
+        if (g.textRegionBottom > g.textRegionTop && y in g.textRegionTop..g.textRegionBottom) {
             val selectedText = snapshot?.selectedTextId
             if (selectedText != null) {
                 val sel = g.texts.firstOrNull { it.item.id == selectedText }
@@ -209,24 +261,44 @@ fun TimelineView(
                     if (abs(x - (sel.left + sel.width)) <= TRIM_HIT_PX) return DragMode.TextTrim(selectedText, false)
                 }
             }
-            val hit = g.texts.firstOrNull { x >= it.left && x <= it.left + it.width }
+            val laneIdx = ((y - g.textRegionTop) / g.textLaneStride).toInt()
+            val hit = g.texts.firstOrNull {
+                x >= it.left && x <= it.left + it.width && it.lane == laneIdx
+            }
             if (hit != null) return DragMode.TextMove(hit.item.id)
-            return DragMode.Scroll
+            return DragMode.Scrub
         }
-        return DragMode.Scroll
+        if (g.audioRegionBottom > g.audioRegionTop && y in g.audioRegionTop..g.audioRegionBottom) {
+            val selectedAudio = snapshot?.selectedAudioId
+            if (selectedAudio != null) {
+                val sel = g.audios.firstOrNull { it.clip.id == selectedAudio }
+                if (sel != null && sel.width > 24f * dp) {
+                    if (abs(x - sel.left) <= TRIM_HIT_PX) return DragMode.AudioTrim(selectedAudio, true)
+                    if (abs(x - (sel.left + sel.width)) <= TRIM_HIT_PX) return DragMode.AudioTrim(selectedAudio, false)
+                }
+            }
+            val laneIdx = ((y - g.audioRegionTop) / g.audioLaneStride).toInt()
+            val hit = g.audios.firstOrNull {
+                x >= it.left && x <= it.left + it.width && it.lane == laneIdx
+            }
+            if (hit != null) return DragMode.AudioMove(hit.clip.id)
+            return DragMode.Scrub
+        }
+        return DragMode.Scrub
     }
 
     // ---------------- gesture handlers ----------------
     fun onDragStart(mode: DragMode, x: Float) {
         val v = currentVm
         when (mode) {
-            is DragMode.Playhead -> v.beginScrub()
-            is DragMode.Trim -> {
-                v.selectClip(mode.clipId)
+            is DragMode.Scrub -> {
+                scrubbingActive.value = true
                 v.beginScrub()
             }
+            is DragMode.Trim -> v.selectClip(mode.clipId)
             is DragMode.ClipMove -> RooMCutNextApp.vibrate(v.getApplication(), 14)
             is DragMode.TextTrim -> v.selectText(mode.textId)
+            is DragMode.AudioTrim -> v.selectAudio(mode.audioId)
             else -> Unit
         }
         if (mode is DragMode.ClipMove) fingerX.floatValue = x
@@ -235,10 +307,15 @@ fun TimelineView(
     fun onDragMove(mode: DragMode, dx: Float, x: Float) {
         val v = currentVm
         when (mode) {
-            is DragMode.Scroll -> {
-                scrollXState.floatValue = (scrollXState.floatValue - dx).coerceIn(0f, maxScroll())
+            is DragMode.Scrub -> {
+                // Content follows the finger; the fixed playhead scrubs over it.
+                val centerX = playheadScreenX()
+                val endPx = contentEndPx()
+                val s = (scrollXState.floatValue - dx)
+                    .coerceIn(-centerX, max(-centerX, endPx - centerX))
+                scrollXState.floatValue = s
+                v.seekDuringDrag(timeAtPlayhead(s))
             }
-            is DragMode.Playhead -> v.seekDuringDrag(xToTimeUs(x))
             is DragMode.Trim -> {
                 val snap = snapshot ?: return
                 val idx = snap.project.clips.indexOfFirst { it.id == mode.clipId }
@@ -251,16 +328,13 @@ fun TimelineView(
                     val lowerBound = -clip.sourceInUs.toFloat() / clip.speed
                     val local = localF.coerceIn(lowerBound, 60_000_000f)
                     v.previewTrim(clip.id, clip.sourceInUs + (local * clip.speed).toLong(), clip.sourceOutUs)
-                    v.seekDuringDrag(clipStart + local.toLong().coerceAtLeast(0L))
                 } else {
                     val local = (timeUs - clipStart).coerceAtLeast(0L)
                     v.previewTrim(clip.id, clip.sourceInUs, clip.sourceInUs + (local.toFloat() * clip.speed).toLong())
-                    v.seekDuringDrag(clipStart + local)
                 }
             }
             is DragMode.ClipMove -> fingerX.floatValue = x
             is DragMode.TextMove -> {
-                val item = snapshot?.project?.texts?.firstOrNull { it.id == mode.textId } ?: return
                 v.moveText(mode.textId, xToTimeUs(x - 20f * dp), commit = false)
             }
             is DragMode.TextTrim -> {
@@ -269,6 +343,12 @@ fun TimelineView(
                 if (mode.isLeft) v.trimText(mode.textId, t, item.endUs, commit = false)
                 else v.trimText(mode.textId, item.startUs, t, commit = false)
             }
+            is DragMode.AudioMove -> {
+                v.moveAudio(mode.audioId, xToTimeUs(x - 20f * dp), commit = false)
+            }
+            is DragMode.AudioTrim -> {
+                v.previewAudioTrimEdge(mode.audioId, mode.isLeft, xToTimeUs(x))
+            }
             else -> Unit
         }
     }
@@ -276,14 +356,18 @@ fun TimelineView(
     fun onDragEnd(mode: DragMode, x: Float) {
         val v = currentVm
         when (mode) {
-            is DragMode.Playhead -> {
-                v.seekTo(xToTimeUs(x))
+            is DragMode.Scrub -> {
+                val finalTime = timeAtPlayhead(scrollXState.floatValue)
+                v.seekTo(finalTime)
                 v.endScrub()
+                scrubbingActive.value = false
+                // Re-derive the scroll from the (clamped) final playhead so the
+                // content never rests past the timeline bounds.
+                val endPx = contentEndPx()
+                scrollXState.floatValue = (finalTime / 1_000_000f * pps - playheadScreenX())
+                    .coerceIn(-playheadScreenX(), max(-playheadScreenX(), endPx - playheadScreenX()))
             }
-            is DragMode.Trim -> {
-                v.commitTrim()
-                v.endScrub()
-            }
+            is DragMode.Trim -> v.commitTrim()
             is DragMode.ClipMove -> {
                 val snap = snapshot ?: return
                 val others = snap.project.clips.filter { it.id != mode.clipId }
@@ -312,6 +396,11 @@ fun TimelineView(
                 val item = snapshot?.project?.texts?.firstOrNull { it.id == mode.textId } ?: return
                 v.trimText(mode.textId, item.startUs, item.endUs, commit = true)
             }
+            is DragMode.AudioMove -> {
+                val audio = snapshot?.project?.audios?.firstOrNull { it.id == mode.audioId } ?: return
+                v.moveAudio(mode.audioId, audio.startUs, commit = true)
+            }
+            is DragMode.AudioTrim -> v.commitAudioTrim()
             else -> Unit
         }
     }
@@ -321,13 +410,14 @@ fun TimelineView(
         when (mode) {
             is DragMode.TapGallery -> currentOnAddMedia()
             is DragMode.TapFiles -> currentOnFiles()
-            is DragMode.Playhead -> v.seekTo(xToTimeUs(x))
+            is DragMode.Scrub -> v.seekTo(xToTimeUs(x))
             is DragMode.Trim -> v.selectClip(mode.clipId)
             is DragMode.ClipMove -> v.selectClip(mode.clipId)
             is DragMode.TextMove -> v.selectText(mode.textId)
             is DragMode.TextTrim -> v.selectText(mode.textId)
-            is DragMode.Scroll -> v.selectClip(null)
-            else -> Unit
+            is DragMode.AudioMove -> v.selectAudio(mode.audioId)
+            is DragMode.AudioTrim -> v.selectAudio(mode.audioId)
+            is DragMode.Pinch -> Unit
         }
     }
 
@@ -358,6 +448,7 @@ fun TimelineView(
             .onSizeChanged { size ->
                 geom.viewportW = size.width.toFloat()
                 geom.viewportH = size.height.toFloat()
+                viewportWState.floatValue = size.width.toFloat()
                 currentVm.viewportWidthPx = size.width
             }
             .pointerInput(Unit) {
@@ -378,6 +469,11 @@ fun TimelineView(
                         if (pressed.size >= 2) {
                             if (mode != DragMode.Pinch) {
                                 if (dragStarted && mode is DragMode.Trim) currentVm.cancelTrim()
+                                if (dragStarted && mode is DragMode.AudioTrim) currentVm.cancelAudioTrim()
+                                if (dragStarted && mode is DragMode.Scrub) {
+                                    currentVm.endScrub()
+                                    scrubbingActive.value = false
+                                }
                                 dragState.value = null
                                 fingerX.floatValue = Float.NaN
                                 mode = DragMode.Pinch
@@ -398,7 +494,7 @@ fun TimelineView(
                         }
 
                         if (mode == DragMode.Pinch && pressed.size == 1) {
-                            mode = DragMode.Scroll
+                            mode = DragMode.Scrub
                             dragStarted = false
                             lastX = pressed[0].position.x
                             accumDx = 0f
@@ -417,8 +513,6 @@ fun TimelineView(
                         }
                         if (dragStarted) {
                             onDragMove(mode, dx, x)
-                        } else if (mode is DragMode.Scroll) {
-                            scrollXState.floatValue = (scrollXState.floatValue - dx).coerceIn(0f, maxScroll())
                         }
                         change.consume()
                     }
@@ -438,25 +532,38 @@ fun TimelineView(
             val g = geom
             g.pps = pps
             g.scrollX = clampedScroll()
-            g.rulerBottom = RULER_HEIGHT_DP * dp
-            g.trackTop = g.rulerBottom + TRACK_GAP_DP * dp
-            g.trackBottom = g.trackTop + TRACK_HEIGHT_DP * dp
-            g.textTop = g.trackBottom + TRACK_GAP_DP * dp
-            g.textBottom = g.textTop + TEXT_TRACK_HEIGHT_DP * dp
             g.hasClips = snap.project.clips.isNotEmpty()
+            g.hasAnyContent = snap.project.hasContent
 
             thumbRevision.intValue // invalidate when thumbnails finish loading
 
-            if (!g.hasClips) {
+            if (!g.hasAnyContent) {
                 drawEmptyState(g, emptyHint, addLabel, filesLabel, dp)
                 return@Canvas
             }
+
+            // ---- region geometry (depends on lane counts) ----
+            val textLanes = TimelineOps.laneIndexes(snap.project.texts.map { it.startUs to it.endUs })
+            val textLaneCount = (textLanes.maxOrNull() ?: -1) + 1
+            val audioLanes = TimelineOps.laneIndexes(snap.project.audios.map { it.startUs to it.endUs })
+            val audioLaneCount = (audioLanes.maxOrNull() ?: -1) + 1
+
+            g.rulerBottom = RULER_HEIGHT_DP * dp
+            g.trackTop = g.rulerBottom + TRACK_GAP_DP * dp
+            g.trackBottom = g.trackTop + TRACK_HEIGHT_DP * dp
+            g.textLaneStride = TEXT_LANE_HEIGHT_DP * dp
+            g.audioLaneStride = AUDIO_LANE_HEIGHT_DP * dp
+            g.textRegionTop = g.trackBottom + TRACK_GAP_DP * dp
+            g.textRegionBottom = g.textRegionTop + textLaneCount * g.textLaneStride
+            g.audioRegionTop = g.textRegionBottom + TRACK_GAP_DP * dp
+            g.audioRegionBottom = g.audioRegionTop + audioLaneCount * g.audioLaneStride
+            g.playheadBottom = max(g.trackBottom, max(g.textRegionBottom, g.audioRegionBottom))
 
             val clips = displayClips(snap)
             g.clips = clips
 
             drawRuler(snap.project, g, textPaint, dp)
-            drawTrackBackground(g, snap.project.texts.isNotEmpty())
+            drawTrackBackground(g, textLaneCount > 0, audioLaneCount > 0, dp)
 
             val moved = dragState.value as? DragMode.ClipMove
             for (layout in clips) {
@@ -474,7 +581,26 @@ fun TimelineView(
                 )
             }
 
-            drawTextTrack(snap, g, badgePaint, dp)
+            g.texts = snap.project.texts.mapIndexedNotNull { i, item ->
+                val lane = textLanes[i]
+                val left = item.startUs / 1_000_000f * pps - g.scrollX
+                val width = (item.durationUs / 1_000_000f * pps).coerceAtLeast(6f * dp)
+                if (left + width < -20f || left > g.viewportW + 20f) null
+                else TextLayout(item, lane, left, width)
+            }
+            drawTextLanes(snap, g, badgePaint, dp)
+
+            g.audios = snap.project.audios.mapIndexedNotNull { i, audio ->
+                val preview = snap.audioTrimPreview?.takeIf { it.audioId == audio.id }
+                val startUs = preview?.startUs ?: audio.startUs
+                val inUs = preview?.sourceInUs ?: audio.sourceInUs
+                val outUs = preview?.sourceOutUs ?: audio.sourceOutUs
+                val left = startUs / 1_000_000f * pps - g.scrollX
+                val width = ((outUs - inUs) / 1_000_000f * pps).coerceAtLeast(6f * dp)
+                if (left + width < -20f || left > g.viewportW + 20f) null
+                else AudioLayout(audio.copy(startUs = startUs, sourceInUs = inUs, sourceOutUs = outUs), audioLanes[i], left, width)
+            }
+            drawAudioLanes(snap, g, badgePaint, dp)
 
             if (moved != null && !fingerX.floatValue.isNaN()) {
                 // Insertion indicator among the remaining clips.
@@ -515,17 +641,16 @@ fun TimelineView(
             }
         }
 
-        // ---------------- playhead overlay ----------------
+        // ---------------- fixed playhead overlay ----------------
         Canvas(Modifier.fillMaxSize()) {
             val snap = snapshot ?: return@Canvas
-            if (snap.project.clips.isEmpty()) return@Canvas
+            if (!snap.project.hasContent) return@Canvas
             val g = geom
-            val x = playhead / 1_000_000f * pps - clampedScroll()
-            val bottom = if (snap.project.texts.isNotEmpty()) g.textBottom else g.trackBottom
+            val x = playheadScreenX()
             drawLine(
                 color = Color(0xFFFF5C6E),
                 start = Offset(x, 0f),
-                end = Offset(x, bottom),
+                end = Offset(x, g.playheadBottom),
                 strokeWidth = 2.dp.toPx(),
             )
             val w = 10.dp.toPx()
@@ -541,23 +666,6 @@ fun TimelineView(
         }
     }
 
-    // ---------------- auto-follow playhead while playing ----------------
-    LaunchedEffect(playhead, isPlayingNow) {
-        if (isPlayingNow) {
-            val g = geom
-            val x = playhead / 1_000_000f * pps - clampedScroll()
-            if (x > g.viewportW * 0.8f || x < 0f) {
-                scrollXState.floatValue = (playhead / 1_000_000f * pps - g.viewportW * 0.2f)
-                    .coerceIn(0f, maxScroll())
-            }
-        }
-    }
-
-    // ---------------- clamp scroll on zoom/duration change ----------------
-    LaunchedEffect(pps, snapshot?.project?.totalDurationUs) {
-        scrollXState.floatValue = scrollXState.floatValue.coerceIn(0f, maxScroll())
-    }
-
     // ---------------- ensure thumbnails are loaded ----------------
     LaunchedEffect(snapshot?.project?.assets?.size, snapshot?.project?.id) {
         val snap = snapshot ?: return@LaunchedEffect
@@ -565,7 +673,7 @@ fun TimelineView(
         val dir = java.io.File(app.filesDir, "projects/${snap.project.id}/media")
         var loadedAny = false
         snap.project.assets.forEach { asset ->
-            if (currentVm.thumbnails.peek(asset.id) == null) {
+            if (!asset.isAudio && currentVm.thumbnails.peek(asset.id) == null) {
                 val loaded = currentVm.thumbnails.load(dir, asset)
                 if (loaded.isNotEmpty()) loadedAny = true
             }
@@ -685,7 +793,7 @@ private fun DrawScope.drawRuler(project: Project, g: GeometryHolder, paint: Pain
         }
         tick += stepPx
     }
-    if (contentEndPx - scroll in 0f..g.viewportW && project.clips.isNotEmpty()) {
+    if (contentEndPx - scroll in 0f..g.viewportW && project.hasContent) {
         drawLine(
             color = DangerColor.copy(alpha = 0.5f),
             start = Offset(contentEndPx - scroll, 0f),
@@ -703,17 +811,24 @@ private fun rulerStepSec(pps: Float): Float {
     return candidates.last()
 }
 
-private fun DrawScope.drawTrackBackground(g: GeometryHolder, hasTexts: Boolean) {
+private fun DrawScope.drawTrackBackground(g: GeometryHolder, hasTextLanes: Boolean, hasAudioLanes: Boolean, dp: Float) {
     drawRect(
         Color(0xFF0E1218),
         topLeft = Offset(0f, g.trackTop),
         size = Size(g.viewportW, g.trackBottom - g.trackTop),
     )
-    if (hasTexts) {
+    if (hasTextLanes) {
         drawRect(
             Color(0x14FFFFFF),
-            topLeft = Offset(0f, g.textTop),
-            size = Size(g.viewportW, g.textBottom - g.textTop),
+            topLeft = Offset(0f, g.textRegionTop),
+            size = Size(g.viewportW, g.textRegionBottom - g.textRegionTop),
+        )
+    }
+    if (hasAudioLanes) {
+        drawRect(
+            Color(0x14204050),
+            topLeft = Offset(0f, g.audioRegionTop),
+            size = Size(g.viewportW, g.audioRegionBottom - g.audioRegionTop),
         )
     }
 }
@@ -949,33 +1064,31 @@ private fun drawBadge(
     return x + w + 3f * dp
 }
 
-private fun DrawScope.drawTextTrack(
+private fun DrawScope.drawTextLanes(
     snap: EditorViewModel.TimelineSnapshot,
     g: GeometryHolder,
     paint: Paint,
     dp: Float,
 ) {
     if (snap.project.texts.isEmpty()) return
-    val top = g.textTop + 2f * dp
-    val height = TEXT_TRACK_HEIGHT_DP * dp - 4f * dp
-    val scroll = g.scrollX
-    val pps = g.pps
     val canvas = drawContext.canvas.nativeCanvas
-    snap.project.texts.forEach { item ->
-        val left = item.startUs / 1_000_000f * pps - scroll
-        val width = (item.durationUs / 1_000_000f * pps).coerceAtLeast(6f * dp)
-        if (left + width < -20f || left > g.viewportW + 20f) return@forEach
+    snap.project.texts.forEachIndexed { index, item ->
+        val layout = g.texts.firstOrNull { it.item.id == item.id } ?: return@forEachIndexed
+        val laneRect = g.textLaneRect(layout.lane)
+        val top = laneRect.top + 2f * dp
+        val height = laneRect.height - 4f * dp
+        if (height <= 2f) return@forEachIndexed
         val selected = snap.selectedTextId == item.id
         drawRoundRect(
             color = WarnColor.copy(alpha = 0.28f),
-            topLeft = Offset(left, top),
-            size = Size(width, height),
+            topLeft = Offset(layout.left, top),
+            size = Size(layout.width, height),
             cornerRadius = CornerRadius(4f * dp),
         )
         drawRoundRect(
             color = if (selected) AccentColor else WarnColor.copy(alpha = 0.7f),
-            topLeft = Offset(left, top),
-            size = Size(width, height),
+            topLeft = Offset(layout.left, top),
+            size = Size(layout.width, height),
             cornerRadius = CornerRadius(4f * dp),
             style = Stroke(width = if (selected) 2.dp.toPx() else 1.dp.toPx()),
         )
@@ -984,25 +1097,149 @@ private fun DrawScope.drawTextTrack(
         paint.color = android.graphics.Color.argb(0xE0, 0xFF, 0xC2, 0x4B)
         val label = if (item.text.isBlank()) "T" else "T ${item.text}"
         val charW = max(1f, paint.measureText("T ") * 0.55f)
-        val maxChars = max(1, ((width - 8f * dp) / charW).toInt())
-        canvas.drawText(label.take(maxChars), left + 4f * dp, top + height - 4.5f * dp, paint)
+        val maxChars = max(1, ((layout.width - 8f * dp) / charW).toInt())
+        canvas.drawText(label.take(maxChars), layout.left + 4f * dp, top + height - 4.5f * dp, paint)
         if (selected) {
             val handleH = height - 6f * dp
             drawRoundRect(
                 color = AccentColor,
-                topLeft = Offset(left + 1f * dp, top + 3f * dp),
+                topLeft = Offset(layout.left + 1f * dp, top + 3f * dp),
                 size = Size(4f * dp, handleH),
                 cornerRadius = CornerRadius(2f * dp),
             )
             drawRoundRect(
                 color = AccentColor,
-                topLeft = Offset(left + width - 5f * dp, top + 3f * dp),
+                topLeft = Offset(layout.left + layout.width - 5f * dp, top + 3f * dp),
                 size = Size(4f * dp, handleH),
                 cornerRadius = CornerRadius(2f * dp),
             )
         }
     }
 }
+
+private fun DrawScope.drawAudioLanes(
+    snap: EditorViewModel.TimelineSnapshot,
+    g: GeometryHolder,
+    paint: Paint,
+    dp: Float,
+) {
+    if (snap.project.audios.isEmpty()) return
+    val canvas = drawContext.canvas.nativeCanvas
+    snap.project.audios.forEach { audio ->
+        val layout = g.audios.firstOrNull { it.clip.id == audio.id } ?: return@forEach
+        val laneRect = g.audioLaneRect(layout.lane)
+        val top = laneRect.top + 2f * dp
+        val height = laneRect.height - 4f * dp
+        if (height <= 2f) return@forEach
+        val selected = snap.selectedAudioId == audio.id
+        val missing = audio.assetId in snap.missingAssetIds
+        val asset = snap.project.assetById(audio.assetId)
+
+        val borderColor = when {
+            missing -> DangerColor
+            selected -> AccentColor
+            else -> AudioColor.copy(alpha = 0.7f)
+        }
+
+        drawRoundRect(
+            color = AudioColor.copy(alpha = 0.22f),
+            topLeft = Offset(layout.left, top),
+            size = Size(layout.width, height),
+            cornerRadius = CornerRadius(4f * dp),
+        )
+
+        // pseudo waveform bars (decorative but instantly readable as audio)
+        if (!missing && layout.width > 16f * dp) {
+            val bars = (layout.width / (5f * dp)).toInt().coerceAtMost(80)
+            if (bars > 2) {
+                val barW = 2.2f * dp
+                val gap = (layout.width - 6f * dp) / bars
+                val waveTop = top + 3f * dp
+                val waveH = height - 9f * dp
+                for (b in 0 until bars) {
+                    val phase = b * 0.9f
+                    val amp = (0.35f + 0.3f * kotlin.math.sin(phase) + 0.2f * kotlin.math.sin(phase * 2.7f))
+                        .coerceIn(0.15f, 1f)
+                    val bh = waveH * amp
+                    drawRoundRect(
+                        color = AudioColor.copy(alpha = 0.55f),
+                        topLeft = Offset(layout.left + 3f * dp + b * gap, waveTop + (waveH - bh) / 2f),
+                        size = Size(barW, bh),
+                        cornerRadius = CornerRadius(barW / 2f),
+                    )
+                }
+            }
+        }
+
+        // volume strip + fades (same visual language as video clips)
+        val stripTop = top + height - 6f * dp
+        val stripHeight = 4f * dp
+        drawRoundRect(
+            color = Color(0x33000000),
+            topLeft = Offset(layout.left + 3f * dp, stripTop),
+            size = Size(max(0f, layout.width - 6f * dp), stripHeight),
+            cornerRadius = CornerRadius(2f * dp),
+        )
+        if (!audio.muted) {
+            val fill = (layout.width - 6f * dp) * audio.volume.coerceIn(0f, 1f)
+            drawRoundRect(
+                color = AudioColor.copy(alpha = 0.8f),
+                topLeft = Offset(layout.left + 3f * dp, stripTop),
+                size = Size(fill, stripHeight),
+                cornerRadius = CornerRadius(2f * dp),
+            )
+        }
+
+        drawRoundRect(
+            color = borderColor,
+            topLeft = Offset(layout.left, top),
+            size = Size(layout.width, height),
+            cornerRadius = CornerRadius(4f * dp),
+            style = Stroke(width = if (selected) 2.dp.toPx() else 1.dp.toPx()),
+        )
+
+        // label
+        paint.textAlign = android.graphics.Paint.Align.LEFT
+        paint.textSize = 8.5f * dp
+        paint.color = android.graphics.Color.argb(0xE0, 0x7F, 0xD9, 0xC9)
+        val name = asset?.displayName?.substringBeforeLast('.')?.take(18) ?: "audio"
+        val label = "A $name"
+        val charW = max(1f, paint.measureText("A ") * 0.55f)
+        val maxChars = max(1, ((layout.width - 8f * dp) / charW).toInt())
+        canvas.drawText(label.take(maxChars), layout.left + 4f * dp, top + height - 8f * dp, paint)
+
+        if (audio.muted) {
+            drawBadge(canvas, paint, layout.left + 4f * dp, top + 2f * dp, "MUTE", DangerColor, dp)
+        }
+
+        // trim handles
+        if (selected && layout.width > 24f * dp) {
+            val handleH = height - 6f * dp
+            drawRoundRect(
+                color = AccentColor,
+                topLeft = Offset(layout.left + 1f * dp, top + 3f * dp),
+                size = Size(4f * dp, handleH),
+                cornerRadius = CornerRadius(2f * dp),
+            )
+            drawRoundRect(
+                color = AccentColor,
+                topLeft = Offset(layout.left + layout.width - 5f * dp, top + 3f * dp),
+                size = Size(4f * dp, handleH),
+                cornerRadius = CornerRadius(2f * dp),
+            )
+        }
+
+        // duration label
+        if (layout.width > 70f * dp) {
+            paint.textAlign = android.graphics.Paint.Align.RIGHT
+            paint.color = android.graphics.Color.argb(0xB0, 0xFF, 0xFF, 0xFF)
+            canvas.drawText(TimeCode.formatShort(layout.clip.durationUs), layout.left + layout.width - 6f * dp, top + height - 2.5f * dp, paint)
+        }
+    }
+}
+
+/** Teal accent used for the audio track. */
+private val AudioColor = Color(0xFF2FB8A6)
 
 private inline fun DrawScope.withClippedRoundRect(
     left: Float,

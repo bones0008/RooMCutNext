@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardDoubleArrowLeft
 import androidx.compose.material.icons.filled.KeyboardDoubleArrowRight
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Redo
@@ -107,6 +108,15 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
     val openDocuments = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris -> vm.importUris(uris) }
+
+    val pickAudio = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris -> vm.importUris(uris) }
+
+    val audioMimeTypes = arrayOf(
+        "audio/*",
+        "application/ogg", "application/x-flac", "application/flac",
+    )
 
     val replaceMedia = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -301,7 +311,7 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 vm = vm,
                 onAddMedia = { launchMediaPicker() },
                 onImportFromFileManager = {
-                    openDocuments.launch(arrayOf("video/*", "image/*"))
+                    openDocuments.launch(arrayOf("video/*", "image/*", "audio/*"))
                 },
             )
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
@@ -319,7 +329,13 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onCrop = { vm.openPanel(PanelKind.CROP) },
             onAdjust = { vm.openPanel(PanelKind.ADJUST) },
             onText = { vm.addTextAtPlayhead() },
-            onAudio = { vm.openPanel(PanelKind.AUDIO) },
+            onAudio = {
+                if (state.selectedAudio != null || state.selectedClip != null) {
+                    vm.openPanel(PanelKind.AUDIO)
+                } else {
+                    pickAudio.launch(audioMimeTypes)
+                }
+            },
             onInfo = { vm.openPanel(PanelKind.INFO) },
             onGoto = { vm.openPanel(PanelKind.GOTO) },
         )
@@ -339,7 +355,7 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 PanelKind.CROP -> CropSheet(vm, state)
                 PanelKind.ADJUST -> AdjustSheet(vm, state)
                 PanelKind.TEXT -> TextSheet(vm, state)
-                PanelKind.AUDIO -> AudioSheet(vm, state)
+                PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = { pickAudio.launch(audioMimeTypes) })
                 PanelKind.INFO -> InfoSheet(vm, state, onReplace = {
                     replaceMedia.launch(
                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
@@ -469,7 +485,7 @@ private fun ActionToolbar(
         ToolbarButton(Icons.Filled.Crop, stringResource(R.string.action_crop), enabled = hasClip, onClick = onCrop)
         ToolbarButton(Icons.Filled.Tune, stringResource(R.string.action_adjust), enabled = hasClip, onClick = onAdjust)
         ToolbarButton(Icons.Filled.TextFields, stringResource(R.string.action_text), enabled = true, onClick = onText)
-        ToolbarButton(Icons.Filled.VolumeUp, stringResource(R.string.action_audio), enabled = hasClip, onClick = onAudio)
+        ToolbarButton(Icons.Filled.MusicNote, stringResource(R.string.action_audio), enabled = true, onClick = onAudio)
         ToolbarButton(Icons.Filled.Info, stringResource(R.string.action_info), enabled = hasClip, onClick = onInfo)
         ToolbarButton(Icons.Filled.GpsFixed, stringResource(R.string.action_goto), enabled = true, onClick = onGoto)
         Spacer(Modifier.width(8.dp))

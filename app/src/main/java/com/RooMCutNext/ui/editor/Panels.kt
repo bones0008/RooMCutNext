@@ -381,7 +381,14 @@ fun TextSheet(vm: EditorViewModel, state: EditorUiState) {
 // ===========================================================================
 
 @Composable
-fun AudioSheet(vm: EditorViewModel, state: EditorUiState) {
+fun AudioSheet(vm: EditorViewModel, state: EditorUiState, onAddMusic: () -> Unit = {}) {
+    // Independent audio clip selected -> its own controls.
+    val audio = state.selectedAudio
+    if (audio != null) {
+        AudioClipSheet(vm, audio)
+        return
+    }
+    // Otherwise: audio settings of the selected video clip.
     val clip = state.selectedClip ?: return
     val asset = state.project.assetById(clip.assetId)
     SheetTitle(stringResource(R.string.panel_audio_title))
@@ -421,6 +428,57 @@ fun AudioSheet(vm: EditorViewModel, state: EditorUiState) {
         onPreview = { vm.setClipFades(clip.id, clip.fadeInMs, it, commit = false) },
         onCommit = { vm.setClipFades(clip.id, clip.fadeInMs, it) },
     )
+    TextButton(
+        onClick = onAddMusic,
+        modifier = Modifier.padding(horizontal = 16.dp),
+    ) {
+        Text(stringResource(R.string.panel_audio_add_music), color = AccentColor)
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+@Composable
+private fun AudioClipSheet(vm: EditorViewModel, audio: com.RooMCutNext.core.model.AudioClip) {
+    SheetTitle(stringResource(R.string.panel_audio_clip_title))
+    Text(
+        stringResource(R.string.panel_audio_clip_hint),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    LabeledSlider(
+        label = stringResource(R.string.panel_audio_volume),
+        value = audio.volume,
+        valueRange = 0f..2f,
+        valueLabel = "${(audio.volume * 100).toInt()}%",
+        onValueChange = { vm.setAudioVolume(audio.id, it, commit = false) },
+        onValueChangeFinished = { vm.setAudioVolume(audio.id, audio.volume) },
+    )
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(stringResource(R.string.panel_audio_mute), Modifier.weight(1f))
+        Switch(checked = audio.muted, onCheckedChange = { vm.toggleAudioMuted(audio.id) })
+    }
+    FadeSlider(
+        label = stringResource(R.string.panel_audio_fade_in),
+        ms = audio.fadeInMs,
+        onPreview = { vm.setAudioFades(audio.id, it, audio.fadeOutMs, commit = false) },
+        onCommit = { vm.setAudioFades(audio.id, it, audio.fadeOutMs) },
+    )
+    FadeSlider(
+        label = stringResource(R.string.panel_audio_fade_out),
+        ms = audio.fadeOutMs,
+        onPreview = { vm.setAudioFades(audio.id, audio.fadeInMs, it, commit = false) },
+        onCommit = { vm.setAudioFades(audio.id, audio.fadeInMs, it) },
+    )
+    TextButton(
+        onClick = { vm.deleteAudio(audio.id) },
+        modifier = Modifier.padding(horizontal = 16.dp),
+    ) {
+        Text(stringResource(R.string.panel_audio_delete), color = DangerColor)
+    }
     Spacer(Modifier.height(8.dp))
 }
 

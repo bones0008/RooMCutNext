@@ -111,6 +111,10 @@
     <string name="panel_audio_fade_out">淡出</string>
     <string name="panel_audio_no_audio">该片段没有音轨</string>
     <string name="panel_audio_ms_fmt">%d 毫秒</string>
+    <string name="panel_audio_add_music">＋ 导入背景音乐 / 音频</string>
+    <string name="panel_audio_clip_title">音频片段</string>
+    <string name="panel_audio_clip_hint">独立音频轨 · 拖动改变位置，拖两端修剪</string>
+    <string name="panel_audio_delete">删除音频</string>
 
     <!-- Info panel -->
     <string name="panel_info_title">片段信息</string>

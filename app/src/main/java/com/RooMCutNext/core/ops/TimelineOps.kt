@@ -1,5 +1,7 @@
 package com.RooMCutNext.core.ops
 
+import com.RooMCutNext.core.model.AUDIO_MIN_DURATION_US
+import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.IMAGE_MAX_DURATION_US
 import com.RooMCutNext.core.model.MediaAsset
@@ -230,14 +232,25 @@ object TimelineOps {
      * Step one frame forward/backward on the timeline. Inside a clip this steps
      * on the CLIP'S OWN source frame grid (e.g. 24FPS AI video inside a 30FPS
      * project steps by 1/24s), crossing to the neighboring clip at boundaries.
+     * On an empty video track (text/audio-only project) steps on the project
+     * frame grid.
      */
     fun stepFrame(
         clips: List<Clip>,
         assetLookup: (String) -> MediaAsset?,
         timelineUs: Long,
         forward: Boolean,
+        totalDurationUs: Long = 0L,
+        frameDurationUs: Long = 33_333L,
     ): Long {
-        if (clips.isEmpty()) return 0L
+        if (clips.isEmpty()) {
+            // Text/audio-only timeline: step on the project grid.
+            val total = totalDurationUs
+            if (total <= 0L) return 0L
+            val frame = frameDurationUs.coerceAtLeast(1L)
+            return (if (forward) timelineUs + frame else timelineUs - frame)
+                .coerceIn(0L, total)
+        }
         val st = starts(clips)
         val total = st[clips.size]
         if (total <= 0) return 0L
@@ -298,4 +311,121 @@ object TimelineOps {
 
     fun moveText(texts: List<TextOverlayItem>, id: String, newStartUs: Long): List<TextOverlayItem> =
         texts.map { if (it.id == id) it.movedTo(newStartUs.coerceAtLeast(0L)) else it }
+
+    // ------------------------------------------------------------------
+    // Audio track (independent layer)
+    // ------------------------------------------------------------------
+
+    /** Insert an audio clip keeping the list sorted by start time. */
+    fun insertAudio(audios: List<AudioClip>, item: AudioClip): List<AudioClip> =
+        (audios + item).sortedBy { it.startUs }
+
+    fun updateAudio(audios: List<AudioClip>, id: String, transform: (AudioClip) -> AudioClip): List<AudioClip> =
+        audios.map { if (it.id == id) transform(it) else it }
+
+    fun moveAudio(audios: List<AudioClip>, id: String, newStartUs: Long): List<AudioClip> =
+        audios.map { if (it.id == id) it.movedTo(newStartUs.coerceAtLeast(0L)) else it }
+
+    /**
+     * Trim one edge of an audio clip in TIMELINE coordinates, keeping the
+     * opposite edge fixed on the timeline (classic NLE semantics):
+     *  - left edge: [timelineTargetUs] becomes the new start; the clip's end
+     *    stays put; the source in-point follows (extending left consumes source
+     *    before the current in-point).
+     *  - right edge: [timelineTargetUs] becomes the new end; the start stays.
+     */
+    fun trimAudioEdge(
+        audios: List<AudioClip>,
+        id: String,
+        asset: MediaAsset?,
+        isLeft: Boolean,
+        timelineTargetUs: Long,
+    ): List<AudioClip> {
+        val sourceDur = asset?.durationUs ?: Long.MAX_VALUE
+        return audios.map { audio ->
+            if (audio.id != id) audio
+            else {
+                val span = audio.sourceSpanUs
+                val minSpan = if (asset != null) min(AUDIO_MIN_DURATION_US, max(sourceDur / 2, 1L)) else AUDIO_MIN_DURATION_US
+                val endUs = audio.startUs + span
+                if (isLeft) {
+                    // Extending left is limited by the source before the in-point.
+                    val minStart = (endUs - audio.sourceInUs - span).coerceAtLeast(0L)
+                    val maxStart = (endUs - minSpan).coerceAtLeast(0L)
+                    val newStart = timelineTargetUs.coerceIn(minStart, maxStart)
+                    val newSpan = endUs - newStart
+                    audio.copy(
+                        startUs = newStart,
+                        sourceInUs = audio.sourceOutUs - newSpan,
+                        sourceOutUs = audio.sourceOutUs,
+                    )
+                } else {
+                    // Extending right is limited by the source after the out-point.
+                    val maxEnd = audio.startUs + (sourceDur - audio.sourceOutUs) + span
+                    val minEnd = audio.startUs + minSpan
+                    val newEnd = timelineTargetUs.coerceIn(minEnd, maxEnd)
+                    val newSpan = newEnd - audio.startUs
+                    audio.copy(
+                        sourceInUs = audio.sourceInUs,
+                        sourceOutUs = audio.sourceInUs + newSpan,
+                    )
+                }
+            }
+        }
+    }
+
+    fun deleteAudio(audios: List<AudioClip>, id: String): List<AudioClip> =
+        audios.filter { it.id != id }
+
+    // ------------------------------------------------------------------
+    // Layer lane packing (shared by the timeline UI and composition build)
+    // ------------------------------------------------------------------
+
+    /**
+     * Pack overlapping independent-layer items into horizontal lanes.
+     * Items are sorted by start; each goes into the first lane whose last
+     * item ends before it starts. Return value: lane index per item.
+     */
+    fun laneIndexes(startsAndEnds: List<Pair<Long, Long>>): IntArray {
+        val order = startsAndEnds.indices.sortedBy { startsAndEnds[it].first }
+        val laneEnds = mutableListOf<Long>()
+        val result = IntArray(startsAndEnds.size)
+        for (i in order) {
+            val (start, end) = startsAndEnds[i]
+            var lane = laneEnds.indexOfFirst { it <= start }
+            if (lane == -1) {
+                laneEnds += end
+                lane = laneEnds.size - 1
+            } else {
+                laneEnds[lane] = end
+            }
+            result[i] = lane
+        }
+        return result
+    }
+
+    /**
+     * Pack audio clips into non-overlapping lanes for sequence building:
+     * each lane becomes one concatenated EditedMediaItemSequence.
+     */
+    fun audioLanes(audios: List<AudioClip>): List<List<AudioClip>> {
+        if (audios.isEmpty()) return emptyList()
+        val sorted = audios.sortedBy { it.startUs }
+        val lanes = mutableListOf<MutableList<AudioClip>>()
+        val laneEnds = mutableListOf<Long>()
+        for (clip in sorted) {
+            var lane = -1
+            for (i in laneEnds.indices) {
+                if (laneEnds[i] <= clip.startUs) { lane = i; break }
+            }
+            if (lane == -1) {
+                lanes += mutableListOf(clip)
+                laneEnds += clip.endUs
+            } else {
+                lanes[lane] += clip
+                laneEnds[lane] = clip.endUs
+            }
+        }
+        return lanes
+    }
 }

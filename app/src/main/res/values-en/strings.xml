@@ -111,6 +111,10 @@
     <string name="panel_audio_fade_out">Fade out</string>
     <string name="panel_audio_no_audio">This clip has no audio track</string>
     <string name="panel_audio_ms_fmt">%d ms</string>
+    <string name="panel_audio_add_music">+ Add background music / audio</string>
+    <string name="panel_audio_clip_title">Audio clip</string>
+    <string name="panel_audio_clip_hint">Independent audio track · drag to move, drag edges to trim</string>
+    <string name="panel_audio_delete">Delete audio</string>
 
     <!-- Info panel -->
     <string name="panel_info_title">Clip info</string>

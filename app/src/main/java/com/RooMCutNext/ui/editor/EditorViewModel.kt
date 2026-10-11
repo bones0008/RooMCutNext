@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.ColorAdjust
 import com.RooMCutNext.core.model.CropSpec
@@ -40,10 +41,19 @@ data class ImportingState(val done: Int, val total: Int, val current: String)
 
 data class TrimPreview(val clipId: String, val sourceInUs: Long, val sourceOutUs: Long)
 
+/** Live audio trim preview: keeps the timeline start too (left-edge trims move it). */
+data class AudioTrimPreview(
+    val audioId: String,
+    val startUs: Long,
+    val sourceInUs: Long,
+    val sourceOutUs: Long,
+)
+
 data class EditorUiState(
     val project: Project = Project(id = "", name = ""),
     val selectedClipId: String? = null,
     val selectedTextId: String? = null,
+    val selectedAudioId: String? = null,
     val playheadUs: Long = 0L,
     val isPlaying: Boolean = false,
     val pxPerSecond: Float = 64f,
@@ -55,13 +65,16 @@ data class EditorUiState(
     val previewDegraded: Boolean = false,
     /** Live trim preview while the user drags a trim handle (not yet committed). */
     val trimPreview: TrimPreview? = null,
+    /** Live audio trim preview while dragging (not yet committed). */
+    val audioTrimPreview: AudioTrimPreview? = null,
     val missingAssetIds: Set<String> = emptySet(),
     val exportState: ExportBus.ExportState? = null,
 ) {
     val totalDurationUs: Long get() = project.totalDurationUs
     val selectedClip: Clip? get() = selectedClipId?.let { project.clipById(it) }
     val selectedText: TextOverlayItem? get() = selectedTextId?.let { project.textById(it) }
-    val hasSelection: Boolean get() = selectedClipId != null || selectedTextId != null
+    val selectedAudio: AudioClip? get() = selectedAudioId?.let { project.audioById(it) }
+    val hasSelection: Boolean get() = selectedClipId != null || selectedTextId != null || selectedAudioId != null
 }
 
 /**
@@ -96,13 +109,18 @@ class EditorViewModel(
         val project: Project,
         val selectedClipId: String?,
         val selectedTextId: String?,
+        val selectedAudioId: String?,
         val trimPreview: TrimPreview?,
+        val audioTrimPreview: AudioTrimPreview?,
         val missingAssetIds: Set<String>,
     )
 
     val timelineFlow: kotlinx.coroutines.flow.StateFlow<TimelineSnapshot?> =
         _state.map {
-            TimelineSnapshot(it.project, it.selectedClipId, it.selectedTextId, it.trimPreview, it.missingAssetIds)
+            TimelineSnapshot(
+                it.project, it.selectedClipId, it.selectedTextId, it.selectedAudioId,
+                it.trimPreview, it.audioTrimPreview, it.missingAssetIds,
+            )
         }.distinctUntilChanged()
             .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), null)
 
@@ -224,7 +242,7 @@ class EditorViewModel(
     private fun refreshPlayback(force: Boolean = false) {
         val project = _state.value.project
         playback.currentProjectRef = project
-        if (project.clips.isEmpty()) {
+        if (!project.hasContent) {
             playback.setCompositionForEmpty()
             return
         }
@@ -260,8 +278,9 @@ class EditorViewModel(
             if (outcome.assets.isNotEmpty()) {
                 mutate("导入素材") { p ->
                     var np = p.copy(assets = p.assets + outcome.assets)
-                    if (np.clips.isEmpty()) {
-                        val firstVideo = outcome.assets.firstOrNull { !it.isImage }
+                    val visuals = outcome.assets.filter { !it.isAudio }
+                    if (np.clips.isEmpty() && visuals.isNotEmpty()) {
+                        val firstVideo = visuals.firstOrNull { !it.isImage }
                         if (firstVideo != null) {
                             np = np.copy(
                                 fps = snapProjectFps(firstVideo.fps),
@@ -269,11 +288,32 @@ class EditorViewModel(
                                 height = firstVideo.height,
                             )
                         } else {
-                            val firstImage = outcome.assets.first()
+                            val firstImage = visuals.first()
                             np = np.copy(width = firstImage.width, height = firstImage.height)
                         }
                     }
-                    outcome.assets.forEach { asset -> np = np.copy(clips = np.clips + newClipFor(asset)) }
+                    // Video / image assets append as timeline clips.
+                    visuals.forEach { asset -> np = np.copy(clips = np.clips + newClipFor(asset)) }
+                    // Audio assets become independent-layer audio clips placed
+                    // sequentially from the current playhead.
+                    if (outcome.assets.any { it.isAudio }) {
+                        var cursor = np.clipsDurationUs.coerceAtLeast(_state.value.playheadUs)
+                        outcome.assets.filter { it.isAudio }.forEach { asset ->
+                            np = np.copy(
+                                audios = TimelineOps.insertAudio(
+                                    np.audios,
+                                    AudioClip(
+                                        id = IdGen.new("aud"),
+                                        assetId = asset.id,
+                                        startUs = cursor,
+                                        sourceInUs = 0L,
+                                        sourceOutUs = asset.durationUs,
+                                    ),
+                                )
+                            )
+                            cursor += asset.durationUs
+                        }
+                    }
                     np
                 }
                 viewModelScope.launch { preloadThumbnails(outcome.assets) }
@@ -334,7 +374,7 @@ class EditorViewModel(
     private suspend fun checkMissingAssets() {
         val p = _state.value.project
         val dir = repo.mediaDir(projectId)
-        val used = p.clips.map { it.assetId }.toSet()
+        val used = p.clips.map { it.assetId }.toSet() + p.audios.map { it.assetId }.toSet()
         val missing = p.assets.filter { it.id in used && !File(dir, it.fileName).exists() }
             .map { it.id }.toSet()
         _state.update { it.copy(missingAssetIds = missing) }
@@ -345,11 +385,15 @@ class EditorViewModel(
     // ------------------------------------------------------------------
 
     fun selectClip(id: String?) {
-        _state.update { it.copy(selectedClipId = id, selectedTextId = null) }
+        _state.update { it.copy(selectedClipId = id, selectedTextId = null, selectedAudioId = null) }
     }
 
     fun selectText(id: String?) {
-        _state.update { it.copy(selectedTextId = id, selectedClipId = null) }
+        _state.update { it.copy(selectedTextId = id, selectedClipId = null, selectedAudioId = null) }
+    }
+
+    fun selectAudio(id: String?) {
+        _state.update { it.copy(selectedAudioId = id, selectedClipId = null, selectedTextId = null) }
     }
 
     fun openPanel(panel: PanelKind?) {
@@ -388,12 +432,16 @@ class EditorViewModel(
             _state.update { it.copy(selectedTextId = null, activePanel = null) }
             return
         }
-        val clipId = s.selectedClipId ?: return
-        mutate("删除") { p ->
-            val clips = TimelineOps.deleteById(p.clips, clipId)
-            val total = clips.fold(0L) { acc, c -> acc + c.durationUs }
-            p.copy(clips = clips, texts = TimelineOps.clampTexts(p.texts, total))
+        val audioId = s.selectedAudioId
+        if (audioId != null) {
+            mutate("删除音频") { p -> p.copy(audios = TimelineOps.deleteAudio(p.audios, audioId)) }
+            _state.update { it.copy(selectedAudioId = null, activePanel = null) }
+            return
         }
+        val clipId = s.selectedClipId ?: return
+        // Texts and audios are independent layers: deleting a video clip no
+        // longer shortens / drops them (the black background covers the tail).
+        mutate("删除") { p -> p.copy(clips = TimelineOps.deleteById(p.clips, clipId)) }
         _state.update { it.copy(selectedClipId = null, activePanel = null) }
     }
 
@@ -444,7 +492,6 @@ class EditorViewModel(
                 val asset = p.assetById(p.clips[idx].assetId)
                 p.copy(
                     clips = TimelineOps.trim(p.clips, idx, asset, preview.sourceInUs, preview.sourceOutUs),
-                    texts = TimelineOps.clampTexts(p.texts, p.clips.fold(0L) { a, c -> a + c.durationUs })
                 )
             }
         }
@@ -532,25 +579,27 @@ class EditorViewModel(
     }
 
     // ------------------------------------------------------------------
-    // Text overlays
+    // Text overlays (independent layer)
     // ------------------------------------------------------------------
 
+    /**
+     * Add a text overlay at the playhead. Texts are their own layer: they can
+     * be added on an empty timeline (black background) and may extend beyond
+     * the video clips.
+     */
     fun addTextAtPlayhead() {
         val s = _state.value
-        val total = s.project.totalDurationUs
-        if (total <= 0) {
-            _state.update { it.copy(toast = "请先添加视频素材") }
-            return
-        }
-        val start = s.playheadUs.coerceIn(0L, (total - 500_000L).coerceAtLeast(0L))
+        val start = s.playheadUs.coerceAtLeast(0L)
         val item = TextOverlayItem(
             id = IdGen.new("txt"),
             text = "",
             startUs = start,
-            endUs = (start + 3_000_000L).coerceAtMost(total),
+            endUs = start + 3_000_000L,
         )
         mutate("添加文字") { p -> p.copy(texts = TimelineOps.insertText(p.texts, item)) }
-        _state.update { it.copy(selectedTextId = item.id, selectedClipId = null, activePanel = PanelKind.TEXT) }
+        _state.update {
+            it.copy(selectedTextId = item.id, selectedClipId = null, selectedAudioId = null, activePanel = PanelKind.TEXT)
+        }
     }
 
     fun updateText(item: TextOverlayItem, commit: Boolean = true) {
@@ -575,13 +624,12 @@ class EditorViewModel(
 
     fun trimText(id: String, newStartUs: Long, newEndUs: Long, commit: Boolean = true) {
         val apply: (Project) -> Project = { p ->
-            val total = p.totalDurationUs
             p.copy(
                 texts = p.texts.map {
                     if (it.id != id) it
                     else {
-                        var start = newStartUs.coerceAtLeast(0L)
-                        var end = newEndUs.coerceAtMost(total)
+                        val start = newStartUs.coerceAtLeast(0L)
+                        var end = newEndUs.coerceAtLeast(start + 200_000L)
                         if (end - start < 200_000L) end = start + 200_000L
                         it.copy(startUs = start, endUs = end)
                     }
@@ -597,12 +645,102 @@ class EditorViewModel(
     }
 
     // ------------------------------------------------------------------
+    // Audio clips (independent layer)
+    // ------------------------------------------------------------------
+
+    fun updateAudio(item: AudioClip, commit: Boolean = true) {
+        if (commit) {
+            commitOrMutate("编辑音频") { p ->
+                p.copy(audios = p.audios.map { if (it.id == item.id) item else it })
+            }
+        } else {
+            previewTransform { p ->
+                p.copy(audios = p.audios.map { if (it.id == item.id) item else it })
+            }
+        }
+    }
+
+    fun moveAudio(id: String, newStartUs: Long, commit: Boolean = true) {
+        if (commit) {
+            commitOrMutate("移动音频") { p -> p.copy(audios = TimelineOps.moveAudio(p.audios, id, newStartUs)) }
+        } else {
+            previewTransform { p -> p.copy(audios = TimelineOps.moveAudio(p.audios, id, newStartUs)) }
+        }
+    }
+
+    /** Live trim preview during handle drag (no undo record). */
+    fun previewAudioTrimEdge(id: String, isLeft: Boolean, timelineTargetUs: Long) {
+        val s = _state.value
+        val audio = s.project.audioById(id) ?: return
+        val asset = s.project.assetById(audio.assetId)
+        val trimmed = TimelineOps.trimAudioEdge(s.project.audios, id, asset, isLeft, timelineTargetUs)
+        val result = trimmed.firstOrNull { it.id == id } ?: return
+        _state.update {
+            it.copy(
+                audioTrimPreview = AudioTrimPreview(
+                    id, result.startUs, result.sourceInUs, result.sourceOutUs,
+                )
+            )
+        }
+    }
+
+    /** Commit the audio trim after the handle is released. */
+    fun commitAudioTrim() {
+        val preview = _state.value.audioTrimPreview ?: return
+        _state.update { it.copy(audioTrimPreview = null) }
+        mutate("修剪音频") { p ->
+            p.copy(
+                audios = p.audios.map {
+                    if (it.id != preview.audioId) it
+                    else it.copy(
+                        startUs = preview.startUs,
+                        sourceInUs = preview.sourceInUs,
+                        sourceOutUs = preview.sourceOutUs,
+                    )
+                }
+            )
+        }
+    }
+
+    fun cancelAudioTrim() {
+        _state.update { it.copy(audioTrimPreview = null) }
+    }
+
+    fun setAudioVolume(id: String, volume: Float, commit: Boolean = true) {
+        val v = volume.coerceIn(0f, 2f)
+        val apply: (Project) -> Project = { p ->
+            p.copy(audios = TimelineOps.updateAudio(p.audios, id) { it.copy(volume = v) })
+        }
+        if (commit) commitOrMutate("音量") { apply(it) } else previewTransform { apply(it) }
+    }
+
+    fun toggleAudioMuted(id: String) {
+        mutate("静音") { p ->
+            p.copy(audios = TimelineOps.updateAudio(p.audios, id) { it.copy(muted = !it.muted) })
+        }
+    }
+
+    fun setAudioFades(id: String, fadeInMs: Int, fadeOutMs: Int, commit: Boolean = true) {
+        val fi = fadeInMs.coerceIn(0, 2000)
+        val fo = fadeOutMs.coerceIn(0, 2000)
+        val apply: (Project) -> Project = { p ->
+            p.copy(audios = TimelineOps.updateAudio(p.audios, id) { it.copy(fadeInMs = fi, fadeOutMs = fo) })
+        }
+        if (commit) commitOrMutate("淡入淡出") { apply(it) } else previewTransform { apply(it) }
+    }
+
+    fun deleteAudio(id: String) {
+        mutate("删除音频") { p -> p.copy(audios = TimelineOps.deleteAudio(p.audios, id)) }
+        _state.update { it.copy(selectedAudioId = null, activePanel = null) }
+    }
+
+    // ------------------------------------------------------------------
     // Transport
     // ------------------------------------------------------------------
 
     fun togglePlay() {
         val s = _state.value
-        if (s.project.clips.isEmpty()) return
+        if (!s.project.hasContent) return
         if (s.isPlaying) {
             playback.pause()
         } else {
@@ -694,6 +832,7 @@ class EditorViewModel(
                 project = project,
                 selectedClipId = s.selectedClipId?.takeIf { project.clipById(it) != null },
                 selectedTextId = s.selectedTextId?.takeIf { project.textById(it) != null },
+                selectedAudioId = s.selectedAudioId?.takeIf { project.audioById(it) != null },
             )
         }
         _structureVersion.value += 1
@@ -720,7 +859,7 @@ class EditorViewModel(
 
     fun startExport(height: Int? = pendingExportHeight) {
         val s = _state.value
-        if (s.project.clips.isEmpty()) {
+        if (!s.project.hasContent) {
             _state.update { it.copy(toast = "时间线为空，无法导出") }
             return
         }

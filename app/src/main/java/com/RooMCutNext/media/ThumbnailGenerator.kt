@@ -20,16 +20,20 @@ object ThumbnailGenerator {
     private const val THUMB_HEIGHT = 100
 
     fun generate(source: File, asset: MediaAsset) {
-        if (asset.isImage) {
-            generateImageThumb(source)
-        } else {
-            generateVideoThumbs(source, asset)
+        when {
+            asset.isImage -> generateImageThumb(source)
+            asset.isAudio -> Unit // audio has no thumbnails
+            else -> generateVideoThumbs(source, asset)
         }
     }
 
     fun thumbFiles(mediaDir: File, asset: MediaAsset): List<File> {
         val stem = asset.fileName.substringBeforeLast('.')
-        val n = if (asset.isImage) 1 else FRAMES_PER_VIDEO
+        val n = when {
+            asset.isImage -> 1
+            asset.isAudio -> 0
+            else -> FRAMES_PER_VIDEO
+        }
         return (0 until n).map { File(mediaDir, "${stem}_th$it.jpg") }
     }
 

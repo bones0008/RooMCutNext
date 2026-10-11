@@ -7,6 +7,11 @@ import kotlinx.serialization.Serializable
  *
  * Persistence format is JSON (see data/ProjectRepository); media files live in
  * the app's private directory, referenced by [MediaAsset.fileName].
+ *
+ * Timeline model (v2):
+ *  - [clips]: video/image clips, ripple layout (prefix-sum positions).
+ *  - [texts]: text overlays, independent layer anchored to the timeline.
+ *  - [audios]: audio clips, independent layer anchored to the timeline.
  */
 @Serializable
 data class Project(
@@ -20,15 +25,27 @@ data class Project(
     val assets: List<MediaAsset> = emptyList(),
     val clips: List<Clip> = emptyList(),
     val texts: List<TextOverlayItem> = emptyList(),
+    val audios: List<AudioClip> = emptyList(),
     val createdAtMs: Long = 0L,
     val updatedAtMs: Long = 0L,
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = 2,
 ) {
-    val totalDurationUs: Long get() = clips.fold(0L) { acc, c -> acc + c.durationUs }
+    /** Video track duration (prefix sum of clips). */
+    val clipsDurationUs: Long get() = clips.fold(0L) { acc, c -> acc + c.durationUs }
+
+    /** Total timeline duration: the longest of video, texts and audio. */
+    val totalDurationUs: Long get() = maxOf(
+        clipsDurationUs,
+        texts.maxOfOrNull { it.endUs } ?: 0L,
+        audios.maxOfOrNull { it.endUs } ?: 0L,
+    )
+
+    val hasContent: Boolean get() = clips.isNotEmpty() || texts.isNotEmpty() || audios.isNotEmpty()
 
     fun assetById(id: String): MediaAsset? = assets.firstOrNull { it.id == id }
     fun clipById(id: String): Clip? = clips.firstOrNull { it.id == id }
     fun textById(id: String): TextOverlayItem? = texts.firstOrNull { it.id == id }
+    fun audioById(id: String): AudioClip? = audios.firstOrNull { it.id == id }
 
     /** Frame duration of the project timeline grid. */
     val frameDurationUs: Long get() = 1_000_000L / fps

@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
 
 /** Type of an imported media file. */
 @Serializable
-enum class MediaType { VIDEO, IMAGE }
+enum class MediaType { VIDEO, IMAGE, AUDIO }
 
 /**
  * An immutable piece of imported media living in the app's private storage.
@@ -35,6 +35,7 @@ data class MediaAsset(
     val addedAtMs: Long = 0L,
 ) {
     val isImage: Boolean get() = type == MediaType.IMAGE
+    val isAudio: Boolean get() = type == MediaType.AUDIO
 
     /** Frame duration of the source in microseconds; only meaningful for video. */
     val sourceFrameDurationUs: Long
@@ -42,10 +43,14 @@ data class MediaAsset(
 
     /** One-line technical summary, e.g. "1920×1080 · 30FPS · H.264". */
     fun techSummary(): String {
-        return if (isImage) {
-            "${width}×$height"
-        } else {
-            buildString {
+        return when {
+            isImage -> "${width}×$height"
+            isAudio -> buildString {
+                append("AUDIO")
+                if (!audioCodec.isNullOrBlank()) append(" · $audioCodec")
+                if (durationUs > 0) append(" · ${durationUs / 1_000_000f}s")
+            }
+            else -> buildString {
                 append("${width}×$height")
                 if (fps > 0f) append(" · ${fps.toInt()}FPS")
                 if (!videoCodec.isNullOrBlank()) append(" · $videoCodec")

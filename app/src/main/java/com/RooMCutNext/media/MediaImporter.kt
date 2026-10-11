@@ -73,6 +73,8 @@ class MediaImporter(private val context: Context) {
         val SUPPORTED_EXTENSIONS = setOf(
             "mp4", "mov", "m4v", "mkv", "webm", "3gp", "3g2",
             "jpg", "jpeg", "png", "webp", "heic", "heif", "bmp", "gif",
+            "mp3", "m4a", "aac", "wav", "flac", "ogg", "oga", "opus",
+            "amr", "aiff", "aif", "wma", "mka", "3ga", "awb",
         )
     }
 }

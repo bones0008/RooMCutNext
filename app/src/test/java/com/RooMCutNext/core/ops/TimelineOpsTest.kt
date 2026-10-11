@@ -300,4 +300,117 @@ class TimelineOpsTest {
         val out = TimelineOps.trim(clips, 0, null, 0L, 10_000_000L)
         assertEquals(clips, out)
     }
+
+    // ---------------- audio track ops ----------------
+
+    private fun audioAsset(id: String = "au1", durationUs: Long = 30_000_000L) =
+        MediaAsset(
+            id = id, fileName = "$id.mp3", displayName = "$id.mp3",
+            type = MediaType.AUDIO, durationUs = durationUs,
+            width = 0, height = 0, fps = 0f, hasAudio = true,
+            audioCodec = "MP3", fileBytes = 1L, addedAtMs = 0L,
+        )
+
+    private fun audioClip(id: String, assetId: String = "au1", startUs: Long, inUs: Long = 0L, outUs: Long = 30_000_000L) =
+        com.RooMCutNext.core.model.AudioClip(
+            id = id, assetId = assetId, startUs = startUs, sourceInUs = inUs, sourceOutUs = outUs,
+        )
+
+    @Test
+    fun `insertAudio keeps list sorted by start`() {
+        val a = audioClip("x", startUs = 5_000_000L)
+        val b = audioClip("y", startUs = 1_000_000L)
+        val list = TimelineOps.insertAudio(TimelineOps.insertAudio(emptyList(), a), b)
+        assertEquals(listOf("y", "x"), list.map { it.id })
+    }
+
+    @Test
+    fun `trimAudioEdge left keeps end fixed and consumes source headroom`() {
+        // clip: start 5s, source [10s, 40s] -> span 30s, timeline end 35s
+        val item = audioClip("a", startUs = 5_000_000L, inUs = 10_000_000L, outUs = 40_000_000L)
+        val out = TimelineOps.trimAudioEdge(listOf(item), "a", audioAsset(), isLeft = true, timelineTargetUs = 2_000_000L)
+        val t = out.first()
+        assertEquals(2_000_000L, t.startUs)
+        assertEquals(35_000_000L, t.endUs) // end unchanged
+        assertEquals(7_000_000L, t.sourceInUs) // moved back with the edge
+        assertEquals(40_000_000L, t.sourceOutUs)
+    }
+
+    @Test
+    fun `trimAudioEdge left cannot extend past source start`() {
+        val item = audioClip("a", startUs = 5_000_000L, inUs = 1_000_000L, outUs = 6_000_000L)
+        val out = TimelineOps.trimAudioEdge(listOf(item), "a", audioAsset(), isLeft = true, timelineTargetUs = 0L)
+        val t = out.first()
+        // max left extension = sourceIn headroom: start >= end - in - span = 10s - 1s - 5s = 4s
+        assertEquals(4_000_000L, t.startUs)
+        assertEquals(0L, t.sourceInUs)
+    }
+
+    @Test
+    fun `trimAudioEdge right keeps start fixed and respects source tail`() {
+        val item = audioClip("a", startUs = 5_000_000L, inUs = 0L, outUs = 10_000_000L)
+        val out = TimelineOps.trimAudioEdge(listOf(item), "a", audioAsset(durationUs = 15_000_000L), isLeft = false, timelineTargetUs = 9_000_000L)
+        val t = out.first()
+        assertEquals(5_000_000L, t.startUs)
+        assertEquals(9_000_000L, t.endUs)
+        assertEquals(4_000_000L, t.sourceOutUs)
+    }
+
+    @Test
+    fun `trimAudioEdge enforces minimum span`() {
+        val item = audioClip("a", startUs = 5_000_000L, inUs = 0L, outUs = 2_000_000L)
+        val out = TimelineOps.trimAudioEdge(listOf(item), "a", audioAsset(durationUs = 5_000_000L), isLeft = false, timelineTargetUs = 5_050_000L)
+        assertEquals(100_000L, out.first().durationUs)
+    }
+
+    @Test
+    fun `laneIndexes packs overlaps into separate lanes`() {
+        val lanes = TimelineOps.laneIndexes(
+            listOf(
+                0L to 3_000_000L,
+                1_000_000L to 4_000_000L, // overlaps the first -> lane 1
+                3_000_000L to 5_000_000L, // starts when first ends -> lane 0
+                4_200_000L to 7_000_000L, // fits after lane1's 4s end -> lane 1
+                4_500_000L to 6_000_000L, // overlaps lane0(5s) and lane1(7s) -> lane 2
+            )
+        )
+        assertEquals(listOf(0, 1, 0, 1, 2), lanes.toList())
+    }
+
+    @Test
+    fun `audioLanes groups non-overlapping clips into one lane`() {
+        val a = audioClip("a", startUs = 0L, outUs = 3_000_000L)
+        val b = audioClip("b", startUs = 3_000_000L, outUs = 5_000_000L)
+        val c = audioClip("c", startUs = 1_000_000L, outUs = 2_000_000L)
+        val lanes = TimelineOps.audioLanes(listOf(a, b, c))
+        assertEquals(2, lanes.size)
+        assertEquals(setOf("a", "b"), lanes[0].map { it.id }.toSet())
+        assertEquals(listOf("c"), lanes[1].map { it.id })
+    }
+
+    @Test
+    fun `stepFrame on empty clips uses project grid`() {
+        val target = TimelineOps.stepFrame(
+            emptyList(), lookup, 1_000_000L, forward = true,
+            totalDurationUs = 10_000_000L, frameDurationUs = 40_000L,
+        )
+        assertEquals(1_040_000L, target)
+        val back = TimelineOps.stepFrame(
+            emptyList(), lookup, 1_000_000L, forward = false,
+            totalDurationUs = 10_000_000L, frameDurationUs = 40_000L,
+        )
+        assertEquals(960_000L, back)
+    }
+
+    @Test
+    fun `project total duration spans all layers`() {
+        val project = com.RooMCutNext.core.model.Project(
+            id = "p", name = "p",
+            clips = listOf(clip(outUs = 5_000_000L)),
+            texts = listOf(TextOverlayItem(id = "t", text = "x", startUs = 0L, endUs = 8_000_000L)),
+            audios = listOf(audioClip("a", startUs = 2_000_000L, outUs = 6_000_000L)),
+        )
+        assertEquals(8_000_000L, project.totalDurationUs)
+        assertTrue(project.hasContent)
+    }
 }
