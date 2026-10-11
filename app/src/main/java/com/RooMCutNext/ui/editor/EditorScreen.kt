@@ -79,6 +79,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -190,7 +191,9 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(horizontal = 4.dp, vertical = 2.dp),
+                // v1.0.10: bottom padding keeps the (now compact) export chip
+                // clear of the preview's top edge — it used to touch the video.
+                .padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onExit) {
@@ -236,20 +239,29 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 Icon(Icons.Filled.Redo, stringResource(R.string.editor_redo),
                     tint = if (vm.canRedo) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline)
             }
-            Surface(
-                color = AccentColor,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.padding(end = 8.dp),
+            // v1.0.10: compact export chip. The old Surface+TextButton pair
+            // carried TextButton's generous content padding, making the blue
+            // block nearly as tall as the bar and visually crowding the video
+            // below. Now a tight 30dp chip; the row's bottom padding above
+            // supplies the gap to the preview. (Surface(onClick) is NOT used
+            // here on purpose: it enforces a 48dp minimum interactive size
+            // and would re-inflate the blue block.)
+            Box(
+                modifier = Modifier
+                    .padding(end = 10.dp)
+                    .height(30.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .background(AccentColor)
+                    .clickable { vm.openPanel(PanelKind.EXPORT) },
+                contentAlignment = Alignment.Center,
             ) {
-                TextButton(onClick = {
-                    vm.openPanel(PanelKind.EXPORT)
-                }) {
-                    Text(
-                        stringResource(R.string.editor_export),
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
+                Text(
+                    stringResource(R.string.editor_export),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 14.dp),
+                )
             }
         }
 
@@ -395,9 +407,6 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         ActionToolbar(
             state = state,
             onAddMedia = { launchMediaPicker() },
-            onSplit = { vm.splitAtPlayhead() },
-            onDelete = { vm.deleteSelected() },
-            onDuplicate = { vm.duplicateSelected() },
             onSpeed = { vm.openPanel(PanelKind.SPEED) },
             onRotate = { vm.openPanel(PanelKind.ROTATE) },
             onCrop = { vm.openPanel(PanelKind.CROP) },
@@ -498,20 +507,59 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
             }
         }
 
+        // v1.0.10: compact timecode row — the timecode shrank (titleMedium →
+        // titleSmall + labelSmall) and 分割/删除/复制 moved up from the bottom
+        // toolbar into this row. Layout: [timecode] ⇤flex⇥ [split·delete·copy]
+        // ⇤flex⇥ [zoom-out·fit·zoom-in (unchanged)] — two flex spacers keep the
+        // middle cluster centered. The whole row fits ~355dp wide, so nothing
+        // clips even on 360dp screens.
+        val canSplit = state.project.clips.isNotEmpty() || state.project.audios.isNotEmpty()
+        val hasClip = state.selectedClip != null
         Row(
             Modifier.fillMaxWidth().padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 TimeCode.formatClockFrames(state.playheadUs, state.project.fps),
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.titleSmall,
                 color = AccentColor,
             )
             Text(
                 " / ${TimeCode.formatClockFrames(state.totalDurationUs, state.project.fps)}",
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Spacer(Modifier.weight(1f))
+            IconButton(
+                onClick = { vm.splitAtPlayhead() },
+                enabled = canSplit,
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(
+                    Icons.Filled.ContentCut, stringResource(R.string.action_split),
+                    tint = if (canSplit) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                )
+            }
+            IconButton(
+                onClick = { vm.deleteSelected() },
+                enabled = state.hasSelection,
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Delete, stringResource(R.string.action_delete),
+                    tint = if (state.hasSelection) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                )
+            }
+            IconButton(
+                onClick = { vm.duplicateSelected() },
+                enabled = hasClip,
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(
+                    Icons.Filled.ContentCopy, stringResource(R.string.action_duplicate),
+                    tint = if (hasClip) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                )
+            }
             Spacer(Modifier.weight(1f))
             IconButton(onClick = { vm.zoomOut() }, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Filled.ZoomOut, stringResource(R.string.zoom_out),
@@ -533,9 +581,6 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
 private fun ActionToolbar(
     state: EditorUiState,
     onAddMedia: () -> Unit,
-    onSplit: () -> Unit,
-    onDelete: () -> Unit,
-    onDuplicate: () -> Unit,
     onSpeed: () -> Unit,
     onRotate: () -> Unit,
     onCrop: () -> Unit,
@@ -546,9 +591,9 @@ private fun ActionToolbar(
     onGoto: () -> Unit,
 ) {
     val hasClip = state.selectedClip != null
-    // v1.0.9: Split works on BOTH the video clip and the audio clip under the
-    // playhead — enable it whenever either layer has content.
-    val canSplit = state.project.clips.isNotEmpty() || state.project.audios.isNotEmpty()
+    // v1.0.10: 分割/删除/复制 moved up into the timecode row; 文字/音频 moved
+    // right next to 添加素材 (they are the most-used actions and used to hide
+    // off-screen in the scroll). Order: add, text, audio, then per-clip tools.
     Row(
         Modifier
             .fillMaxWidth()
@@ -558,15 +603,12 @@ private fun ActionToolbar(
     ) {
         Spacer(Modifier.width(8.dp))
         ToolbarButton(Icons.Filled.Add, stringResource(R.string.timeline_add_media), enabled = true, onClick = onAddMedia)
-        ToolbarButton(Icons.Filled.ContentCut, stringResource(R.string.action_split), enabled = canSplit, onClick = onSplit)
-        ToolbarButton(Icons.Filled.Delete, stringResource(R.string.action_delete), enabled = state.hasSelection, onClick = onDelete)
-        ToolbarButton(Icons.Filled.ContentCopy, stringResource(R.string.action_duplicate), enabled = hasClip, onClick = onDuplicate)
+        ToolbarButton(Icons.Filled.TextFields, stringResource(R.string.action_text), enabled = true, onClick = onText)
+        ToolbarButton(Icons.Filled.MusicNote, stringResource(R.string.action_audio), enabled = true, onClick = onAudio)
         ToolbarButton(Icons.Filled.Speed, stringResource(R.string.action_speed), enabled = hasClip, onClick = onSpeed)
         ToolbarButton(Icons.Filled.RotateRight, stringResource(R.string.action_rotate), enabled = hasClip, onClick = onRotate)
         ToolbarButton(Icons.Filled.Crop, stringResource(R.string.action_crop), enabled = hasClip, onClick = onCrop)
         ToolbarButton(Icons.Filled.Tune, stringResource(R.string.action_adjust), enabled = hasClip, onClick = onAdjust)
-        ToolbarButton(Icons.Filled.TextFields, stringResource(R.string.action_text), enabled = true, onClick = onText)
-        ToolbarButton(Icons.Filled.MusicNote, stringResource(R.string.action_audio), enabled = true, onClick = onAudio)
         ToolbarButton(Icons.Filled.Info, stringResource(R.string.action_info), enabled = hasClip, onClick = onInfo)
         ToolbarButton(Icons.Filled.GpsFixed, stringResource(R.string.action_goto), enabled = true, onClick = onGoto)
         Spacer(Modifier.width(8.dp))
