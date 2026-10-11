@@ -75,6 +75,8 @@ private const val AUDIO_LANE_HEIGHT_DP = 30f
 private const val TRACK_GAP_DP = 6f
 private const val TRIM_HIT_PX = 26f
 private const val BADGE_TEXT_DP = 8.5f
+/** Window in which two taps on the same text clip count as a double tap. */
+private const val TEXT_DOUBLE_TAP_MS = 400L
 
 /** One clip's screen layout. */
 private data class ClipLayout(
@@ -183,6 +185,8 @@ fun TimelineView(
     val thumbRevision = remember { mutableIntStateOf(0) }
     val fingerX = remember { mutableFloatStateOf(Float.NaN) }
     val viewportWState = remember { mutableFloatStateOf(0f) }
+    /** Last tap on a text clip (id + timestamp) for double-tap-to-edit. */
+    val lastTextTap = remember { mutableStateOf<Pair<String, Long>?>(null) }
 
     val currentOnAddMedia by rememberUpdatedState(onAddMedia)
     val currentOnFiles by rememberUpdatedState(onImportFromFileManager)
@@ -408,6 +412,18 @@ fun TimelineView(
         }
     }
 
+    fun handleTextTap(textId: String) {
+        val now = android.os.SystemClock.uptimeMillis()
+        val prev = lastTextTap.value
+        val isDoubleTap = prev != null && prev.first == textId && now - prev.second <= TEXT_DOUBLE_TAP_MS
+        lastTextTap.value = textId to now
+        currentVm.selectText(textId)
+        if (isDoubleTap) {
+            lastTextTap.value = null
+            currentVm.openPanel(PanelKind.TEXT)
+        }
+    }
+
     fun onTap(mode: DragMode, x: Float, y: Float) {
         val v = currentVm
         when (mode) {
@@ -415,21 +431,30 @@ fun TimelineView(
             is DragMode.TapFiles -> currentOnFiles()
             // Blank space (ruler, empty track areas): drop the selection.
             // Scrolling/scrubbing only happens via press-and-drag.
-            is DragMode.Scrub -> v.clearSelection()
-            is DragMode.Trim -> v.selectClip(mode.clipId)
-            is DragMode.ClipMove -> v.selectClip(mode.clipId)
-            // Tapping a text clip opens its editing sheet (content, color,
-            // size, position, ...) so texts stay modifiable after creation.
-            is DragMode.TextMove -> {
-                v.selectText(mode.textId)
-                v.openPanel(PanelKind.TEXT)
+            is DragMode.Scrub -> {
+                lastTextTap.value = null
+                v.clearSelection()
             }
-            is DragMode.TextTrim -> {
-                v.selectText(mode.textId)
-                v.openPanel(PanelKind.TEXT)
+            is DragMode.Trim -> {
+                lastTextTap.value = null
+                v.selectClip(mode.clipId)
             }
-            is DragMode.AudioMove -> v.selectAudio(mode.audioId)
-            is DragMode.AudioTrim -> v.selectAudio(mode.audioId)
+            is DragMode.ClipMove -> {
+                lastTextTap.value = null
+                v.selectClip(mode.clipId)
+            }
+            // Text clips: SINGLE tap selects; DOUBLE tap (same text within
+            // 400ms) opens the editing sheet (content, color, size, ...).
+            is DragMode.TextMove -> handleTextTap(mode.textId)
+            is DragMode.TextTrim -> handleTextTap(mode.textId)
+            is DragMode.AudioMove -> {
+                lastTextTap.value = null
+                v.selectAudio(mode.audioId)
+            }
+            is DragMode.AudioTrim -> {
+                lastTextTap.value = null
+                v.selectAudio(mode.audioId)
+            }
             is DragMode.Pinch -> Unit
         }
     }

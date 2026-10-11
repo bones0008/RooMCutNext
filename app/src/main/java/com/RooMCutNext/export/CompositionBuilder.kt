@@ -228,7 +228,14 @@ object CompositionBuilder {
 
         val builder = EditedMediaItem.Builder(mediaItem).setEffects(effects)
         if (asset.isImage) {
+            // Images need BOTH durationUs and frameRate: Transformer's
+            // ImageAssetLoader throws a message-less checkState (surfacing as
+            // the cryptic "AssetLoader error") when frameRate == RATE_UNSET.
+            // Preview (CompositionPlayer) never checks it, which is why this
+            // only breaks EXPORT. Frames are generated at frameRate via
+            // ConstantRateTimestampIterator, so the project fps is correct.
             builder.setDurationUs(clip.durationUs)
+            builder.setFrameRate(project.fps.toInt().coerceAtLeast(1))
         } else {
             // MANDATORY on Media3 1.11.1: CompositionPlayer requires every
             // EditedMediaItem to carry a non-TIME_UNSET durationUs — otherwise
@@ -302,6 +309,9 @@ object CompositionBuilder {
         return EditedMediaItem.Builder(mediaItem)
             .setEffects(Effects(emptyList<AudioProcessor>(), videoEffects))
             .setDurationUs(padUs)
+            // Mandatory alongside durationUs for Transformer's ImageAssetLoader
+            // (see buildItem): without it export fails with "AssetLoader error".
+            .setFrameRate(project.fps.toInt().coerceAtLeast(1))
             .build()
     }
 

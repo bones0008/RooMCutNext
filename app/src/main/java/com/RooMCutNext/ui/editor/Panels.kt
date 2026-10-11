@@ -389,8 +389,26 @@ fun AudioSheet(vm: EditorViewModel, state: EditorUiState, onAddMusic: () -> Unit
         AudioClipSheet(vm, audio)
         return
     }
+    // Nothing selected: guide the user instead of an empty sheet. Importing
+    // audio now lives in 添加素材; this panel is the audio SETTINGS tool.
+    val clip = state.selectedClip ?: run {
+        SheetTitle(stringResource(R.string.panel_audio_title))
+        Text(
+            stringResource(R.string.panel_audio_need_selection),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(16.dp),
+        )
+        TextButton(
+            onClick = onAddMusic,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        ) {
+            Text(stringResource(R.string.panel_audio_add_music), color = AccentColor)
+        }
+        Spacer(Modifier.height(8.dp))
+        return
+    }
     // Otherwise: audio settings of the selected video clip.
-    val clip = state.selectedClip ?: return
     val asset = state.project.assetById(clip.assetId)
     SheetTitle(stringResource(R.string.panel_audio_title))
     if (asset != null && (asset.isImage || !asset.hasAudio)) {

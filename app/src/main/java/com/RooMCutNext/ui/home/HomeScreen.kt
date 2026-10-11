@@ -79,6 +79,7 @@ private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
     var menuFor by remember { mutableStateOf<String?>(null) }
     var renameFor by remember { mutableStateOf<String?>(null) }
     var deleteFor by remember { mutableStateOf<String?>(null) }
+    var showOrientationDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -107,7 +108,7 @@ private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { vm.createProject(onOpenProject) },
+                onClick = { showOrientationDialog = true },
                 containerColor = AccentColor,
                 contentColor = MaterialTheme.colorScheme.primaryContainer,
                 icon = { Icon(Icons.Filled.Add, contentDescription = null) },
@@ -198,6 +199,92 @@ private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
                 }
             },
         )
+    }
+
+    // New project: pick the canvas orientation first (landscape 16:9 vs
+    // portrait 9:16) so portrait projects get a tall preview area from the
+    // start instead of a letterboxed sliver.
+    if (showOrientationDialog) {
+        OrientationDialog(
+            onDismiss = { showOrientationDialog = false },
+            onPick = { portrait ->
+                showOrientationDialog = false
+                vm.createProject(onOpenProject, portrait = portrait)
+            },
+        )
+    }
+}
+
+@Composable
+private fun OrientationDialog(onDismiss: () -> Unit, onPick: (Boolean) -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.home_orientation_title)) },
+        text = {
+            Column {
+                OrientationOption(
+                    wide = true,
+                    title = stringResource(R.string.home_orientation_landscape),
+                    desc = stringResource(R.string.home_orientation_landscape_desc),
+                    onClick = { onPick(false) },
+                )
+                Spacer(Modifier.height(10.dp))
+                OrientationOption(
+                    wide = false,
+                    title = stringResource(R.string.home_orientation_portrait),
+                    desc = stringResource(R.string.home_orientation_portrait_desc),
+                    onClick = { onPick(true) },
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.home_cancel))
+            }
+        },
+    )
+}
+
+@Composable
+private fun OrientationOption(wide: Boolean, title: String, desc: String, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Mini canvas preview showing the actual aspect.
+            Box(
+                Modifier
+                    .size(44.dp)
+                    .background(MaterialTheme.colorScheme.background, RoundedCornerShape(6.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    Modifier
+                        .then(
+                            if (wide) Modifier.size(width = 34.dp, height = 20.dp)
+                            else Modifier.size(width = 20.dp, height = 34.dp)
+                        )
+                        .background(AccentColor, RoundedCornerShape(3.dp))
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    desc,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 

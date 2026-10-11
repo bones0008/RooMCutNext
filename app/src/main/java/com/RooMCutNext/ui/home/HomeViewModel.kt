@@ -35,14 +35,19 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createProject(onCreated: (String) -> Unit) {
+    fun createProject(onCreated: (String) -> Unit, portrait: Boolean = false) {
         if (_busy.value) return
         _busy.value = true
         viewModelScope.launch(Dispatchers.IO) {
             val name = getApplication<Application>().getString(
                 com.RooMCutNext.R.string.home_new_project_name, _projects.value.size + 1
             )
-            val project = repo.createProject(name, fps = 30, width = 1920, height = 1080)
+            val project = repo.createProject(
+                name,
+                fps = 30,
+                width = if (portrait) 1080 else 1920,
+                height = if (portrait) 1920 else 1080,
+            )
             _projects.value = repo.listProjects()
             _busy.value = false
             kotlinx.coroutines.withContext(Dispatchers.Main) { onCreated(project.id) }

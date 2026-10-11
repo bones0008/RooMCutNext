@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import androidx.media3.common.MimeTypes
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.ExportException
@@ -61,7 +62,7 @@ class ExportEngine(private val context: Context) {
                 exportResult: ExportResult,
                 exportException: ExportException,
             ) {
-                onError(exportException.message ?: "export error code=${exportException.errorCode}")
+                onError(describeExportError(exportException))
             }
         }
 
@@ -74,6 +75,28 @@ class ExportEngine(private val context: Context) {
         t.start(buildResult.composition, tempOut.absolutePath)
 
         // Progress polling loop is driven by the caller (service coroutine).
+    }
+
+    /**
+     * "ERROR_CODE_NAME · RootCauseClass: root message" — unwraps the full cause
+     * chain so the user sees WHY (e.g. a message-less checkState from
+     * ImageAssetLoader) instead of the useless generic "AssetLoader error".
+     */
+    private fun describeExportError(e: ExportException): String {
+        Log.e(TAG, "export failed", e)
+        var cause: Throwable = e
+        while (cause.cause != null && cause.cause !== cause) {
+            cause = cause.cause!!
+        }
+        val rootMsg = cause.message
+            ?.lineSequence()?.firstOrNull { it.isNotBlank() }
+            ?.take(160)?.trim()
+        return buildString {
+            append(e.errorCodeName)
+            append(" · ")
+            append(cause.javaClass.simpleName)
+            if (!rootMsg.isNullOrBlank()) append(": ").append(rootMsg)
+        }
     }
 
     /** @return current progress 0..1, or -1 (indeterminate). */
@@ -127,5 +150,9 @@ class ExportEngine(private val context: Context) {
             tempFile.delete()
             null
         }
+    }
+
+    private companion object {
+        const val TAG = "RooMCutNextExport"
     }
 }

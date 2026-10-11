@@ -9,6 +9,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -70,7 +71,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.Modifier
@@ -101,9 +104,23 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
     val state by vm.state.collectAsState()
     val snackbar = remember { SnackbarHostState() }
 
+    // ---- hidden DIAG overlay toggle: 5 taps on the project title ----
+    val titleInteraction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    var titleTapCount by remember { mutableStateOf(0) }
+    var lastTitleTapMs by remember { mutableStateOf(0L) }
+
     // ---- media pickers ----
+    // "添加素材" accepts ALL media types (video / image / audio): audio files
+    // become independent audio-layer clips, so no separate audio import entry
+    // is needed anymore. Photo Picker (PickVisualMedia) cannot handle audio,
+    // so the unified entry uses the document picker with combined mimes.
+    val mediaMimeTypes = arrayOf(
+        "video/*", "image/*", "audio/*",
+        "application/ogg", "application/x-flac", "application/flac",
+    )
+
     val pickMedia = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia(8)
+        ActivityResultContracts.OpenMultipleDocuments()
     ) { uris -> vm.importUris(uris) }
 
     val openDocuments = rememberLauncherForActivityResult(
@@ -133,11 +150,7 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
     }
 
     fun launchMediaPicker() {
-        pickMedia.launch(
-            PickVisualMediaRequest(
-                ActivityResultContracts.PickVisualMedia.ImageAndVideo
-            )
-        )
+        pickMedia.launch(mediaMimeTypes)
     }
 
     // ---- toast ----
@@ -184,7 +197,25 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 Icon(Icons.Filled.ArrowBack, stringResource(R.string.editor_undo),
                     tint = MaterialTheme.colorScheme.onBackground)
             }
-            Column(Modifier.weight(1f)) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .clickable(
+                        interactionSource = titleInteraction,
+                        indication = null,
+                    ) {
+                        // 5 taps on the title within 2s toggles the DIAG overlay
+                        // (hidden diagnostics for field debugging).
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if (now - lastTitleTapMs > 2000L) titleTapCount = 0
+                        lastTitleTapMs = now
+                        titleTapCount++
+                        if (titleTapCount >= 5) {
+                            titleTapCount = 0
+                            vm.toggleDiagOverlay()
+                        }
+                    },
+            ) {
                 Text(
                     state.project.name,
                     style = MaterialTheme.typography.titleSmall,
@@ -223,10 +254,13 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         }
 
         // ---------------- preview ----------------
+        // Portrait projects get a TALL preview (58% of the flexible space)
+        // instead of a 16:9 letterbox sliver; landscape keeps 16:9.
+        val portrait = state.project.height > state.project.width
         Box(
             Modifier
                 .fillMaxWidth()
-                .aspectRatio(16f / 9f)
+                .then(if (portrait) Modifier.weight(1.4f) else Modifier.aspectRatio(16f / 9f))
                 .background(Color.Black)
         ) {
             AndroidView(
@@ -244,8 +278,10 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 modifier = Modifier.fillMaxSize(),
             )
 
-            // ---- DIAG overlay (v1.0.6-diag): player lifecycle events on screen ----
-            if (state.diagLog.isNotEmpty()) {
+            // ---- DIAG overlay (v1.0.6-diag): player lifecycle events on screen.
+            // Hidden by default in the clean build; tap the project title 5x
+            // to toggle it for field debugging. ----
+            if (state.diagOverlayVisible && state.diagLog.isNotEmpty()) {
                 Column(
                     Modifier
                         .align(Alignment.TopStart)
@@ -336,7 +372,7 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 vm = vm,
                 onAddMedia = { launchMediaPicker() },
                 onImportFromFileManager = {
-                    openDocuments.launch(arrayOf("video/*", "image/*", "audio/*"))
+                    openDocuments.launch(mediaMimeTypes)
                 },
             )
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
@@ -354,13 +390,10 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onCrop = { vm.openPanel(PanelKind.CROP) },
             onAdjust = { vm.openPanel(PanelKind.ADJUST) },
             onText = { vm.addTextAtPlayhead() },
-            onAudio = {
-                if (state.selectedAudio != null || state.selectedClip != null) {
-                    vm.openPanel(PanelKind.AUDIO)
-                } else {
-                    pickAudio.launch(audioMimeTypes)
-                }
-            },
+            // "音频" is now purely an audio SETTINGS tool: it opens the audio
+            // panel for the selected clip (video: volume/mute/fades; audio:
+            // its own controls). Importing audio lives in 添加素材 instead.
+            onAudio = { vm.openPanel(PanelKind.AUDIO) },
             onInfo = { vm.openPanel(PanelKind.INFO) },
             onGoto = { vm.openPanel(PanelKind.GOTO) },
         )

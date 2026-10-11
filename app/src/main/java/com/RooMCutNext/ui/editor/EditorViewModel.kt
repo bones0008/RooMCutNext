@@ -69,8 +69,10 @@ data class EditorUiState(
     val audioTrimPreview: AudioTrimPreview? = null,
     val missingAssetIds: Set<String> = emptySet(),
     val exportState: ExportBus.ExportState? = null,
-    /** On-screen diagnostic log for the v1.0.6-diag build (last lines shown). */
+    /** On-screen diagnostic log (last lines) — only shown when overlay enabled. */
     val diagLog: List<String> = emptyList(),
+    /** Hidden diagnostics: toggled by tapping the project title 5 times. */
+    val diagOverlayVisible: Boolean = false,
 ) {
     val totalDurationUs: Long get() = project.totalDurationUs
     val selectedClip: Clip? get() = selectedClipId?.let { project.clipById(it) }
@@ -245,6 +247,11 @@ class EditorViewModel(
     /** Append a diagnostic line to the on-screen log (kept to last 9 lines). */
     private fun appendDiag(line: String) {
         _state.update { it.copy(diagLog = (it.diagLog + line).takeLast(9)) }
+    }
+
+    /** Toggle the hidden on-screen DIAG overlay (5 taps on the title). */
+    fun toggleDiagOverlay() {
+        _state.update { it.copy(diagOverlayVisible = !it.diagOverlayVisible) }
     }
 
     /** Called from the preview AndroidView update: reports the PlayerView pixel size. */
