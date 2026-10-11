@@ -129,7 +129,15 @@ class PlaybackController(
             applyPerClipPreviewVolume(project, seekUs)
         } catch (e: Exception) {
             Log.e(TAG, "setComposition/prepare failed", e)
-            onError?.invoke(e.message ?: "setComposition failed")
+            // Media3 throws several message-less checkState/checkArgument
+            // exceptions (e.g. missing durationUs); always surface the class
+            // name so field reports are diagnosable instead of a bare
+            // "setComposition failed".
+            val msg = e.message
+            onError?.invoke(buildString {
+                append(e.javaClass.simpleName)
+                if (!msg.isNullOrBlank()) append(": ").append(msg.take(140))
+            })
         }
     }
 

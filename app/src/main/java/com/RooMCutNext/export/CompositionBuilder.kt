@@ -168,6 +168,21 @@ object CompositionBuilder {
         if (asset.isImage) {
             builder.setDurationUs(clip.durationUs)
         } else {
+            // MANDATORY on Media3 1.11.1: CompositionPlayer requires every
+            // EditedMediaItem to carry a non-TIME_UNSET durationUs — otherwise
+            // createNonLoopingMediaSource() throws a message-less
+            // IllegalArgumentException synchronously inside setComposition()
+            // (surfacing as the cryptic "setComposition failed").
+            //
+            // Semantics (EditedMediaItem.getClippedDuration): durationUs is the
+            // source-time duration measured from position 0 and must satisfy
+            // clippingConfiguration.endPositionUs <= durationUs; the actual
+            // window duration is then end - start (divided by speed). The
+            // silent/blank-frame aux sources are built in the same coordinates
+            // and clipped identically, so the full source duration is the
+            // correct value here. maxOf() guards against metadata skew.
+            val sourceDurationUs = maxOf(asset.durationUs, clip.sourceOutUs).coerceAtLeast(1L)
+            builder.setDurationUs(sourceDurationUs)
             if (clip.speed != 1f) {
                 builder.setSpeed(SpeedParameters(ConstantSpeedProvider(clip.speed), /* shouldMaintainPitch = */ true))
             }
