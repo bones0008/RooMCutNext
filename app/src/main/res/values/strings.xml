@@ -119,7 +119,7 @@
     <string name="panel_audio_add_music">＋ 导入背景音乐 / 音频</string>
     <string name="panel_audio_need_selection">请先在时间线上选中一个视频片段（调音量/静音）或音频片段，再使用音频设置。导入音频请用「添加素材」。</string>
     <string name="panel_audio_clip_title">音频片段</string>
-    <string name="panel_audio_clip_hint">独立音频轨 · 拖动改变位置，拖两端修剪</string>
+    <string name="panel_audio_clip_hint">独立音频轨 · 拖动移动，拖两端修剪，播放头处点“分割”切开</string>
     <string name="panel_audio_delete">删除音频</string>
 
     <!-- Info panel -->

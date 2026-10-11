@@ -171,6 +171,33 @@ object TimelineOps {
         return out
     }
 
+    /**
+     * PLACE a clip at a target list position with an explicit leading gap
+     * (v1.0.9 drag-to-position). Unlike [move] (pure reorder, never punches
+     * holes), this is the free-positioning gesture: the dropped clip starts
+     * at (previous clip end + [gapBeforeUs]); when it is inserted before an
+     * existing clip that clip is pushed right and hugs the drop (its own
+     * leading hole is absorbed by the moved clip's new gap).
+     *
+     * The removed clip's PRE-EXISTING hole stays where it was (transferred to
+     * the follower), exactly like [move] — only the destination gap is new.
+     */
+    fun place(clips: List<Clip>, fromIndex: Int, insertAt: Int, gapBeforeUs: Long): List<Clip> {
+        if (fromIndex !in clips.indices) return clips
+        val item = clips[fromIndex]
+        val without = removeTransferringGapOnly(clips, fromIndex)
+        val idx = insertAt.coerceIn(0, without.size)
+        val gap = gapBeforeUs.coerceAtLeast(0L)
+        val out = without.toMutableList()
+        if (idx < out.size) {
+            out[idx] = out[idx].copy(gapBeforeUs = 0L)
+            out.add(idx, item.copy(gapBeforeUs = gap))
+        } else {
+            out.add(item.copy(gapBeforeUs = gap))
+        }
+        return out
+    }
+
     fun duplicate(clips: List<Clip>, index: Int, newId: String): List<Clip> {
         if (index !in clips.indices) return clips
         // The copy is inserted tightly after the original (no copied hole).
@@ -438,6 +465,32 @@ object TimelineOps {
 
     fun deleteAudio(audios: List<AudioClip>, id: String): List<AudioClip> =
         audios.filter { it.id != id }
+
+    /**
+     * Split the audio clip under [timelineUs] at that timeline position
+     * (v1.0.9: audio must be editable like video — the split button used to
+     * be a video-only feature). Audio has no speed, so timeline and source
+     * offsets are identical. Returns null when no clip covers the position
+     * or either half would be shorter than [AUDIO_MIN_DURATION_US].
+     */
+    fun splitAudioAt(
+        audios: List<AudioClip>,
+        timelineUs: Long,
+        newId: String,
+    ): Pair<List<AudioClip>, String>? {
+        val idx = audios.indexOfFirst { timelineUs >= it.startUs && timelineUs < it.endUs }
+        if (idx < 0) return null
+        val audio = audios[idx]
+        val boundary = audio.sourceInUs + (timelineUs - audio.startUs)
+        if (boundary - audio.sourceInUs < AUDIO_MIN_DURATION_US) return null
+        if (audio.sourceOutUs - boundary < AUDIO_MIN_DURATION_US) return null
+        val left = audio.copy(sourceOutUs = boundary)
+        val right = audio.copy(id = newId, startUs = timelineUs, sourceInUs = boundary)
+        val out = audios.toMutableList()
+        out[idx] = left
+        out.add(idx + 1, right)
+        return out to right.id
+    }
 
     // ------------------------------------------------------------------
     // Layer lane packing (shared by the timeline UI and composition build)

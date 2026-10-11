@@ -119,7 +119,7 @@
     <string name="panel_audio_add_music">+ Add background music / audio</string>
     <string name="panel_audio_need_selection">Select a video clip (volume/mute) or an audio clip on the timeline first. To import audio, use Add media.</string>
     <string name="panel_audio_clip_title">Audio clip</string>
-    <string name="panel_audio_clip_hint">Independent audio track · drag to move, drag edges to trim</string>
+    <string name="panel_audio_clip_hint">Independent audio track · drag to move, drag edges to trim, Split cuts at the playhead</string>
     <string name="panel_audio_delete">Delete audio</string>
 
     <!-- Info panel -->

@@ -89,6 +89,18 @@ private data class ClipLayout(
     val gapWidth: Float = 0f,
 )
 
+/** Projected drop of a clip drag (v1.0.9 free positioning): the slot the
+ *  clip will occupy and the black hole in front of it. */
+private data class Placement(
+    val insertAt: Int,
+    val gapBeforeUs: Long,
+    /** Timeline start/end of the clip once dropped, microseconds. */
+    val landStartUs: Long,
+    val landEndUs: Long,
+    /** End of the clip in front (where the projected hole begins). */
+    val predEndUs: Long,
+)
+
 private data class TextLayout(
     val item: TextOverlayItem,
     val lane: Int,
@@ -190,6 +202,10 @@ fun TimelineView(
     val viewportWState = remember { mutableFloatStateOf(0f) }
     /** Last tap on a text clip (id + timestamp) for double-tap-to-edit. */
     val lastTextTap = remember { mutableStateOf<Pair<String, Long>?>(null) }
+    /** Grab offset (fingerX - clipLeft, px) while dragging a video clip — the
+     *  elevated preview and the drop target keep it, so the clip lands exactly
+     *  where it is drawn. NaN when no clip drag is active. */
+    val clipGrabOffset = remember { mutableFloatStateOf(Float.NaN) }
 
     val currentOnAddMedia by rememberUpdatedState(onAddMedia)
     val currentOnFiles by rememberUpdatedState(onImportFromFileManager)
@@ -222,6 +238,41 @@ fun TimelineView(
     /** Time currently under the fixed playhead for a given scroll value. */
     fun timeAtPlayhead(scroll: Float): Long =
         (((scroll + playheadScreenX()) / pps * 1_000_000f).toLong()).coerceAtLeast(0L)
+
+    /**
+     * Projected drop of a clip drag (v1.0.9 free positioning): release at
+     * [fingerXpx] and the clip lands at [Placement.landStartUs] with a black
+     * hole of [Placement.gapBeforeUs] in front of it. This is how the user
+     * puts space between two clips — the drag is no longer a pure reorder.
+     *
+     * The clip's left edge tracks (fingerX - grabOffset), matching the
+     * elevated preview, so the clip lands exactly where it is drawn.
+     */
+    fun computePlacement(
+        snap: EditorViewModel.TimelineSnapshot,
+        moved: Clip,
+        fingerXpx: Float,
+    ): Placement? {
+        val others = snap.project.clips.filter { it.id != moved.id }
+        val offset = if (clipGrabOffset.floatValue.isNaN()) moved.durationUs / 2
+        else (clipGrabOffset.floatValue / pps * 1_000_000f).toLong()
+        val targetStartUs = (xToTimeUs(fingerXpx) - offset).coerceAtLeast(0L)
+        val starts = TimelineOps.starts(others)
+        // Insertion slot: before the first clip whose midpoint is past the target.
+        var insertAt = others.size
+        for (i in others.indices) {
+            if (targetStartUs < starts[i] + others[i].durationUs / 2) {
+                insertAt = i
+                break
+            }
+        }
+        val predEndUs = if (insertAt == 0) 0L else starts[insertAt - 1] + others[insertAt - 1].durationUs
+        // Magnetic: a near-touch drop snaps tight — no sliver black holes.
+        val gap = (targetStartUs - predEndUs).coerceAtLeast(0L)
+        val snappedGap = if (gap <= 300_000L) 0L else gap
+        val landStartUs = predEndUs + snappedGap
+        return Placement(insertAt, snappedGap, landStartUs, landStartUs + moved.durationUs, predEndUs)
+    }
 
     // ---------------- auto-sync scroll to the playhead ----------------
     // Whenever the playhead moves for any reason other than an active scrub
@@ -306,7 +357,15 @@ fun TimelineView(
                 v.beginScrub()
             }
             is DragMode.Trim -> v.selectClip(mode.clipId)
-            is DragMode.ClipMove -> RooMCutNextApp.vibrate(v.getApplication(), 14)
+            is DragMode.ClipMove -> {
+                RooMCutNextApp.vibrate(v.getApplication(), 14)
+                // Where inside the clip the finger grabbed (px from its left
+                // edge) — the elevated preview and the drop target both keep
+                // it so the clip lands where it is drawn, not centered on the
+                // finger.
+                val layout = geom.clips.firstOrNull { it.clip.id == mode.clipId }
+                clipGrabOffset.floatValue = layout?.let { x - it.left } ?: Float.NaN
+            }
             is DragMode.TextTrim -> v.selectText(mode.textId)
             is DragMode.AudioTrim -> v.selectAudio(mode.audioId)
             else -> Unit
@@ -380,23 +439,15 @@ fun TimelineView(
             is DragMode.Trim -> v.commitTrim()
             is DragMode.ClipMove -> {
                 val snap = snapshot ?: return
-                val others = snap.project.clips.filter { it.id != mode.clipId }
-                val fingerTimeUs = xToTimeUs(x)
-                val startsWithout = TimelineOps.starts(others)
-                var insertAt = others.size
-                for (i in others.indices) {
-                    val midTimeUs = startsWithout[i] + others[i].durationUs / 2
-                    if (fingerTimeUs < midTimeUs) {
-                        insertAt = i
-                        break
-                    }
-                }
-                // The insertion index among the OTHER clips maps 1:1 to the
-                // remove-then-insert index expected by TimelineOps.move.
-                if (insertAt != mode.fromIndex) {
-                    v.moveClip(mode.fromIndex, insertAt)
+                val moved = snap.project.clips.firstOrNull { it.id == mode.clipId } ?: return
+                val placement = computePlacement(snap, moved, x)
+                if (placement != null) {
+                    // v1.0.9: the drop CREATES the gap the user dragged —
+                    // clips can now sit apart with black between them.
+                    v.placeClip(mode.fromIndex, placement.insertAt, placement.gapBeforeUs)
                 }
                 fingerX.floatValue = Float.NaN
+                clipGrabOffset.floatValue = Float.NaN
             }
             is DragMode.TextMove -> {
                 val item = snapshot?.project?.texts?.firstOrNull { it.id == mode.textId } ?: return
@@ -522,6 +573,7 @@ fun TimelineView(
                                 }
                                 dragState.value = null
                                 fingerX.floatValue = Float.NaN
+                                clipGrabOffset.floatValue = Float.NaN
                                 mode = DragMode.Pinch
                                 pinchSpan = spanOf(pressed)
                             }
@@ -633,8 +685,10 @@ fun TimelineView(
                 drawGap(
                     gapLeft = layout.gapLeft,
                     gapWidth = layout.gapWidth,
+                    gapUs = layout.clip.gapBeforeUs,
                     trackTop = g.trackTop,
                     trackBottom = g.trackBottom,
+                    badgePaint = badgePaint,
                     dp = dp,
                 )
                 drawClip(
@@ -672,30 +726,55 @@ fun TimelineView(
             drawAudioLanes(snap, g, badgePaint, dp)
 
             if (moved != null && !fingerX.floatValue.isNaN()) {
-                // Insertion indicator among the remaining clips.
-                val others = clips.filter { it.clip.id != moved.clipId }
-                var insertBoundary = fingerX.floatValue
-                val fx = fingerX.floatValue
-                for (i in others.indices) {
-                    val boundary = others[i].left + others[i].width
-                    if (fx < others[i].left + others[i].width / 2f) {
-                        insertBoundary = others[i].left
-                        break
-                    } else if (i == others.size - 1) {
-                        insertBoundary = boundary
-                    }
-                }
-                drawLine(
-                    color = AccentColor,
-                    start = Offset(insertBoundary, g.trackTop),
-                    end = Offset(insertBoundary, g.trackBottom),
-                    strokeWidth = 3.dp.toPx(),
-                )
-                // The dragged clip follows the finger, slightly raised.
                 val dragged = clips.firstOrNull { it.clip.id == moved.clipId }
+                val movedClip = snap.project.clips.firstOrNull { it.id == moved.clipId }
+                val fx = fingerX.floatValue
+                val placement = movedClip?.let { computePlacement(snap, it, fx) }
+                if (placement != null) {
+                    // ---- projected black hole (only when the drop leaves a gap) ----
+                    if (placement.gapBeforeUs > 0L) {
+                        val gapL = g.timeToX(placement.predEndUs)
+                        val gapR = g.timeToX(placement.landStartUs)
+                        if (gapR - gapL > 1f) {
+                            drawRoundRect(
+                                color = Color(0xAA000000),
+                                topLeft = Offset(gapL, g.trackTop + 2f * dp),
+                                size = Size(gapR - gapL, TRACK_HEIGHT_DP * dp - 8f * dp),
+                                cornerRadius = CornerRadius(6f * dp),
+                            )
+                            drawRoundRect(
+                                color = Color(0x8037474F),
+                                topLeft = Offset(gapL, g.trackTop + 2f * dp),
+                                size = Size(gapR - gapL, TRACK_HEIGHT_DP * dp - 8f * dp),
+                                cornerRadius = CornerRadius(6f * dp),
+                                style = Stroke(width = 1.dp.toPx()),
+                            )
+                        }
+                    }
+                    // ---- landing outline: where the clip will snap ----
+                    val landL = g.timeToX(placement.landStartUs)
+                    val landW = g.timeToX(placement.landEndUs) - landL
+                    drawRoundRect(
+                        color = AccentColor.copy(alpha = 0.9f),
+                        topLeft = Offset(landL, g.trackTop + 2f * dp),
+                        size = Size(landW, TRACK_HEIGHT_DP * dp - 8f * dp),
+                        cornerRadius = CornerRadius(6f * dp),
+                        style = Stroke(width = 2.dp.toPx()),
+                    )
+                    drawLine(
+                        color = AccentColor,
+                        start = Offset(landL, g.trackTop),
+                        end = Offset(landL, g.trackBottom),
+                        strokeWidth = 3.dp.toPx(),
+                    )
+                }
+                // The dragged clip follows the finger (grab point preserved),
+                // slightly raised.
                 if (dragged != null) {
+                    val grabOff = if (clipGrabOffset.floatValue.isNaN()) dragged.width / 2f
+                    else clipGrabOffset.floatValue
                     drawClip(
-                        layout = dragged.copy(left = fx - dragged.width / 2f),
+                        layout = dragged.copy(left = fx - grabOff),
                         asset = snap.project.assetById(dragged.clip.assetId),
                         selected = true,
                         missing = dragged.clip.assetId in snap.missingAssetIds,
@@ -827,7 +906,7 @@ private fun DrawScope.drawRuler(project: Project, g: GeometryHolder, paint: Pain
     drawRect(SurfaceVariantColor, topLeft = Offset(0f, 0f), size = Size(g.viewportW, h))
     drawRect(Color(0xFF10141A), topLeft = Offset(0f, h - 1f), size = Size(g.viewportW, 1f))
 
-    val stepSec = rulerStepSec(pps)
+    val stepSec = rulerStepSec(pps, g.viewportW)
     val stepPx = stepSec * pps
     val firstTick = floor(scroll / stepPx) * stepPx
     var tick = firstTick
@@ -872,8 +951,19 @@ private fun DrawScope.drawRuler(project: Project, g: GeometryHolder, paint: Pain
     }
 }
 
-private fun rulerStepSec(pps: Float): Float {
-    val candidates = floatArrayOf(0.1f, 0.2f, 0.5f, 1f, 2f, 5f, 10f, 15f, 30f, 60f, 120f, 300f, 600f, 1800f)
+/**
+ * Ruler label step, seconds (v1.0.9 — user request: numbers were too dense).
+ *
+ * Labels sit on the 5-SECOND grid at normal zoom (default 64px/s used to
+ * label every single second). Zooming OUT stretches the step to 10/15/30s…
+ * so labels never crowd below ~64px. Zooming IN past the point where one
+ * 5s cell no longer fits the viewport subdivides back to 1s — the ruler
+ * keeps numeric reference for precise trimming, and at that zoom 1s is
+ * already hundreds of pixels apart, so it never reads as dense.
+ */
+private fun rulerStepSec(pps: Float, viewportW: Float): Float {
+    if (5f * pps > viewportW * 0.9f) return 1f
+    val candidates = floatArrayOf(5f, 10f, 15f, 30f, 60f, 120f, 300f, 600f, 1800f)
     for (c in candidates) {
         if (c * pps >= 64f) return c
     }
@@ -904,15 +994,17 @@ private fun DrawScope.drawTrackBackground(g: GeometryHolder, hasTextLanes: Boole
 
 /**
  * The black hole in front of a clip (v1.0.8 gaps): renders as a solid black
- * slab with a dashed-ish border and a tiny "黑场" badge so it reads as an
- * intentional black segment the user can lay text over. Invisible when the
- * gap is (almost) zero-width.
+ * slab with a dashed-ish border and a "黑场" feel — three slash marks, or a
+ * readable duration badge (e.g. "2.0s") when the slab is wide enough.
+ * Invisible when the gap is (almost) zero-width.
  */
 private fun DrawScope.drawGap(
     gapLeft: Float,
     gapWidth: Float,
+    gapUs: Long,
     trackTop: Float,
     trackBottom: Float,
+    badgePaint: Paint,
     dp: Float,
 ) {
     if (gapWidth <= 1.5f * dp) return
@@ -932,13 +1024,23 @@ private fun DrawScope.drawGap(
         cornerRadius = corner,
         style = Stroke(width = 1.dp.toPx()),
     )
-    // Center slash marks: three short diagonal strokes signaling "black".
     val cx = gapLeft + gapWidth / 2f
     val cy = top + height / 2f
-    val slash = 3.2f * dp
-    drawLine(Color(0xFF546E7A), Offset(cx - slash, cy + slash / 2), Offset(cx - slash / 2, cy - slash / 2), 1.5f * dp)
-    drawLine(Color(0xFF546E7A), Offset(cx, cy + slash / 2), Offset(cx + slash / 2, cy - slash / 2), 1.5f * dp)
-    drawLine(Color(0xFF546E7A), Offset(cx + slash, cy + slash / 2), Offset(cx + slash * 1.5f, cy - slash / 2), 1.5f * dp)
+    if (gapWidth > 40f * dp) {
+        // Wide hole: show its duration — the user lays text over a known
+        // length of black ("2s 黑场 + 文字").
+        val canvas = drawContext.canvas.nativeCanvas
+        badgePaint.color = android.graphics.Color.argb(0xE0, 0x90, 0xA4, 0xAE)
+        badgePaint.textAlign = android.graphics.Paint.Align.CENTER
+        badgePaint.textSize = 9.5f * dp
+        canvas.drawText(TimeCode.formatShort(gapUs), cx, cy + 3.5f * dp, badgePaint)
+    } else {
+        // Center slash marks: three short diagonal strokes signaling "black".
+        val slash = 3.2f * dp
+        drawLine(Color(0xFF546E7A), Offset(cx - slash, cy + slash / 2), Offset(cx - slash / 2, cy - slash / 2), 1.5f * dp)
+        drawLine(Color(0xFF546E7A), Offset(cx, cy + slash / 2), Offset(cx + slash / 2, cy - slash / 2), 1.5f * dp)
+        drawLine(Color(0xFF546E7A), Offset(cx + slash, cy + slash / 2), Offset(cx + slash * 1.5f, cy - slash / 2), 1.5f * dp)
+    }
 }
 
 private fun DrawScope.drawClip(

@@ -461,18 +461,39 @@ class EditorViewModel(
 
     fun splitAtPlayhead() {
         val s = _state.value
-        val result = TimelineOps.splitAtTimeline(
+        val videoResult = TimelineOps.splitAtTimeline(
             s.project.clips,
             { id -> s.project.assetById(id) },
             s.playheadUs,
             IdGen.new("c"),
         )
-        if (result == null) {
+        val audioResult = TimelineOps.splitAudioAt(
+            s.project.audios,
+            s.playheadUs,
+            IdGen.new("aud"),
+        )
+        if (videoResult == null && audioResult == null) {
             _state.update { it.copy(toast = "此处无法分割（位于片段边界或片段过短）") }
             return
         }
-        mutate("分割") { p -> p.copy(clips = result.clips) }
-        _state.update { it.copy(selectedClipId = result.rightId) }
+        // One undo step: cutting at the playhead slices EVERY layer under it
+        // (video AND audio), like a multi-track razor in classic NLEs.
+        mutate("分割") { p ->
+            p.copy(
+                clips = videoResult?.clips ?: p.clips,
+                audios = audioResult?.first ?: p.audios,
+            )
+        }
+        _state.update {
+            // Selection stays exclusive: prefer the video right half (the
+            // layer the user most likely wants to keep trimming), otherwise
+            // the audio right half.
+            if (videoResult != null) {
+                it.copy(selectedClipId = videoResult.rightId, selectedTextId = null, selectedAudioId = null)
+            } else {
+                it.copy(selectedClipId = null, selectedTextId = null, selectedAudioId = audioResult!!.second)
+            }
+        }
     }
 
     fun deleteSelected() {
@@ -508,6 +529,17 @@ class EditorViewModel(
     fun moveClip(fromIndex: Int, toIndex: Int) {
         if (fromIndex == toIndex) return
         mutate("移动") { p -> p.copy(clips = TimelineOps.move(p.clips, fromIndex, toIndex)) }
+    }
+
+    /**
+     * Free-position drop (v1.0.9): place the dragged clip at [insertAt] with
+     * an explicit leading [gapBeforeUs] black hole — how the user puts space
+     * between two clips. A zero gap degenerates to a plain reorder-insert.
+     */
+    fun placeClip(fromIndex: Int, insertAt: Int, gapBeforeUs: Long) {
+        mutate("放置") { p ->
+            p.copy(clips = TimelineOps.place(p.clips, fromIndex, insertAt, gapBeforeUs))
+        }
     }
 
     fun insertClipAt(clip: Clip, index: Int) {

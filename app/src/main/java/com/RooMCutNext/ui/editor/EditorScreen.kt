@@ -546,6 +546,9 @@ private fun ActionToolbar(
     onGoto: () -> Unit,
 ) {
     val hasClip = state.selectedClip != null
+    // v1.0.9: Split works on BOTH the video clip and the audio clip under the
+    // playhead — enable it whenever either layer has content.
+    val canSplit = state.project.clips.isNotEmpty() || state.project.audios.isNotEmpty()
     Row(
         Modifier
             .fillMaxWidth()
@@ -555,7 +558,7 @@ private fun ActionToolbar(
     ) {
         Spacer(Modifier.width(8.dp))
         ToolbarButton(Icons.Filled.Add, stringResource(R.string.timeline_add_media), enabled = true, onClick = onAddMedia)
-        ToolbarButton(Icons.Filled.ContentCut, stringResource(R.string.action_split), enabled = hasClip, onClick = onSplit)
+        ToolbarButton(Icons.Filled.ContentCut, stringResource(R.string.action_split), enabled = canSplit, onClick = onSplit)
         ToolbarButton(Icons.Filled.Delete, stringResource(R.string.action_delete), enabled = state.hasSelection, onClick = onDelete)
         ToolbarButton(Icons.Filled.ContentCopy, stringResource(R.string.action_duplicate), enabled = hasClip, onClick = onDuplicate)
         ToolbarButton(Icons.Filled.Speed, stringResource(R.string.action_speed), enabled = hasClip, onClick = onSpeed)

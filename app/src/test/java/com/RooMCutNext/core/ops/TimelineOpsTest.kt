@@ -267,6 +267,62 @@ class TimelineOpsTest {
         assertEquals(2_000_000L, fwd)
     }
 
+    // ---------------- place (v1.0.9 free positioning) ----------------
+
+    @Test
+    fun `place drops a clip after another with the dragged gap`() {
+        // A(1s) + B(1s) compact; drop B at 3s -> A, 2s black, B.
+        val a = clip("a", 0, 1_000_000)
+        val b = clip("b", 0, 1_000_000)
+        val after = TimelineOps.place(listOf(a, b), fromIndex = 1, insertAt = 1, gapBeforeUs = 2_000_000L)
+        assertEquals(0L, after[0].gapBeforeUs)
+        assertEquals(2_000_000L, after[1].gapBeforeUs)
+        assertEquals(listOf(a.id, b.id), after.map { it.id })
+        val st = TimelineOps.starts(after)
+        assertEquals(3_000_000L, st[1]) // B starts after A + 2s hole
+    }
+
+    @Test
+    fun `place before a clip pushes it right and absorbs its gap`() {
+        // A(1s), B(gap 1s, 1s): drop A back into slot 0 with a 0.5s gap ->
+        // B hugs the drop, its own 1s hole is replaced by the drop gap.
+        val a = clip("a", 0, 1_000_000)
+        val b = clip("b", 0, 1_000_000).copy(gapBeforeUs = 1_000_000L)
+        val after = TimelineOps.place(listOf(a, b), fromIndex = 0, insertAt = 0, gapBeforeUs = 500_000L)
+        assertEquals(listOf(a.id, b.id), after.map { it.id })
+        assertEquals(500_000L, after[0].gapBeforeUs) // A dropped with its hole
+        assertEquals(0L, after[1].gapBeforeUs)       // B hugs the drop
+    }
+
+    @Test
+    fun `place keeps the removed clip's pre-existing hole in place`() {
+        // A(1s), B(gap 2s, 1s), C(1s): move B to the FRONT with a 0 gap ->
+        // B first, the 2s hole transfers to B's old follower C.
+        val a = clip("a", 0, 1_000_000)
+        val b = clip("b", 0, 1_000_000).copy(gapBeforeUs = 2_000_000L)
+        val c = clip("c", 0, 1_000_000)
+        val after = TimelineOps.place(listOf(a, b, c), fromIndex = 1, insertAt = 0, gapBeforeUs = 0L)
+        assertEquals(listOf(b.id, a.id, c.id), after.map { it.id })
+        assertEquals(0L, after[0].gapBeforeUs)
+        assertEquals(0L, after[1].gapBeforeUs)
+        assertEquals(2_000_000L, after[2].gapBeforeUs) // hole stayed in the timeline
+    }
+
+    @Test
+    fun `place same slot zero gap is a no-op reorder`() {
+        val a = clip("a", 0, 1_000_000)
+        val b = clip("b", 0, 1_000_000)
+        val after = TimelineOps.place(listOf(a, b), fromIndex = 1, insertAt = 1, gapBeforeUs = 0L)
+        assertEquals(listOf(a.id, b.id), after.map { it.id })
+        assertEquals(0L, after.sumOf { it.gapBeforeUs })
+    }
+
+    @Test
+    fun `place with invalid index returns the list unchanged`() {
+        val a = clip("a", 0, 1_000_000)
+        assertEquals(listOf(a), TimelineOps.place(listOf(a), fromIndex = 5, insertAt = 0, gapBeforeUs = 1L))
+    }
+
     // ---------------- speed ----------------
 
     @Test
@@ -422,6 +478,58 @@ class TimelineOpsTest {
         val b = audioClip("y", startUs = 1_000_000L)
         val list = TimelineOps.insertAudio(TimelineOps.insertAudio(emptyList(), a), b)
         assertEquals(listOf("y", "x"), list.map { it.id })
+    }
+
+    // ---------------- audio split (v1.0.9) ----------------
+
+    @Test
+    fun `splitAudioAt cuts the clip under the playhead`() {
+        // clip [2s, 6s) on the timeline, source [10s, 14s); cut at 4s.
+        val item = audioClip("a", startUs = 2_000_000L, inUs = 10_000_000L, outUs = 14_000_000L)
+        val res = TimelineOps.splitAudioAt(listOf(item), 4_000_000L, "a2")
+        assertNotNull(res)
+        val (list, rightId) = res!!
+        assertEquals(2, list.size)
+        assertEquals("a2", rightId)
+        val left = list[0]
+        val right = list[1]
+        assertEquals(2_000_000L, left.startUs)
+        assertEquals(10_000_000L, left.sourceInUs)
+        assertEquals(12_000_000L, left.sourceOutUs) // 10s + 2s into the clip
+        assertEquals(4_000_000L, right.startUs)     // at the playhead
+        assertEquals(12_000_000L, right.sourceInUs)
+        assertEquals(14_000_000L, right.sourceOutUs)
+        // The two halves are contiguous: no audio lost, none duplicated.
+        assertEquals(left.endUs, right.startUs)
+        assertEquals(4_000_000L, left.durationUs + right.durationUs)
+    }
+
+    @Test
+    fun `splitAudioAt returns null outside every clip`() {
+        // start 2s, source span 2s -> timeline [2s, 4s).
+        val item = audioClip("a", startUs = 2_000_000L, outUs = 2_000_000L)
+        assertNull(TimelineOps.splitAudioAt(listOf(item), 0L, "a2"))
+        assertNull(TimelineOps.splitAudioAt(listOf(item), 1_999_999L, "a2"))
+        assertNull(TimelineOps.splitAudioAt(listOf(item), 4_000_000L, "a2")) // end is exclusive
+        assertNull(TimelineOps.splitAudioAt(emptyList(), 1L, "a2"))
+    }
+
+    @Test
+    fun `splitAudioAt enforces the minimum span on both halves`() {
+        // 300ms clip: 100ms min span means only the 100..200ms range can cut.
+        val item = audioClip("a", startUs = 0L, outUs = 300_000L)
+        assertNull(TimelineOps.splitAudioAt(listOf(item), 50_000L, "a2"))   // left too short
+        assertNull(TimelineOps.splitAudioAt(listOf(item), 250_000L, "a2")) // right too short
+        assertNotNull(TimelineOps.splitAudioAt(listOf(item), 150_000L, "a2"))
+    }
+
+    @Test
+    fun `splitAudioAt leaves other clips untouched`() {
+        val a = audioClip("a", startUs = 0L, outUs = 2_000_000L)
+        val b = audioClip("b", startUs = 5_000_000L, outUs = 7_000_000L)
+        val res = TimelineOps.splitAudioAt(listOf(a, b), 1_000_000L, "a2")!!
+        assertEquals(3, res.first.size)
+        assertEquals(b, res.first.last()) // untouched
     }
 
     @Test
