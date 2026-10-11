@@ -164,6 +164,10 @@
     <string name="importing_progress">Importing %1$d/%2$d · %3$s</string>
     <string name="error_playback_fmt">Playback error: %1$s</string>
     <string name="need_notification_permission">Notification permission is needed to show export progress</string>
+
+    <!-- Compatibility preview fallback -->
+    <string name="preview_degraded_chip">Compatibility preview · effects hidden, export unaffected</string>
+    <string name="preview_degraded_toast">Compatibility preview enabled: effects hidden in preview, export unaffected</string>
     <string name="grant">Allow</string>
     <string name="ok">OK</string>
     <string name="clip_badge_muted">Muted</string>

@@ -48,7 +48,12 @@ object CompositionBuilder {
             androidx.media3.common.C.TIME_UNSET
     }
 
-    fun build(project: Project, mediaDir: File, exportHeight: Int? = null): BuildResult {
+    fun build(
+        project: Project,
+        mediaDir: File,
+        exportHeight: Int? = null,
+        stripEffects: Boolean = false,
+    ): BuildResult {
         val starts = TimelineOps.starts(project.clips)
         val skipped = mutableListOf<String>()
         val items = mutableListOf<EditedMediaItem>()
@@ -60,7 +65,7 @@ object CompositionBuilder {
                 skipped += clip.id
                 return@forEachIndexed
             }
-            items += buildItem(project, clip, asset, file, starts[index])
+            items += buildItem(project, clip, asset, file, starts[index], stripEffects)
         }
 
         if (items.isEmpty()) {
@@ -69,6 +74,13 @@ object CompositionBuilder {
 
         val sequence = EditedMediaItemSequence.Builder(items).build()
         val builder = Composition.Builder(sequence)
+        // HDR footage (HLG/HDR10, the default on modern phone cameras) must be
+        // tone-mapped to SDR in the GL pipeline: the library default
+        // HDR_MODE_KEEP_HDR crashes at first prepare on devices whose GL stack
+        // cannot render HDR, surfacing as ERROR_CODE_UNSPECIFIED. Tone-mapping
+        // is a no-op for SDR input, and preview/export stay consistent because
+        // both consume this same Composition.
+        builder.setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL)
         if (exportHeight != null) {
             builder.setEffects(
                 Effects(
@@ -86,6 +98,7 @@ object CompositionBuilder {
         asset: MediaAsset,
         file: File,
         clipStartUs: Long,
+        stripEffects: Boolean,
     ): EditedMediaItem {
         val uri = Uri.fromFile(file)
 
@@ -107,39 +120,43 @@ object CompositionBuilder {
         }
 
         // ---- video effects ----
+        // (skipped entirely in compatibility/degraded preview mode; clipping,
+        // speed and mute stay so the timeline geometry is preserved)
         val videoEffects = mutableListOf<Effect>()
 
-        if (clip.rotationDeg != 0 || clip.flipH || clip.flipV) {
-            videoEffects += ScaleAndRotateTransformation.Builder()
-                .setScale(if (clip.flipH) -1f else 1f, if (clip.flipV) -1f else 1f)
-                .setRotationDegrees(clip.rotationDeg.toFloat())
-                .build()
-        }
-        clip.crop?.let { videoEffects += Crop(it.left, it.right, it.top, it.bottom) }
-        if (clip.adjust.brightness != 0f) videoEffects += Brightness(clip.adjust.brightness)
-        if (clip.adjust.contrast != 0f) videoEffects += Contrast(clip.adjust.contrast)
-        if (clip.adjust.saturation != 0f) {
-            videoEffects += HslAdjustment.Builder().adjustSaturation(clip.adjust.saturation).build()
-        }
+        if (!stripEffects) {
+            if (clip.rotationDeg != 0 || clip.flipH || clip.flipV) {
+                videoEffects += ScaleAndRotateTransformation.Builder()
+                    .setScale(if (clip.flipH) -1f else 1f, if (clip.flipV) -1f else 1f)
+                    .setRotationDegrees(clip.rotationDeg.toFloat())
+                    .build()
+            }
+            clip.crop?.let { videoEffects += Crop(it.left, it.right, it.top, it.bottom) }
+            if (clip.adjust.brightness != 0f) videoEffects += Brightness(clip.adjust.brightness)
+            if (clip.adjust.contrast != 0f) videoEffects += Contrast(clip.adjust.contrast)
+            if (clip.adjust.saturation != 0f) {
+                videoEffects += HslAdjustment.Builder().adjustSaturation(clip.adjust.saturation).build()
+            }
 
-        // ---- text overlays whose window overlaps this clip ----
-        val clipEndUs = clipStartUs + clip.durationUs
-        val overlapping = project.texts.filter { it.startUs < clipEndUs && it.endUs > clipStartUs }
-        if (overlapping.isNotEmpty()) {
-            videoEffects += OverlayEffect(
-                overlapping.map { text ->
-                    TimedTextOverlay(
-                        item = text,
-                        windowStartUs = (text.startUs - clipStartUs).coerceAtLeast(0L),
-                        windowEndUs = (text.endUs - clipStartUs).coerceAtMost(clip.durationUs),
-                    )
-                }
-            )
+            // ---- text overlays whose window overlaps this clip ----
+            val clipEndUs = clipStartUs + clip.durationUs
+            val overlapping = project.texts.filter { it.startUs < clipEndUs && it.endUs > clipStartUs }
+            if (overlapping.isNotEmpty()) {
+                videoEffects += OverlayEffect(
+                    overlapping.map { text ->
+                        TimedTextOverlay(
+                            item = text,
+                            windowStartUs = (text.startUs - clipStartUs).coerceAtLeast(0L),
+                            windowEndUs = (text.endUs - clipStartUs).coerceAtMost(clip.durationUs),
+                        )
+                    }
+                )
+            }
         }
 
         // ---- audio ----
         val audioEffects = mutableListOf<AudioProcessor>()
-        if (!asset.isImage && !clip.muted &&
+        if (!stripEffects && !asset.isImage && !clip.muted &&
             (clip.volume != 1f || clip.fadeInMs > 0 || clip.fadeOutMs > 0)
         ) {
             audioEffects += GainAudioProcessor(clip.volume, clip.fadeInMs * 1000L, clip.fadeOutMs * 1000L, clip.durationUs)

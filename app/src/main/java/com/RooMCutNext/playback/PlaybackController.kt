@@ -1,8 +1,9 @@
 package com.RooMCutNext.playback
 
 import android.content.Context
+import android.util.Log
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.transformer.Composition
 import androidx.media3.transformer.CompositionPlayer
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.ops.TimelineOps
@@ -24,6 +25,12 @@ import kotlinx.coroutines.launch
  *
  * Position mapping is 1:1: the composition timeline IS the app timeline
  * (prefix sums of clip durations), no extra bookkeeping is needed.
+ *
+ * Error strategy: a [PlaybackException] unwraps its root cause into the
+ * user-visible message (the bare ERROR_CODE_UNSPECIFIED code name alone is
+ * useless for debugging). On the FIRST error the controller retries once in
+ * "compatibility mode" — same timeline, per-clip GL effects stripped — so a
+ * device with a fragile effects pipeline can still preview, trim and export.
  */
 class PlaybackController(
     private val context: Context,
@@ -38,9 +45,21 @@ class PlaybackController(
     var onEnded: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
 
+    /** Fired once, right before the automatic compatibility-mode retry. */
+    var onDegraded: (() -> Unit)? = null
+
     private var pollJob: Job? = null
     private var lastSyncedClipsHash: Int = 0
     private var lastSyncedTextsHash: Int = 0
+
+    /** Compatibility preview active: per-clip effects are stripped. */
+    @Volatile
+    var degraded: Boolean = false
+        private set
+
+    private var lastProject: Project? = null
+    private var lastMediaDir: File? = null
+    private var lastPositionUs: Long = 0L
 
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -51,8 +70,14 @@ class PlaybackController(
             if (playbackState == Player.STATE_ENDED) onEnded?.invoke()
         }
 
-        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-            onError?.invoke(error.errorCodeName)
+        override fun onPlayerError(error: PlaybackException) {
+            Log.e(TAG, "CompositionPlayer playback error", error)
+            val detail = describeError(error)
+            if (!degraded && lastProject != null && lastMediaDir != null) {
+                degradeAndRetry()
+            } else {
+                onError?.invoke(detail)
+            }
         }
     }
 
@@ -74,6 +99,9 @@ class PlaybackController(
      */
     fun refresh(project: Project, mediaDir: File, preservePositionUs: Long, force: Boolean = false) {
         val p = ensurePlayer()
+        lastProject = project
+        lastMediaDir = mediaDir
+        lastPositionUs = preservePositionUs
         val clipsHash = project.clips.hashCode()
         val textsHash = project.texts.hashCode()
         if (!force && clipsHash == lastSyncedClipsHash && textsHash == lastSyncedTextsHash) {
@@ -84,7 +112,7 @@ class PlaybackController(
         lastSyncedTextsHash = textsHash
 
         val buildResult = try {
-            CompositionBuilder.build(project, mediaDir)
+            CompositionBuilder.build(project, mediaDir, stripEffects = degraded)
         } catch (e: Exception) {
             onError?.invoke(e.message ?: "composition build failed")
             return
@@ -95,10 +123,12 @@ class PlaybackController(
         val seekUs = preservePositionUs.coerceIn(0L, if (totalUs > 0) totalUs else 0L)
         try {
             p.setComposition(buildResult.composition)
+            p.prepare()
             if (seekUs > 0) p.seekTo(seekUs / 1000L)
             if (wasPlaying) p.play() else p.pause()
             applyPerClipPreviewVolume(project, seekUs)
         } catch (e: Exception) {
+            Log.e(TAG, "setComposition/prepare failed", e)
             onError?.invoke(e.message ?: "setComposition failed")
         }
     }
@@ -107,6 +137,35 @@ class PlaybackController(
         // Nothing to play; keep the player idle.
         lastSyncedClipsHash = 0
         lastSyncedTextsHash = 0
+        lastProject = null
+        lastMediaDir = null
+    }
+
+    /** One-shot automatic fallback: rebuild without per-clip effects. */
+    private fun degradeAndRetry() {
+        degraded = true
+        onDegraded?.invoke()
+        val project = lastProject ?: return
+        val mediaDir = lastMediaDir ?: return
+        refresh(project, mediaDir, lastPositionUs, force = true)
+    }
+
+    /** "ERROR_CODE_UNSPECIFIED · VideoFrameProcessingException: <root cause>". */
+    private fun describeError(error: PlaybackException): String {
+        var cause: Throwable = error
+        while (cause.cause != null && cause.cause !== cause) {
+            cause = cause.cause!!
+        }
+        val rootMsg = cause.message
+            ?.lineSequence()?.firstOrNull { it.isNotBlank() }
+            ?.take(140)
+            ?.trim()
+        return buildString {
+            append(error.errorCodeName)
+            append(" · ")
+            append(cause.javaClass.simpleName)
+            if (!rootMsg.isNullOrBlank() && rootMsg != error.message) append(": ").append(rootMsg)
+        }
     }
 
     private fun startPolling() {
@@ -117,6 +176,7 @@ class PlaybackController(
                 val p = player ?: break
                 try {
                     val posMs = p.currentPosition
+                    lastPositionUs = posMs * 1000L
                     onPositionUs?.invoke(posMs * 1000L)
                     // Per-clip preview volume (incl. fades) driven from the timeline
                     // so it stays live even without rebuilding the composition.
@@ -188,5 +248,9 @@ class PlaybackController(
             runCatching { release() }
         }
         player = null
+    }
+
+    private companion object {
+        const val TAG = "RooMCutNextPlayback"
     }
 }

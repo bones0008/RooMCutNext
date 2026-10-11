@@ -113,7 +113,7 @@ Native Android single-layer timeline video editor.
 
 最简单的方式（无需任何开发环境）：
 
-1. 把 `RooMCutNext-v1.0.0-debug.apk` 传到手机（微信/网盘/USB 均可）
+1. 把 `RooMCutNext-v1.0.1-debug.apk` 传到手机（微信/网盘/USB 均可）
 2. 在手机上点开该文件，系统询问「允许安装未知来源应用」时选择允许
 3. 安装完成，桌面出现「RooMCutNext」图标
 
@@ -230,10 +230,11 @@ app/src/main/java/com.RooMCutNext/
 1. **转场（Crossfade 等）** 未实现 — 如你的需求文档所述，转场会引入多层合成架构，计划 V2 做复合层
 2. **音频独立轨道**（背景音乐、配音）未实现 — V1 只有每片段原声控制
 3. **导出为 VFR**（可变帧率）MP4 — 所有主流播放器/平台都支持，但某些严格 CFR 的工具可能需要转码
-4. **自由裁剪** 通过边距滑杆实现（不是框选手势）
-5. 文字内容编辑不进入撤销栈（样式调整会进）
-6. debug APK 体积较大（~66MB，含全量图标与调试符号）；开启 R8 的 release 构建可显著缩小，V1 为稳定性默认关闭混淆
-7. CompositionPlayer 为 Media3 实验性 API（`@UnstableApi`），升级 Media3 大版本时需回归测试
+4. **HDR 素材（HLG/HDR10）自动色调映射为 SDR** — 预览与导出一致，在所有设备上稳定；V1 不导出 HDR。若设备 GL 管线异常，预览会自动降级到兼容模式（画面效果不显示，导出不受影响）
+5. **自由裁剪** 通过边距滑杆实现（不是框选手势）
+6. 文字内容编辑不进入撤销栈（样式调整会进）
+7. debug APK 体积较大（~66MB，含全量图标与调试符号）；开启 R8 的 release 构建可显著缩小，V1 为稳定性默认关闭混淆
+8. CompositionPlayer 为 Media3 实验性 API（`@UnstableApi`），升级 Media3 大版本时需回归测试
 
 ## 路线图（建议优先级）
 

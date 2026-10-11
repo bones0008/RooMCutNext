@@ -164,6 +164,10 @@
     <string name="importing_progress">导入中 %1$d/%2$d · %3$s</string>
     <string name="error_playback_fmt">播放出错：%1$s</string>
     <string name="need_notification_permission">需要通知权限用于显示导出进度</string>
+
+    <!-- Compatibility preview fallback -->
+    <string name="preview_degraded_chip">兼容预览 · 画面效果暂不显示，导出不受影响</string>
+    <string name="preview_degraded_toast">已切换到兼容预览：画面效果暂不显示，导出不受影响</string>
     <string name="grant">允许</string>
     <string name="ok">好的</string>
     <string name="clip_badge_muted">静音</string>

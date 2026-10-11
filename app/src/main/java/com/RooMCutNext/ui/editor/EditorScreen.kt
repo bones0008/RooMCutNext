@@ -20,8 +20,10 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -161,7 +163,10 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
 
         // ---------------- top bar ----------------
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+            Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onExit) {
@@ -261,13 +266,28 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                             stringResource(R.string.error_playback_fmt, err),
                             style = MaterialTheme.typography.labelMedium,
                             color = Color.White,
-                            maxLines = 2,
+                            maxLines = 3,
                             modifier = Modifier.weight(1f, fill = false),
                         )
                         TextButton(onClick = { vm.clearPlaybackError() }) {
                             Text(stringResource(R.string.ok), color = Color.White)
                         }
                     }
+                }
+            }
+
+            if (state.previewDegraded) {
+                Surface(
+                    color = Color(0xCC7A5900),
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(8.dp),
+                ) {
+                    Text(
+                        stringResource(R.string.preview_degraded_chip),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    )
                 }
             }
         }
@@ -441,6 +461,7 @@ private fun ActionToolbar(
     Row(
         Modifier
             .fillMaxWidth()
+            .navigationBarsPadding()
             .horizontalScroll(rememberScrollState())
             .padding(vertical = 6.dp),
     ) {

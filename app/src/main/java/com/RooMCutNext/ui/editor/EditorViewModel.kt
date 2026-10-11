@@ -51,6 +51,8 @@ data class EditorUiState(
     val importing: ImportingState? = null,
     val toast: String? = null,
     val playbackError: String? = null,
+    /** Compatibility preview active: per-clip effects stripped after a player error. */
+    val previewDegraded: Boolean = false,
     /** Live trim preview while the user drags a trim handle (not yet committed). */
     val trimPreview: TrimPreview? = null,
     val missingAssetIds: Set<String> = emptySet(),
@@ -110,6 +112,10 @@ class EditorViewModel(
 
     val playback = PlaybackController(application, viewModelScope)
 
+    /** Localized notice shown when preview falls back to compatibility mode. */
+    private val degradedNotice: String =
+        application.getString(com.RooMCutNext.R.string.preview_degraded_toast)
+
     /** Set true while the user scrubbs the playhead by touch (poll must not fight the finger). */
     var scrubbingByTouch = false
 
@@ -136,6 +142,15 @@ class EditorViewModel(
             playback.pause()
         }
         playback.onError = { msg -> _state.update { it.copy(playbackError = msg) } }
+        playback.onDegraded = {
+            _state.update {
+                it.copy(
+                    previewDegraded = true,
+                    playbackError = null,
+                    toast = it.toast ?: degradedNotice,
+                )
+            }
+        }
 
         refreshPlayback(force = true)
 
