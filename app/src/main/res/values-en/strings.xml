@@ -18,6 +18,9 @@
     <string name="home_confirm">Confirm</string>
     <string name="home_clip_count">%1$d clips · %2$s</string>
     <string name="home_new_project_name">Project %1$d</string>
+    <string name="home_name_dialog_title">Project name</string>
+    <string name="home_name_dialog_create">Create</string>
+    <string name="home_name_dialog_hint">Rename it, or leave as-is to use the default name</string>
     <string name="home_deleted">Deleted</string>
     <string name="home_language_toggle">中</string>
     <string name="home_import_media">Import media</string>

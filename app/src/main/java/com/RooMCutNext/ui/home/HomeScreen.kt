@@ -43,6 +43,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,14 +52,18 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import com.RooMCutNext.R
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.util.TimeCode
 import com.RooMCutNext.ui.theme.AccentColor
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -76,10 +81,20 @@ fun HomeScreen(onOpenProject: (String) -> Unit) {
 @Composable
 private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
     val projects by vm.projects.collectAsState()
+    // v1.0.11: timeline-frame-20 posters keyed by project id.
+    val posters by vm.posters.collectAsState()
     var menuFor by remember { mutableStateOf<String?>(null) }
     var renameFor by remember { mutableStateOf<String?>(null) }
     var deleteFor by remember { mutableStateOf<String?>(null) }
     var showOrientationDialog by remember { mutableStateOf(false) }
+    // v1.0.11: orientation picked, waiting for the name dialog to confirm.
+    var pendingPortrait by remember { mutableStateOf<Boolean?>(null) }
+
+    // The HomeViewModel is Activity-scoped and outlives the home screen, so
+    // its init{} refresh does NOT re-run when the user returns from the
+    // editor. Re-refresh on every entry into composition: this is what keeps
+    // clip counts, dates AND posters in sync after edits.
+    LaunchedEffect(Unit) { vm.refresh() }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -135,6 +150,7 @@ private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
                 items(projects, key = { it.id }) { project ->
                     ProjectCard(
                         project = project,
+                        posterPath = posters[project.id],
                         onClick = { onOpenProject(project.id) },
                         onMenu = { menuFor = project.id },
                     )
@@ -201,7 +217,7 @@ private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
         )
     }
 
-    // New project: pick the canvas orientation first (landscape 16:9 vs
+    // New project, step 1: pick the canvas orientation (landscape 16:9 vs
     // portrait 9:16) so portrait projects get a tall preview area from the
     // start instead of a letterboxed sliver.
     if (showOrientationDialog) {
@@ -209,7 +225,21 @@ private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
             onDismiss = { showOrientationDialog = false },
             onPick = { portrait ->
                 showOrientationDialog = false
-                vm.createProject(onOpenProject, portrait = portrait)
+                pendingPortrait = portrait
+            },
+        )
+    }
+
+    // New project, step 2 (v1.0.11): the name — pre-filled with the default
+    // "项目 N". The user may edit it, or confirm as-is / leave it blank to
+    // keep the default.
+    pendingPortrait?.let { portrait ->
+        ProjectNameDialog(
+            initial = vm.defaultProjectName(),
+            onDismiss = { pendingPortrait = null },
+            onConfirm = { name ->
+                pendingPortrait = null
+                vm.createProject(onOpenProject, portrait = portrait, customName = name)
             },
         )
     }
@@ -289,7 +319,12 @@ private fun OrientationOption(wide: Boolean, title: String, desc: String, onClic
 }
 
 @Composable
-private fun ProjectCard(project: Project, onClick: () -> Unit, onMenu: () -> Unit) {
+private fun ProjectCard(
+    project: Project,
+    posterPath: String?,
+    onClick: () -> Unit,
+    onMenu: () -> Unit,
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -301,16 +336,30 @@ private fun ProjectCard(project: Project, onClick: () -> Unit, onMenu: () -> Uni
             Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // v1.0.11: live poster — the timeline's 20th frame, refreshed
+            // automatically after edits; the movie icon is now the fallback
+            // for empty / audio-only / extraction-failed projects.
             Box(
                 Modifier
                     .size(44.dp)
                     .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    Icons.Filled.Movie, null,
-                    tint = AccentColor,
-                )
+                if (posterPath != null) {
+                    AsyncImage(
+                        model = File(posterPath),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape),
+                    )
+                } else {
+                    Icon(
+                        Icons.Filled.Movie, null,
+                        tint = AccentColor,
+                    )
+                }
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
@@ -350,6 +399,35 @@ private fun RenameDialog(initial: String, onDismiss: () -> Unit, onConfirm: (Str
         },
         confirmButton = {
             TextButton(onClick = { onConfirm(text) }) { Text(stringResource(R.string.dialog_save)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.home_cancel)) }
+        },
+    )
+}
+
+/** v1.0.11: step 2 of project creation — name it, or keep the default. */
+@Composable
+private fun ProjectNameDialog(initial: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var text by rememberSaveable { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.home_name_dialog_title)) },
+        text = {
+            Column {
+                OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    stringResource(R.string.home_name_dialog_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(text) }) {
+                Text(stringResource(R.string.home_name_dialog_create))
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.home_cancel)) }

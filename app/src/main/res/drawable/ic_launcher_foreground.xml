@@ -4,14 +4,10 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- play triangle -->
+    <!-- v1.0.11: play triangle in the app accent (was white); the cut slash
+         was removed per user request. Background stays near-black
+         (@color/ic_launcher_background #101418). -->
     <path
-        android:fillColor="#F2F5F7"
+        android:fillColor="#37E6C5"
         android:pathData="M40,38 L40,70 L68,54 Z" />
-    <!-- cut slash -->
-    <path
-        android:strokeColor="#37E6C5"
-        android:strokeWidth="5"
-        android:strokeLineCap="round"
-        android:pathData="M36,76 L76,28" />
 </vector>

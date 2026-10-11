@@ -18,6 +18,9 @@
     <string name="home_confirm">确认</string>
     <string name="home_clip_count">%1$d 个片段 · %2$s</string>
     <string name="home_new_project_name">项目 %1$d</string>
+    <string name="home_name_dialog_title">项目名称</string>
+    <string name="home_name_dialog_create">创建</string>
+    <string name="home_name_dialog_hint">可修改名称；留空或直接创建则使用默认名</string>
     <string name="home_deleted">已删除</string>
     <string name="home_language_toggle">EN</string>
     <string name="home_import_media">导入素材</string>
