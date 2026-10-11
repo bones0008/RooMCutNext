@@ -620,6 +620,26 @@ class EditorViewModel(
         playback.seekTo(clamped)
     }
 
+    /** Drag-path seek: UI playhead updates instantly, player seek coalesced. */
+    fun seekDuringDrag(us: Long) {
+        val total = _state.value.project.totalDurationUs
+        val clamped = us.coerceIn(0L, total)
+        _state.update { it.copy(playheadUs = clamped) }
+        playback.seekThrottled(clamped)
+    }
+
+    /** Media3 scrubbing mode on: frames render immediately while dragging. */
+    fun beginScrub() {
+        scrubbingByTouch = true
+        playback.beginScrub()
+    }
+
+    /** Scrubbing off; restores the pre-drag play/pause state. */
+    fun endScrub() {
+        scrubbingByTouch = false
+        playback.endScrub()
+    }
+
     fun stepFrame(forward: Boolean) {
         playback.pause()
         val s = _state.value

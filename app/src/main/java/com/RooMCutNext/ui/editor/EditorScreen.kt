@@ -409,22 +409,16 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                TimeCode.formatPrecise(state.playheadUs),
-                style = MaterialTheme.typography.displaySmall,
+                TimeCode.formatClock(state.playheadUs),
+                style = MaterialTheme.typography.titleLarge,
                 color = AccentColor,
             )
             Text(
-                " ${stringResource(R.string.time_total_symbol)} ${TimeCode.formatPrecise(state.totalDurationUs)}",
-                style = MaterialTheme.typography.displaySmall,
+                " / ${TimeCode.formatClock(state.totalDurationUs)}",
+                style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.weight(1f))
-            Text(
-                TimeCode.formatTimecodeFrames(state.playheadUs, state.project.fps),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.width(8.dp))
             IconButton(onClick = { vm.zoomOut() }, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Filled.ZoomOut, stringResource(R.string.zoom_out),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant)

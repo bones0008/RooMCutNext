@@ -253,20 +253,19 @@ object TimelineOps {
         val asset = assetLookup(clip.assetId)
 
         // Current position inside the source, on the source frame grid.
-        val rawSource = clip.sourceInUs + localUs * clip.speed
+        // Double math: Float (24-bit mantissa) loses whole frames once
+        // timeline positions reach minutes-scale microsecond values.
+        val rawSource = clip.sourceInUs + localUs * clip.speed.toDouble()
         val frameUs = asset?.takeIf { !it.isImage }?.sourceFrameDurationUs ?: 0L
         val currentSource = if (frameUs > 0) {
-            // Floor to grid, but if we are exactly on a boundary keep it.
-            val floored = (rawSource.toLong() / frameUs) * frameUs
-            if (floored == rawSource.toLong() - 1 || kotlin.math.abs(floored - rawSource.toLong()) <= 1) floored
-            else floored
+            (rawSource.toLong() / frameUs) * frameUs
         } else rawSource.toLong()
 
         val nextSource = if (forward) currentSource + max(frameUs, 1L) else currentSource - max(frameUs, 1L)
 
         return if (nextSource > clip.sourceInUs && nextSource < clip.sourceOutUs) {
             // Still inside this clip -> convert back to timeline.
-            st[idx] + ((nextSource - clip.sourceInUs) / clip.speed).toLong()
+            st[idx] + ((nextSource - clip.sourceInUs).toDouble() / clip.speed).toLong()
         } else {
             // Cross the boundary.
             if (forward) {

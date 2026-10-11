@@ -51,6 +51,19 @@ object TimeCode {
         return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
     }
 
+    /**
+     * "MM:SS" (or "H:MM:SS" past the hour) — the transport clock. Deliberately
+     * the shortest useful form: users asked for "00:00", not milliseconds or
+     * SMPTE frame counts.
+     */
+    fun formatClock(us: Long): String {
+        val totalSec = us / 1_000_000
+        val h = totalSec / 3600
+        val m = (totalSec % 3600) / 60
+        val s = totalSec % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
+    }
+
     /** Compact ruler label: sub-second steps get a "s" suffix. */
     fun formatRulerLabel(us: Long): String {
         val totalSec = us / 1_000_000

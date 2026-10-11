@@ -52,6 +52,14 @@ class PlaybackController(
     private var lastSyncedClipsHash: Int = 0
     private var lastSyncedTextsHash: Int = 0
 
+    /** True while the user drags the playhead: Media3 scrubbing mode on. */
+    @Volatile
+    private var scrubbing = false
+
+    /** Pending seek target while throttling (non-null = a flush is scheduled). */
+    private var pendingSeekUs: Long? = null
+    private var seekFlushJob: Job? = null
+
     /** Compatibility preview active: per-clip effects are stripped. */
     @Volatile
     var degraded: Boolean = false
@@ -179,17 +187,22 @@ class PlaybackController(
     private fun startPolling() {
         pollJob?.cancel()
         pollJob = scope.launch(Dispatchers.Main.immediate) {
-            var lastVolKey = ""
             while (isActive) {
                 val p = player ?: break
                 try {
                     val posMs = p.currentPosition
                     lastPositionUs = posMs * 1000L
-                    onPositionUs?.invoke(posMs * 1000L)
+                    // Echo the position to the UI ONLY while actually playing.
+                    // When paused, a seek is still being processed internally and
+                    // echoing the stale position would visually cancel out
+                    // frame-step / playhead jumps set by the ViewModel.
+                    if (p.isPlaying) {
+                        onPositionUs?.invoke(posMs * 1000L)
+                    }
                     // Per-clip preview volume (incl. fades) driven from the timeline
                     // so it stays live even without rebuilding the composition.
                     val project = currentProjectRef
-                    if (project != null) {
+                    if (project != null && !scrubbing) {
                         applyPerClipPreviewVolume(project, posMs * 1000L)
                     }
                 } catch (e: Exception) {
@@ -213,19 +226,28 @@ class PlaybackController(
         }
         val clip = project.clips[idx]
         val asset = project.assetById(clip.assetId)
-        if (clip.muted || asset == null || !asset.hasAudio) {
+        // Only a deliberate mute forces silence. A missing/"no audio" asset flag
+        // must NOT zero the volume: the hasAudio metadata is device-dependent
+        // (OEMs return "yes"/"true"/"1") and a false negative silently killed
+        // ALL preview audio in v1.0.0-v1.0.2. With no real audio track the
+        // volume setting is simply a no-op.
+        if (clip.muted) {
             p.volume = 0f
             return
         }
         var vol = clip.volume
-        val start = TimelineOps.starts(project.clips)[idx]
-        val local = timelineUs - start
-        val fadeInUs = clip.fadeInMs * 1000L
-        val fadeOutUs = clip.fadeOutMs * 1000L
-        if (fadeInUs > 0 && local < fadeInUs) vol *= local.toFloat() / fadeInUs
-        if (fadeOutUs > 0) {
-            val fadeStart = clip.durationUs - fadeOutUs
-            if (local > fadeStart) vol *= ((clip.durationUs - local).toFloat() / fadeOutUs).coerceIn(0f, 1f)
+        // Fade curves only make sense when the clip actually spans this time.
+        val assetRef = asset
+        if (assetRef != null) {
+            val start = TimelineOps.starts(project.clips)[idx]
+            val local = timelineUs - start
+            val fadeInUs = clip.fadeInMs * 1000L
+            val fadeOutUs = clip.fadeOutMs * 1000L
+            if (fadeInUs > 0 && local < fadeInUs) vol *= local.toFloat() / fadeInUs
+            if (fadeOutUs > 0) {
+                val fadeStart = clip.durationUs - fadeOutUs
+                if (local > fadeStart) vol *= ((clip.durationUs - local).toFloat() / fadeOutUs).coerceIn(0f, 1f)
+            }
         }
         p.volume = vol.coerceIn(0f, 2f)
     }
@@ -236,9 +258,75 @@ class PlaybackController(
 
     fun play() { player?.play() }
     fun pause() { player?.pause() }
+
+    /**
+     * Enter Media3 scrubbing mode for interactive playhead dragging: video
+     * frames are released immediately (no vsync alignment), audio is parked,
+     * and playWhenReady is automatically restored on [endScrub].
+     */
+    fun beginScrub() {
+        if (scrubbing) return
+        scrubbing = true
+        try {
+            player?.setScrubbingModeEnabled(true)
+        } catch (e: Exception) {
+            Log.w(TAG, "setScrubbingModeEnabled(true) failed", e)
+        }
+    }
+
+    fun endScrub() {
+        if (!scrubbing) return
+        scrubbing = false
+        // Flush any pending throttled seek first so the final position is the
+        // one the finger last pointed at.
+        flushPendingSeek()
+        try {
+            player?.setScrubbingModeEnabled(false)
+        } catch (e: Exception) {
+            Log.w(TAG, "setScrubbingModeEnabled(false) failed", e)
+        }
+    }
+
+    /** Immediate (non-throttled) seek: frame-step, go-to-start/end, taps. */
     fun seekTo(us: Long) {
+        pendingSeekUs = null
+        seekFlushJob?.cancel()
+        dispatchSeek(us)
+    }
+
+    /**
+     * Throttled seek for drag gestures: dispatches at most once per 80ms and
+     * coalesces intermediate targets, so ExoPlayer is not flooded with seeks
+     * (a seek storm is what made the picture lag ~2s behind the finger).
+     */
+    fun seekThrottled(us: Long) {
+        pendingSeekUs = us
+        if (seekFlushJob?.isActive != true) {
+            seekFlushJob = scope.launch(Dispatchers.Main.immediate) {
+                while (true) {
+                    val target = pendingSeekUs ?: break
+                    pendingSeekUs = null
+                    dispatchSeek(target)
+                    delay(80)
+                }
+            }
+        }
+    }
+
+    private fun flushPendingSeek() {
+        val target = pendingSeekUs ?: return
+        pendingSeekUs = null
+        seekFlushJob?.cancel()
+        dispatchSeek(target)
+    }
+
+    private fun dispatchSeek(us: Long) {
         val p = player ?: return
-        p.seekTo((us / 1000L).coerceAtLeast(0L))
+        try {
+            p.seekTo((us / 1000L).coerceAtLeast(0L))
+        } catch (e: Exception) {
+            Log.w(TAG, "seekTo failed", e)
+        }
     }
 
     fun stepFrame(project: Project, timelineUs: Long, forward: Boolean): Long {

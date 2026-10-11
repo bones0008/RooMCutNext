@@ -70,11 +70,17 @@ object MetadataExtractor {
             }
             if (width <= 0 || height <= 0 || durationMs <= 0) return null
 
-            val hasAudio = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "1"
+            // NOTE: METADATA_KEY_HAS_AUDIO is documented as "1" but OEM
+            // implementations return "yes"/"true" depending on device. Treat any
+            // non-blank value as "has audio", then OR it with the MediaExtractor
+            // track scan below (which is container-accurate).
+            val mmrHasAudio = !mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+                .isNullOrBlank()
 
             var fps = 0f
             var videoCodec: String? = null
             var audioCodec: String? = null
+            var audioTrackFound = false
             try {
                 val extractor = MediaExtractor()
                 extractor.setDataSource(file.absolutePath)
@@ -86,12 +92,14 @@ object MetadataExtractor {
                         fps = fmt.frameRate()
                     } else if (mime.startsWith("audio/")) {
                         audioCodec = prettifyAudioMime(mime)
+                        audioTrackFound = true
                     }
                 }
                 extractor.release()
             } catch (e: Exception) {
                 // fps stays unknown; UI falls back to the project fps.
             }
+            val hasAudio = mmrHasAudio || audioTrackFound
             if (fps <= 0f) {
                 mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
                     ?.toFloatOrNull()?.let { fps = it }

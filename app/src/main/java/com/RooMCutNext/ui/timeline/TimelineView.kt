@@ -220,8 +220,11 @@ fun TimelineView(
     fun onDragStart(mode: DragMode, x: Float) {
         val v = currentVm
         when (mode) {
-            is DragMode.Playhead -> v.scrubbingByTouch = true
-            is DragMode.Trim -> v.selectClip(mode.clipId)
+            is DragMode.Playhead -> v.beginScrub()
+            is DragMode.Trim -> {
+                v.selectClip(mode.clipId)
+                v.beginScrub()
+            }
             is DragMode.ClipMove -> RooMCutNextApp.vibrate(v.getApplication(), 14)
             is DragMode.TextTrim -> v.selectText(mode.textId)
             else -> Unit
@@ -235,7 +238,7 @@ fun TimelineView(
             is DragMode.Scroll -> {
                 scrollXState.floatValue = (scrollXState.floatValue - dx).coerceIn(0f, maxScroll())
             }
-            is DragMode.Playhead -> v.seekTo(xToTimeUs(x))
+            is DragMode.Playhead -> v.seekDuringDrag(xToTimeUs(x))
             is DragMode.Trim -> {
                 val snap = snapshot ?: return
                 val idx = snap.project.clips.indexOfFirst { it.id == mode.clipId }
@@ -248,11 +251,11 @@ fun TimelineView(
                     val lowerBound = -clip.sourceInUs.toFloat() / clip.speed
                     val local = localF.coerceIn(lowerBound, 60_000_000f)
                     v.previewTrim(clip.id, clip.sourceInUs + (local * clip.speed).toLong(), clip.sourceOutUs)
-                    v.seekTo(clipStart + local.toLong().coerceAtLeast(0L))
+                    v.seekDuringDrag(clipStart + local.toLong().coerceAtLeast(0L))
                 } else {
                     val local = (timeUs - clipStart).coerceAtLeast(0L)
                     v.previewTrim(clip.id, clip.sourceInUs, clip.sourceInUs + (local.toFloat() * clip.speed).toLong())
-                    v.seekTo(clipStart + local)
+                    v.seekDuringDrag(clipStart + local)
                 }
             }
             is DragMode.ClipMove -> fingerX.floatValue = x
@@ -274,10 +277,13 @@ fun TimelineView(
         val v = currentVm
         when (mode) {
             is DragMode.Playhead -> {
-                v.scrubbingByTouch = false
                 v.seekTo(xToTimeUs(x))
+                v.endScrub()
             }
-            is DragMode.Trim -> v.commitTrim()
+            is DragMode.Trim -> {
+                v.commitTrim()
+                v.endScrub()
+            }
             is DragMode.ClipMove -> {
                 val snap = snapshot ?: return
                 val others = snap.project.clips.filter { it.id != mode.clipId }
