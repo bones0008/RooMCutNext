@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RooMCutNext</string>
+
+    <!-- Home -->
+    <string name="home_new_project">新建项目</string>
+    <string name="home_empty_hint">还没有项目\n点击右上角「新建项目」开始</string>
+    <string name="home_delete_confirm">删除该项目？其中的媒体文件也会一并删除。</string>
+    <string name="home_delete">删除</string>
+    <string name="home_rename">重命名</string>
+    <string name="home_duplicate">复制项目</string>
+    <string name="home_cancel">取消</string>
+    <string name="home_confirm">确认</string>
+    <string name="home_clip_count">%1$d 个片段 · %2$s</string>
+    <string name="home_new_project_name">项目 %1$d</string>
+    <string name="home_deleted">已删除</string>
+    <string name="home_language_toggle">EN</string>
+    <string name="home_import_media">导入素材</string>
+
+    <!-- Editor common -->
+    <string name="editor_export">导出</string>
+    <string name="editor_undo">撤销</string>
+    <string name="editor_redo">重做</string>
+    <string name="editor_rename_title">重命名项目</string>
+    <string name="editor_save_done">已保存</string>
+
+    <!-- Transport -->
+    <string name="play">播放</string>
+    <string name="pause">暂停</string>
+    <string name="prev_frame">上一帧</string>
+    <string name="next_frame">下一帧</string>
+    <string name="go_start">回到开头</string>
+    <string name="go_end">跳到结尾</string>
+    <string name="zoom_in">放大时间线</string>
+    <string name="zoom_out">缩小时间线</string>
+    <string name="zoom_fit">适配时间线</string>
+    <string name="time_total_symbol">/</string>
+
+    <!-- Timeline -->
+    <string name="timeline_add_media">添加素材</string>
+    <string name="timeline_empty_hint">点按 ＋ 导入视频或图片</string>
+    <string name="timeline_import_videos">选择视频/图片</string>
+    <string name="timeline_import_files">从文件管理器选择</string>
+    <string name="timeline_text_track">文字</string>
+    <string name="timeline_clip_missing">源文件缺失</string>
+    <string name="timeline_insert_hint">插入到这里</string>
+    <string name="timeline_trim_hint">拖动两端修剪</string>
+
+    <!-- Toolbar actions -->
+    <string name="action_split">分割</string>
+    <string name="action_delete">删除</string>
+    <string name="action_duplicate">复制</string>
+    <string name="action_speed">变速</string>
+    <string name="action_rotate">旋转</string>
+    <string name="action_crop">裁剪</string>
+    <string name="action_adjust">调节</string>
+    <string name="action_text">文字</string>
+    <string name="action_audio">音频</string>
+    <string name="action_info">信息</string>
+    <string name="action_replace">替换</string>
+    <string name="action_goto">定位</string>
+
+    <!-- Speed panel -->
+    <string name="panel_speed_title">变速</string>
+    <string name="panel_speed_slow">慢</string>
+    <string name="panel_speed_fast">快</string>
+    <string name="panel_speed_custom">自定义</string>
+
+    <!-- Rotate panel -->
+    <string name="panel_rotate_title">旋转与镜像</string>
+    <string name="panel_rotate_cw">右转90°</string>
+    <string name="panel_rotate_ccw">左转90°</string>
+    <string name="panel_rotate_180">180°</string>
+    <string name="panel_flip_h">水平镜像</string>
+    <string name="panel_flip_v">垂直镜像</string>
+
+    <!-- Crop panel -->
+    <string name="panel_crop_title">画面裁剪</string>
+    <string name="panel_crop_none">无</string>
+    <string name="panel_crop_free">自由</string>
+    <string name="panel_crop_horizontal">水平边距</string>
+    <string name="panel_crop_vertical">垂直边距</string>
+
+    <!-- Adjust panel -->
+    <string name="panel_adjust_title">画面调整</string>
+    <string name="panel_adjust_brightness">亮度</string>
+    <string name="panel_adjust_contrast">对比度</string>
+    <string name="panel_adjust_saturation">饱和度</string>
+    <string name="panel_adjust_reset">重置</string>
+
+    <!-- Text panel -->
+    <string name="panel_text_title">文字</string>
+    <string name="panel_text_content">文字内容</string>
+    <string name="panel_text_size">字号</string>
+    <string name="panel_text_color">文字颜色</string>
+    <string name="panel_text_stroke">描边宽度</string>
+    <string name="panel_text_shadow">阴影强度</string>
+    <string name="panel_text_bold">加粗</string>
+    <string name="panel_text_rotation">旋转</string>
+    <string name="panel_text_position">位置</string>
+    <string name="panel_text_delete">删除文字</string>
+    <string name="panel_text_empty_hint">输入文字内容</string>
+    <string name="panel_text_position_x">横向位置</string>
+    <string name="panel_text_position_y">纵向位置</string>
+
+    <!-- Audio panel -->
+    <string name="panel_audio_title">音频</string>
+    <string name="panel_audio_volume">音量</string>
+    <string name="panel_audio_mute">静音</string>
+    <string name="panel_audio_fade_in">淡入</string>
+    <string name="panel_audio_fade_out">淡出</string>
+    <string name="panel_audio_no_audio">该片段没有音轨</string>
+    <string name="panel_audio_ms_fmt">%d 毫秒</string>
+
+    <!-- Info panel -->
+    <string name="panel_info_title">片段信息</string>
+    <string name="panel_info_resolution">分辨率</string>
+    <string name="panel_info_fps">帧率</string>
+    <string name="panel_info_duration">源时长</string>
+    <string name="panel_info_used">使用区间</string>
+    <string name="panel_info_codec">编码</string>
+    <string name="panel_info_audio">音频</string>
+    <string name="panel_info_size">文件大小</string>
+    <string name="panel_info_missing">源文件缺失，请替换素材</string>
+    <string name="panel_info_speed">速度</string>
+    <string name="panel_info_speed_fmt">%sx</string>
+
+    <!-- GoTo panel -->
+    <string name="panel_goto_title">精确定位</string>
+    <string name="panel_goto_hint">例如 1:23.5 或 83.5</string>
+    <string name="panel_goto_go">跳转</string>
+    <string name="panel_goto_frame_fmt">当前第 %d 帧</string>
+    <string name="panel_goto_invalid">无法识别的时间格式</string>
+
+    <!-- Export -->
+    <string name="panel_export_title">导出</string>
+    <string name="panel_export_resolution">分辨率</string>
+    <string name="export_original">原始</string>
+    <string name="panel_export_format">格式</string>
+    <string name="panel_export_format_value">MP4 · H.264 · AAC</string>
+    <string name="panel_export_start">开始导出</string>
+    <string name="panel_export_exporting">正在导出…</string>
+    <string name="panel_export_progress_fmt">%1$d%% · 剩余约 %2$d 秒</string>
+    <string name="panel_export_indeterminate">正在准备…</string>
+    <string name="panel_export_done">导出完成</string>
+    <string name="panel_export_saved_hint">已保存到相册 Movies/RooMCutNext</string>
+    <string name="panel_export_failed">导出失败</string>
+    <string name="panel_export_open">打开</string>
+    <string name="panel_export_share">分享</string>
+    <string name="panel_export_cancel">取消导出</string>
+    <string name="panel_export_close">关闭</string>
+
+    <!-- Export notification -->
+    <string name="export_channel_name">导出进度</string>
+    <string name="export_notif_title">正在导出 %1$s</string>
+    <string name="export_eta">剩余约 %1$d 秒</string>
+    <string name="export_cancel">取消</string>
+    <string name="export_done_title">导出完成</string>
+    <string name="export_done_text">%1$s 已保存到相册</string>
+    <string name="export_open">打开</string>
+    <string name="export_failed_title">导出失败</string>
+
+    <!-- Misc -->
+    <string name="importing_progress">导入中 %1$d/%2$d · %3$s</string>
+    <string name="error_playback_fmt">播放出错：%1$s</string>
+    <string name="need_notification_permission">需要通知权限用于显示导出进度</string>
+    <string name="grant">允许</string>
+    <string name="ok">好的</string>
+    <string name="clip_badge_muted">静音</string>
+    <string name="clip_badge_missing">缺失</string>
+    <string name="dialog_save">保存</string>
+</resources>

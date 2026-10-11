@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RooMCutNext</string>
+
+    <!-- Home -->
+    <string name="home_new_project">New project</string>
+    <string name="home_empty_hint">No projects yet.\nTap "New project" to start.</string>
+    <string name="home_delete_confirm">Delete this project? Its media files will be removed too.</string>
+    <string name="home_delete">Delete</string>
+    <string name="home_rename">Rename</string>
+    <string name="home_duplicate">Duplicate</string>
+    <string name="home_cancel">Cancel</string>
+    <string name="home_confirm">Confirm</string>
+    <string name="home_clip_count">%1$d clips · %2$s</string>
+    <string name="home_new_project_name">Project %1$d</string>
+    <string name="home_deleted">Deleted</string>
+    <string name="home_language_toggle">中</string>
+    <string name="home_import_media">Import media</string>
+
+    <!-- Editor common -->
+    <string name="editor_export">Export</string>
+    <string name="editor_undo">Undo</string>
+    <string name="editor_redo">Redo</string>
+    <string name="editor_rename_title">Rename project</string>
+    <string name="editor_save_done">Saved</string>
+
+    <!-- Transport -->
+    <string name="play">Play</string>
+    <string name="pause">Pause</string>
+    <string name="prev_frame">Previous frame</string>
+    <string name="next_frame">Next frame</string>
+    <string name="go_start">Go to start</string>
+    <string name="go_end">Go to end</string>
+    <string name="zoom_in">Zoom in timeline</string>
+    <string name="zoom_out">Zoom out timeline</string>
+    <string name="zoom_fit">Fit timeline</string>
+    <string name="time_total_symbol">/</string>
+
+    <!-- Timeline -->
+    <string name="timeline_add_media">Add media</string>
+    <string name="timeline_empty_hint">Tap + to import videos or photos</string>
+    <string name="timeline_import_videos">Pick videos / photos</string>
+    <string name="timeline_import_files">From file manager</string>
+    <string name="timeline_text_track">Text</string>
+    <string name="timeline_clip_missing">Source missing</string>
+    <string name="timeline_insert_hint">Insert here</string>
+    <string name="timeline_trim_hint">Drag edges to trim</string>
+
+    <!-- Toolbar actions -->
+    <string name="action_split">Split</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_duplicate">Duplicate</string>
+    <string name="action_speed">Speed</string>
+    <string name="action_rotate">Rotate</string>
+    <string name="action_crop">Crop</string>
+    <string name="action_adjust">Adjust</string>
+    <string name="action_text">Text</string>
+    <string name="action_audio">Audio</string>
+    <string name="action_info">Info</string>
+    <string name="action_replace">Replace</string>
+    <string name="action_goto">Go to</string>
+
+    <!-- Speed panel -->
+    <string name="panel_speed_title">Speed</string>
+    <string name="panel_speed_slow">Slow</string>
+    <string name="panel_speed_fast">Fast</string>
+    <string name="panel_speed_custom">Custom</string>
+
+    <!-- Rotate panel -->
+    <string name="panel_rotate_title">Rotate &amp; mirror</string>
+    <string name="panel_rotate_cw">90° CW</string>
+    <string name="panel_rotate_ccw">90° CCW</string>
+    <string name="panel_rotate_180">180°</string>
+    <string name="panel_flip_h">Flip horizontal</string>
+    <string name="panel_flip_v">Flip vertical</string>
+
+    <!-- Crop panel -->
+    <string name="panel_crop_title">Crop</string>
+    <string name="panel_crop_none">None</string>
+    <string name="panel_crop_free">Free</string>
+    <string name="panel_crop_horizontal">Horizontal margins</string>
+    <string name="panel_crop_vertical">Vertical margins</string>
+
+    <!-- Adjust panel -->
+    <string name="panel_adjust_title">Adjustments</string>
+    <string name="panel_adjust_brightness">Brightness</string>
+    <string name="panel_adjust_contrast">Contrast</string>
+    <string name="panel_adjust_saturation">Saturation</string>
+    <string name="panel_adjust_reset">Reset</string>
+
+    <!-- Text panel -->
+    <string name="panel_text_title">Text</string>
+    <string name="panel_text_content">Content</string>
+    <string name="panel_text_size">Size</string>
+    <string name="panel_text_color">Text color</string>
+    <string name="panel_text_stroke">Outline width</string>
+    <string name="panel_text_shadow">Shadow</string>
+    <string name="panel_text_bold">Bold</string>
+    <string name="panel_text_rotation">Rotation</string>
+    <string name="panel_text_position">Position</string>
+    <string name="panel_text_delete">Delete text</string>
+    <string name="panel_text_empty_hint">Type your text</string>
+    <string name="panel_text_position_x">Horizontal position</string>
+    <string name="panel_text_position_y">Vertical position</string>
+
+    <!-- Audio panel -->
+    <string name="panel_audio_title">Audio</string>
+    <string name="panel_audio_volume">Volume</string>
+    <string name="panel_audio_mute">Mute</string>
+    <string name="panel_audio_fade_in">Fade in</string>
+    <string name="panel_audio_fade_out">Fade out</string>
+    <string name="panel_audio_no_audio">This clip has no audio track</string>
+    <string name="panel_audio_ms_fmt">%d ms</string>
+
+    <!-- Info panel -->
+    <string name="panel_info_title">Clip info</string>
+    <string name="panel_info_resolution">Resolution</string>
+    <string name="panel_info_fps">Frame rate</string>
+    <string name="panel_info_duration">Source duration</string>
+    <string name="panel_info_used">Used range</string>
+    <string name="panel_info_codec">Codec</string>
+    <string name="panel_info_audio">Audio</string>
+    <string name="panel_info_size">File size</string>
+    <string name="panel_info_missing">Source file is missing — replace the media</string>
+    <string name="panel_info_speed">Speed</string>
+    <string name="panel_info_speed_fmt">%sx</string>
+
+    <!-- GoTo panel -->
+    <string name="panel_goto_title">Go to time</string>
+    <string name="panel_goto_hint">e.g. 1:23.5 or 83.5</string>
+    <string name="panel_goto_go">Go</string>
+    <string name="panel_goto_frame_fmt">Current frame: %d</string>
+    <string name="panel_goto_invalid">Unrecognized time format</string>
+
+    <!-- Export -->
+    <string name="panel_export_title">Export</string>
+    <string name="panel_export_resolution">Resolution</string>
+    <string name="export_original">Original</string>
+    <string name="panel_export_format">Format</string>
+    <string name="panel_export_format_value">MP4 · H.264 · AAC</string>
+    <string name="panel_export_start">Start export</string>
+    <string name="panel_export_exporting">Exporting…</string>
+    <string name="panel_export_progress_fmt">%1$d%% · ~%2$d s left</string>
+    <string name="panel_export_indeterminate">Preparing…</string>
+    <string name="panel_export_done">Export complete</string>
+    <string name="panel_export_saved_hint">Saved to gallery Movies/RooMCutNext</string>
+    <string name="panel_export_failed">Export failed</string>
+    <string name="panel_export_open">Open</string>
+    <string name="panel_export_share">Share</string>
+    <string name="panel_export_cancel">Cancel export</string>
+    <string name="panel_export_close">Close</string>
+
+    <!-- Export notification -->
+    <string name="export_channel_name">Export progress</string>
+    <string name="export_notif_title">Exporting %1$s</string>
+    <string name="export_eta">~%1$d s left</string>
+    <string name="export_cancel">Cancel</string>
+    <string name="export_done_title">Export complete</string>
+    <string name="export_done_text">%1$s saved to gallery</string>
+    <string name="export_open">Open</string>
+    <string name="export_failed_title">Export failed</string>
+
+    <!-- Misc -->
+    <string name="importing_progress">Importing %1$d/%2$d · %3$s</string>
+    <string name="error_playback_fmt">Playback error: %1$s</string>
+    <string name="need_notification_permission">Notification permission is needed to show export progress</string>
+    <string name="grant">Allow</string>
+    <string name="ok">OK</string>
+    <string name="clip_badge_muted">Muted</string>
+    <string name="clip_badge_missing">Missing</string>
+    <string name="dialog_save">Save</string>
+</resources>
