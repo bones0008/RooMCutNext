@@ -507,29 +507,45 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
             }
         }
 
-        // v1.0.10: compact timecode row — the timecode shrank (titleMedium →
-        // titleSmall + labelSmall) and 分割/删除/复制 moved up from the bottom
-        // toolbar into this row. Layout: [timecode] ⇤flex⇥ [split·delete·copy]
-        // ⇤flex⇥ [zoom-out·fit·zoom-in (unchanged)] — two flex spacers keep the
-        // middle cluster centered. The whole row fits ~355dp wide, so nothing
-        // clips even on 360dp screens.
+        // v1.0.12: jitter-free timecode row. While playing, the playhead
+        // digits change width every frame in a proportional font (1 is
+        // narrower than 0), and the old two-flex-spacer layout translated
+        // that width change into horizontal wobble of the total-duration
+        // text and the split/delete/copy cluster. Two fixes:
+        //  1) Structure: timecodes live in a weight(1f) box aligned start,
+        //     the zoom group in an equal weight(1f) box aligned end, and the
+        //     fixed-width icon cluster sits BETWEEN the two boxes — its
+        //     center is the row center, independent of any text width.
+        //  2) Typography: monospace timecodes — every digit has the same
+        //     advance width, so the total-duration text (which follows the
+        //     playhead text) holds perfectly still frame to frame.
         val canSplit = state.project.clips.isNotEmpty() || state.project.audios.isNotEmpty()
         val hasClip = state.selectedClip != null
         Row(
             Modifier.fillMaxWidth().padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                TimeCode.formatClockFrames(state.playheadUs, state.project.fps),
-                style = MaterialTheme.typography.titleSmall,
-                color = AccentColor,
-            )
-            Text(
-                " / ${TimeCode.formatClockFrames(state.totalDurationUs, state.project.fps)}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.weight(1f))
+            Box(
+                Modifier.weight(1f),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        TimeCode.formatClockFrames(state.playheadUs, state.project.fps),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = AccentColor,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                    )
+                    Text(
+                        " / ${TimeCode.formatClockFrames(state.totalDurationUs, state.project.fps)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                    )
+                }
+            }
             IconButton(
                 onClick = { vm.splitAtPlayhead() },
                 enabled = canSplit,
@@ -560,18 +576,24 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
                     tint = if (hasClip) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
                 )
             }
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = { vm.zoomOut() }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Filled.ZoomOut, stringResource(R.string.zoom_out),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            IconButton(onClick = { vm.fitZoom() }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Filled.FitScreen, stringResource(R.string.zoom_fit),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            IconButton(onClick = { vm.zoomIn() }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Filled.ZoomIn, stringResource(R.string.zoom_in),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Box(
+                Modifier.weight(1f),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                Row {
+                    IconButton(onClick = { vm.zoomOut() }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.ZoomOut, stringResource(R.string.zoom_out),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = { vm.fitZoom() }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.FitScreen, stringResource(R.string.zoom_fit),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = { vm.zoomIn() }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.ZoomIn, stringResource(R.string.zoom_in),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
         }
     }
