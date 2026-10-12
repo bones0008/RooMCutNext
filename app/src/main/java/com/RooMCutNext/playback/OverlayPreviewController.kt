@@ -118,6 +118,11 @@ class OverlayPreviewController(private val context: Context) {
     /** Mount a head this far BEFORE its window so it is ready to fade in. */
     private val headPrerollUs = 400_000L
 
+    /** v1.2.7: an ENDED overlay player is only "held" (last frame kept)
+     * while the playhead is this close to, or past, its source span end —
+     * further back it rewinds and plays again (scrub-back / replay). */
+    private val endedHoldMarginUs = 100_000L
+
     /** v1.2.5: grace before an effects-bearing head that STILL hasn't
      * rendered falls back to a plain (effect-less) player — see
      * headEffectsFallback. */
@@ -131,6 +136,11 @@ class OverlayPreviewController(private val context: Context) {
         var assetId: String? = null
         var windowStartUs = -1L
         var windowDurationUs = -1L
+
+        /** v1.2.7: source span the player is clipped to (window-relative) —
+         * an ENDED player only stays held while the playhead is past this. */
+        var sourceSpanUs = Long.MAX_VALUE
+
         var firstFrameRendered = false
 
         /** Alpha to apply the moment the first frame renders (kept fresh by
@@ -308,6 +318,7 @@ class OverlayPreviewController(private val context: Context) {
                     existing.assetId = fresh.assetId
                     existing.windowStartUs = fresh.windowStartUs
                     existing.windowDurationUs = fresh.windowDurationUs
+                    existing.sourceSpanUs = fresh.sourceSpanUs
                     existing.firstFrameRendered = false
                     existing.targetAlpha = 0f
                     existing.views.forEach(host::addView)
@@ -315,6 +326,7 @@ class OverlayPreviewController(private val context: Context) {
                     // Same asset, window moved/trimmed: just re-clip.
                     existing.windowStartUs = pip.startUs
                     existing.windowDurationUs = pip.durationUs
+                    existing.sourceSpanUs = pipClipEndUs(asset, pip).coerceAtLeast(1L)
                     existing.player?.let { reclipPipPlayer(it, asset, file, pip) }
                     existing.firstFrameRendered = false
                     existing.targetAlpha = 0f
@@ -328,6 +340,7 @@ class OverlayPreviewController(private val context: Context) {
         overlay.assetId = pip.assetId
         overlay.windowStartUs = pip.startUs
         overlay.windowDurationUs = pip.durationUs
+        overlay.sourceSpanUs = pipClipEndUs(asset, pip).coerceAtLeast(1L)
         if (asset.isImage) {
             val iv = ImageView(context).apply {
                 // Bounds carry the exact aspect (see place()).
@@ -462,18 +475,36 @@ class OverlayPreviewController(private val context: Context) {
         val desired = overlay.targetAlpha
         if (tv.alpha != desired) tv.alpha = desired
 
-        // Drift-corrected follow. STATE_ENDED is deliberately NOT seeked: the
-        // TextureView keeps presenting the last decoded frame, which is the
-        // correct "hold" behavior when the window outlives the source (the
-        // GL compositor holds the input's last frame in export the same way),
-        // and re-seeking an ended player at sync rate would spin the decoder.
-        if (player.playbackState != Player.STATE_ENDED) {
-            val posUs = player.currentPosition * 1000L
-            val drift = localUs - posUs
-            val threshold = if (isPlaying) seekDriftThresholdUs else scrubDriftThresholdUs
-            if (kotlin.math.abs(drift) > threshold) {
-                runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
+        // v1.2.7: drift-correct ONLY a READY player, and rewind an ENDED
+        // player whose playhead has gone back before its source span.
+        //
+        // The old unconditional seek had two freeze bugs:
+        //  1) re-seeking a BUFFERING player at the ~30Hz sync rate restarts
+        //     its preparation every tick — a seek-storm livelock that left
+        //     the picture frozen on whatever frame rendered before the storm;
+        //  2) STATE_ENDED skipped seeking entirely, so after the playhead
+        //     once passed the window (or a scrub-through), re-entering it
+        //     showed the player's held LAST frame forever — "the second
+        //     clip is static". An ended player CAN be seeked back to life:
+        //     seekTo() exits ENDED and (with playWhenReady) resumes playing.
+        //     Holding the last frame stays correct near/past the span end,
+        //     which is also the desired "window outlives source" behavior.
+        when (player.playbackState) {
+            Player.STATE_READY -> {
+                val posUs = player.currentPosition * 1000L
+                val drift = localUs - posUs
+                val threshold = if (isPlaying) seekDriftThresholdUs else scrubDriftThresholdUs
+                if (kotlin.math.abs(drift) > threshold) {
+                    runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
+                }
             }
+            Player.STATE_ENDED -> {
+                if (localUs + endedHoldMarginUs < overlay.sourceSpanUs) {
+                    runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
+                    if (isPlaying) player.playWhenReady = true
+                }
+            }
+            else -> Unit // BUFFERING/IDLE: leave it be; it catches up once READY
         }
         if (isPlaying && !player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
             player.playWhenReady = true
@@ -657,18 +688,36 @@ class OverlayPreviewController(private val context: Context) {
         // the fade can never deadlock on a missing first-frame callback).
         if (tv.alpha != ramp) tv.alpha = ramp
 
-        // v1.2.5: position math now SPEED-AWARE. The clipped player advances
-        // at spec.speed × wall time while the playhead advances 1×, so the
-        // expected position at local time [localUs] is localUs × speed. The
-        // old unscaled math made every sped-up head re-seek every 120ms.
-        if (player.playbackState != Player.STATE_ENDED) {
-            val expectedPosUs = (localUs * spec.speed).toLong()
-            val posUs = player.currentPosition * 1000L
-            val drift = expectedPosUs - posUs
-            val threshold = if (isPlaying) seekDriftThresholdUs else scrubDriftThresholdUs
-            if (kotlin.math.abs(drift) > threshold) {
-                runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
+        // v1.2.7: position math is SPEED-AWARE (the clipped player advances
+        // at spec.speed × wall time while the playhead advances 1×) and the
+        // seek discipline matches drivePip:
+        //  - drift-correct ONLY a READY player (re-seeking a BUFFERING one
+        //    every ~30Hz sync tick restarts its preparation — the seek-storm
+        //    livelock that froze the head on the frame it managed to render
+        //    during preroll: "only the first clip fades, the second is
+        //    static");
+        //  - REWIND an ENDED player when the playhead has gone back before
+        //    its source span (scrub back / replay after one pass) — the old
+        //    blanket ENDED skip showed the held last frame under the ramping
+        //    alpha forever, which read as "the second clip never plays".
+        val expectedPosUs = (localUs * spec.speed).toLong()
+        when (player.playbackState) {
+            Player.STATE_READY -> {
+                val posUs = player.currentPosition * 1000L
+                val drift = expectedPosUs - posUs
+                val threshold = if (isPlaying) seekDriftThresholdUs else scrubDriftThresholdUs
+                if (kotlin.math.abs(drift) > threshold) {
+                    runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
+                }
             }
+            Player.STATE_ENDED -> {
+                val spanUs = spec.sourceOutUs - spec.sourceInUs
+                if (expectedPosUs + endedHoldMarginUs < spanUs) {
+                    runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
+                    if (isPlaying) player.playWhenReady = true
+                }
+            }
+            else -> Unit // BUFFERING/IDLE: let it finish preparing on its own
         }
         if (isPlaying && !player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
             player.playWhenReady = true

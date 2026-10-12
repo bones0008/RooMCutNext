@@ -140,6 +140,9 @@ object CompositionBuilder {
         val items = mutableListOf<EditedMediaItem>()
         val transitionItems = mutableListOf<EditedMediaItem>()
         var transitionCursorUs = 0L
+        // v1.2.7: does the (export-only) crossfade-head sequence contain any
+        // audio-bearing item? — drives experimentalSetForceAudioTrack below.
+        var headsHaveAudio = false
 
         // ---- primary (video) sequence + transition overlay sequence (v1.2.1) ----
         // Gap-aware: a clip's leading hole becomes a black background item,
@@ -200,6 +203,14 @@ object CompositionBuilder {
                         project, mediaDir, clipStartUs - transitionCursorUs,
                     )
                 }
+                // v1.2.7: the head sequence STARTS with an image pad (no audio
+                // track) and the head item itself carries audio — Media3 1.11.1
+                // SequenceAssetLoader then fails export with "The preceding
+                // MediaItem does not contain any audio track…
+                // experimentalSetForceAudioTrack() needs to be set to true".
+                // Track whether any head outputs audio so the flag is set
+                // exactly when needed (see the builder call below).
+                if (!asset.isImage && !clip.muted) headsHaveAudio = true
                 transitionItems += buildClipItem(
                     project = project, clip = clip, asset = asset, file = file,
                     sourceInUs = clip.sourceInUs,
@@ -288,7 +299,19 @@ object CompositionBuilder {
                         project, mediaDir, totalDurationUs - transitionCursorUs,
                     )
                 }
-                headSequence = EditedMediaItemSequence.Builder(transitionItems).build()
+                // v1.2.7 export crash fix: the sequence starts with an
+                // IMAGE pad (no audio track); without the forced audio
+                // consumer the first audio-bearing head item dies in
+                // SequenceAssetLoader.onOutputFormat (checkNotNull on a
+                // missing audio SampleConsumer). Forcing plants a silent
+                // raw-PCM consumer up front; the heads' real audio then
+                // replaces/feeds it — the exact usage the upstream error
+                // message prescribes. Pad-only silence mixes in as nothing.
+                @Suppress("DEPRECATION") // the only API for this in 1.11.1
+                val builtHeadSequence = EditedMediaItemSequence.Builder(transitionItems)
+                    .experimentalSetForceAudioTrack(headsHaveAudio)
+                    .build()
+                headSequence = builtHeadSequence
             }
 
             // v1.2.5: TIMING DRIVER (see class doc). More than one video
@@ -310,7 +333,23 @@ object CompositionBuilder {
 
         // Main body: the BOTTOM visual layer (or the only sequence when no
         // PiP / transitions exist).
-        sequences += EditedMediaItemSequence.Builder(items).build()
+        //
+        // v1.2.7: EXPORT only — when the body's FIRST item has no audio track
+        // (leading gap pad / image clip / muted clip) but later items carry
+        // audio, SequenceAssetLoader fails with "The preceding MediaItem does
+        // not contain any audio track…" (same root cause as the head-sequence
+        // fix). Force the audio consumer whenever any clip CAN output audio.
+        // The preview player does not use SequenceAssetLoader at all, so the
+        // flag is deliberately export-only to keep preview behavior identical.
+        val bodyHasAudio = project.clips.any { c ->
+            val a = project.assetById(c.assetId)
+            a != null && !a.isImage && !c.muted
+        }
+        @Suppress("DEPRECATION") // the only API for this in 1.11.1
+        val bodySequence = EditedMediaItemSequence.Builder(items)
+            .apply { if (!forPreview && bodyHasAudio) experimentalSetForceAudioTrack(true) }
+            .build()
+        sequences += bodySequence
 
         // ---- audio sequences (one per non-overlapping lane) ----
         if (!stripEffects || project.audios.isNotEmpty()) {
@@ -814,7 +853,17 @@ object CompositionBuilder {
             items += buildTransparentPadItem(project, mediaDir, tailUs)
         }
 
-        return EditedMediaItemSequence.Builder(items).build().takeIf { clippedDurationUs > 0L }
+        // v1.2.7 export crash fix (same class of bug as the head sequence):
+        // a PiP layer starting mid-timeline begins with an IMAGE pad — no
+        // audio track — so the first audio-bearing video item would die in
+        // SequenceAssetLoader.onOutputFormat. Force the silent audio consumer
+        // for video layers; image layers output no audio anywhere and stay
+        // unforced (a forced silent track would be pure overhead).
+        @Suppress("DEPRECATION") // the only API for this in 1.11.1
+        val pipSequence = EditedMediaItemSequence.Builder(items)
+            .experimentalSetForceAudioTrack(!asset.isImage)
+            .build()
+        return pipSequence.takeIf { clippedDurationUs > 0L }
     }
 
     // ------------------------------------------------------------------
@@ -881,6 +930,16 @@ object CompositionBuilder {
             cursorUs = audio.endUs
         }
         if (items.isEmpty()) return null
-        return EditedMediaItemSequence.Builder(items).build()
+        // v1.2.7: a lane starting with a MUTED clip outputs no audio track,
+        // so a later unmuted clip would hit the same "preceding MediaItem
+        // does not contain any audio track" crash. Lanes are audio-only by
+        // construction — forcing is free (it only plants the consumer the
+        // real audio needs) and changes nothing when the first item already
+        // has audio.
+        @Suppress("DEPRECATION") // the only API for this in 1.11.1
+        val laneSequence = EditedMediaItemSequence.Builder(items)
+            .experimentalSetForceAudioTrack(true)
+            .build()
+        return laneSequence
     }
 }
