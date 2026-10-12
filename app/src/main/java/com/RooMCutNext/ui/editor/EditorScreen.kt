@@ -31,7 +31,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CompareArrows
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PictureInPictureAlt
@@ -553,6 +555,11 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onRotate = { vm.openPanel(PanelKind.ROTATE) },
             onCrop = { vm.openPanel(PanelKind.CROP) },
             onAdjust = { vm.openPanel(PanelKind.ADJUST) },
+            // v1.2.1: crossfade with the PREVIOUS clip — operates on the
+            // selected clip; the sheet explains when a clip can't have one.
+            onTransition = { vm.openPanel(PanelKind.TRANSITION) },
+            // v1.2.2: per-clip mosaic regions (face / logo pixelation).
+            onMosaic = { vm.openPanel(PanelKind.MOSAIC) },
             // v1.2: picture-in-picture / sticker tool — always available;
             // the sheet itself offers the asset picker when nothing is
             // selected yet.
@@ -721,6 +728,8 @@ private fun ActionToolbar(
     onRotate: () -> Unit,
     onCrop: () -> Unit,
     onAdjust: () -> Unit,
+    onTransition: () -> Unit,
+    onMosaic: () -> Unit,
     onText: () -> Unit,
     onPip: () -> Unit,
     onAudio: () -> Unit,
@@ -751,6 +760,8 @@ private fun ActionToolbar(
         ToolbarButton(Icons.Filled.RotateRight, stringResource(R.string.action_rotate), enabled = hasClip, active = active == PanelKind.ROTATE, onClick = onRotate)
         ToolbarButton(Icons.Filled.Crop, stringResource(R.string.action_crop), enabled = hasClip, active = active == PanelKind.CROP, onClick = onCrop)
         ToolbarButton(Icons.Filled.Tune, stringResource(R.string.action_adjust), enabled = hasClip, active = active == PanelKind.ADJUST, onClick = onAdjust)
+        ToolbarButton(Icons.Filled.CompareArrows, stringResource(R.string.action_transition), enabled = hasClip, active = active == PanelKind.TRANSITION, onClick = onTransition)
+        ToolbarButton(Icons.Filled.BlurOn, stringResource(R.string.action_mosaic), enabled = hasClip, active = active == PanelKind.MOSAIC, onClick = onMosaic)
         ToolbarButton(Icons.Filled.Info, stringResource(R.string.action_info), enabled = hasClip, active = active == PanelKind.INFO, onClick = onInfo)
         ToolbarButton(Icons.Filled.GpsFixed, stringResource(R.string.action_goto), enabled = true, active = active == PanelKind.GOTO, onClick = onGoto)
         Spacer(Modifier.width(8.dp))
@@ -810,6 +821,7 @@ private fun ToolbarButton(
 /** Panels that operate on the selected video clip (guard + header badge). */
 private val CLIP_PANELS = setOf(
     PanelKind.SPEED, PanelKind.ROTATE, PanelKind.CROP, PanelKind.ADJUST, PanelKind.INFO,
+    PanelKind.TRANSITION, PanelKind.MOSAIC,
 )
 
 @Composable
@@ -835,6 +847,8 @@ private fun ToolPanelHost(
         PanelKind.INFO -> R.string.panel_info_title
         PanelKind.EXPORT -> R.string.panel_export_title
         PanelKind.GOTO -> R.string.panel_goto_title
+        PanelKind.TRANSITION -> R.string.panel_transition_title
+        PanelKind.MOSAIC -> R.string.panel_mosaic_title
     }
     // The timeline is hidden while the panel is open, so the header shows
     // WHICH clip the clip-targeted tools are editing.
@@ -916,6 +930,8 @@ private fun ToolPanelHost(
                     PanelKind.ADJUST -> AdjustSheet(vm, state, onImportLut = onImportLut)
                     PanelKind.TEXT -> TextSheet(vm, state, onImportFont = onImportFont)
                     PanelKind.PIP -> PipSheet(vm, state)
+                    PanelKind.TRANSITION -> TransitionSheet(vm, state)
+                    PanelKind.MOSAIC -> MosaicSheet(vm, state)
                     PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = onAddMusic, onRecord = onRecord)
                     PanelKind.INFO -> InfoSheet(vm, state, onReplace = onReplace)
                     PanelKind.GOTO -> GotoSheet(vm, state)

@@ -88,6 +88,8 @@ private data class ClipLayout(
     val width: Float,
     val gapLeft: Float = 0f,
     val gapWidth: Float = 0f,
+    /** Effective crossfade-in of this clip (v1.2.1); 0 = hard cut. */
+    val transitionUs: Long = 0L,
 )
 
 /** Projected drop of a clip drag (v1.0.9 free positioning): the slot the
@@ -573,20 +575,30 @@ fun TimelineView(
     // ---------------- layout computation ----------------
     fun displayClips(snap: EditorViewModel.TimelineSnapshot): List<ClipLayout> {
         val preview = snap.trimPreview
+        // Apply the live trim preview FIRST so widths and effective
+        // transitions both see the projected durations (v1.2.1).
+        val clips = snap.project.clips.map { c ->
+            preview?.takeIf { it.clipId == c.id }?.let {
+                c.copy(sourceInUs = it.sourceInUs, sourceOutUs = it.sourceOutUs)
+            } ?: c
+        }
+        val transitions = com.RooMCutNext.core.model.effectiveTransitions(clips)
         var acc = 0f
         val out = mutableListOf<ClipLayout>()
-        snap.project.clips.forEachIndexed { index, clip ->
+        clips.forEachIndexed { index, clip ->
             // The black hole in front of the clip (v1.0.8 gaps).
             val gapWidth = clip.gapBeforeUs / 1_000_000f * pps
-            val inUs = preview?.takeIf { it.clipId == clip.id }?.sourceInUs ?: clip.sourceInUs
-            val outUs = preview?.takeIf { it.clipId == clip.id }?.sourceOutUs ?: clip.sourceOutUs
-            val durUs = ((outUs - inUs) / clip.speed).toLong()
-            val width = durUs / 1_000_000f * pps
+            // v1.2.1: a crossfade pulls the clip's start back onto the
+            // previous clip's tail — the blocks overlap like CapCut's.
+            val overlapWidth = transitions[index] / 1_000_000f * pps
+            val width = clip.durationUs / 1_000_000f * pps
+            val left = acc + gapWidth - overlapWidth
             out += ClipLayout(
-                clip.copy(sourceInUs = inUs, sourceOutUs = outUs), index, acc + gapWidth, width,
+                clip, index, left, width,
                 gapLeft = acc, gapWidth = gapWidth,
+                transitionUs = transitions[index],
             )
-            acc += gapWidth + width
+            acc = left + width
         }
         val scroll = clampedScroll()
         return out.map { it.copy(left = it.left - scroll, gapLeft = it.gapLeft - scroll) }
@@ -772,6 +784,16 @@ fun TimelineView(
                     ppsValue = pps,
                     dp = dp,
                 )
+                // v1.2.1: crossfade marker over the overlap region.
+                if (layout.transitionUs > 0L) {
+                    drawTransitionMarker(
+                        layout = layout,
+                        ppsValue = pps,
+                        trackTop = g.trackTop,
+                        badgePaint = badgePaint,
+                        dp = dp,
+                    )
+                }
             }
 
             g.texts = snap.project.texts.mapIndexedNotNull { i, item ->
@@ -1627,6 +1649,77 @@ private val AudioColor = Color(0xFF2FB8A6)
 
 /** PiP / sticker lane accent (soft blue, distinct from audio teal). */
 private val PipColor = Color(0xFF64B5F6)
+
+/** Crossfade transition accent (warm orange, v1.2.1). */
+private val TransitionColor = Color(0xFFFFB74D)
+
+/**
+ * Crossfade marker on the overlap region (v1.2.1): a dark pill straddling
+ * the boundary between the two clips with converging triangles and — when
+ * there is room — the effective fade duration. Centered on the overlap's
+ * midpoint, which sits at the visual seam between the two blocks.
+ */
+private fun DrawScope.drawTransitionMarker(
+    layout: ClipLayout,
+    ppsValue: Float,
+    trackTop: Float,
+    badgePaint: Paint,
+    dp: Float,
+) {
+    val transitionPx = layout.transitionUs / 1_000_000f * ppsValue
+    if (transitionPx <= 3f * dp) return
+    val height = TRACK_HEIGHT_DP * dp - 4f * dp
+    val top = trackTop
+    val cx = layout.left + transitionPx / 2f
+    val cy = top + height / 2f
+
+    val pillW = minOf(transitionPx, 72f * dp).coerceAtLeast(22f * dp)
+    val pillH = 15f * dp
+    val pillTopLeft = Offset(cx - pillW / 2f, cy - pillH / 2f)
+    drawRoundRect(
+        color = Color(0xD9000000),
+        topLeft = pillTopLeft,
+        size = Size(pillW, pillH),
+        cornerRadius = CornerRadius(pillH / 2f),
+    )
+    drawRoundRect(
+        color = TransitionColor,
+        topLeft = pillTopLeft,
+        size = Size(pillW, pillH),
+        cornerRadius = CornerRadius(pillH / 2f),
+        style = Stroke(width = 1.dp.toPx()),
+    )
+
+    // Converging triangles glyph (◁ ▷ meeting = dissolve) on the left side
+    // of the pill; the duration text takes the right side when there is room.
+    val hasText = pillW >= 46f * dp
+    val glyphCx = if (hasText) cx - pillW / 4f else cx
+    val s = 4f * dp
+    val gapGlyph = 2.5f * dp
+    val path = Path().apply {
+        moveTo(glyphCx - gapGlyph / 2f - s, cy)
+        lineTo(glyphCx - gapGlyph / 2f, cy - s)
+        lineTo(glyphCx - gapGlyph / 2f, cy + s)
+        close()
+        moveTo(glyphCx + gapGlyph / 2f + s, cy)
+        lineTo(glyphCx + gapGlyph / 2f, cy - s)
+        lineTo(glyphCx + gapGlyph / 2f, cy + s)
+        close()
+    }
+    drawPath(path, TransitionColor)
+
+    // Effective duration when the pill has room for it.
+    if (hasText) {
+        val canvas = drawContext.canvas.nativeCanvas
+        badgePaint.color = android.graphics.Color.argb(0xF0, 0xFF, 0xFF, 0xFF)
+        badgePaint.textAlign = android.graphics.Paint.Align.CENTER
+        badgePaint.textSize = 9f * dp
+        canvas.drawText(
+            TimeCode.formatShort(layout.transitionUs),
+            cx + pillW / 4f, cy + 3f * dp, badgePaint,
+        )
+    }
+}
 
 private inline fun DrawScope.withClippedRoundRect(
     left: Float,

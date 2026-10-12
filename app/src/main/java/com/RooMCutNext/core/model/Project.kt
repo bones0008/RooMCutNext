@@ -32,8 +32,23 @@ data class Project(
     val updatedAtMs: Long = 0L,
     val schemaVersion: Int = 2,
 ) {
-    /** Video track duration (gaps + clips). */
-    val clipsDurationUs: Long get() = clips.fold(0L) { acc, c -> acc + c.gapBeforeUs + c.durationUs }
+    /**
+     * Video track duration (gaps + clips − crossfade overlaps).
+     *
+     * Mirrors the accumulation in [com.RooMCutNext.core.ops.TimelineOps.starts]:
+     * each clip with an effective [Clip.transitionInUs] starts that much
+     * earlier, so its overlap shortens the track cumulatively.
+     */
+    val clipsDurationUs: Long get() {
+        val transitions = effectiveTransitions(clips)
+        var acc = 0L
+        clips.forEachIndexed { i, c ->
+            acc += c.gapBeforeUs
+            val start = (acc - transitions[i]).coerceAtLeast(0L)
+            acc = start + c.durationUs
+        }
+        return acc
+    }
 
     /** Total timeline duration: the longest of video, texts, audio and PiP. */
     val totalDurationUs: Long get() = maxOf(

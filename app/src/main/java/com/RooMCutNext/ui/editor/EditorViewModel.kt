@@ -38,7 +38,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP }
+enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP, TRANSITION, MOSAIC }
 
 data class ImportingState(val done: Int, val total: Int, val current: String)
 
@@ -91,12 +91,17 @@ data class EditorUiState(
     val diagOverlayVisible: Boolean = false,
     /** Live voiceover recording (v1.1.4): elapsed ms + timeline start of the take. */
     val voiceover: VoiceoverState? = null,
+    /** Selected mosaic region inside the selected clip (v1.2.2). */
+    val selectedMosaicId: String? = null,
 ) {
     val totalDurationUs: Long get() = project.totalDurationUs
     val selectedClip: Clip? get() = selectedClipId?.let { project.clipById(it) }
     val selectedText: TextOverlayItem? get() = selectedTextId?.let { project.textById(it) }
     val selectedAudio: AudioClip? get() = selectedAudioId?.let { project.audioById(it) }
     val selectedPip: PipLayer? get() = selectedPipId?.let { project.pipById(it) }
+    /** Selected mosaic region of the selected clip, if any. */
+    val selectedMosaic: com.RooMCutNext.core.model.MosaicRegion? get()
+        = selectedMosaicId?.let { id -> selectedClip?.mosaics?.firstOrNull { it.id == id } }
     val hasSelection: Boolean get() = selectedClipId != null || selectedTextId != null || selectedAudioId != null || selectedPipId != null
 }
 
@@ -444,25 +449,25 @@ class EditorViewModel(
     // ------------------------------------------------------------------
 
     fun selectClip(id: String?) {
-        _state.update { it.copy(selectedClipId = id, selectedTextId = null, selectedAudioId = null, selectedPipId = null) }
+        _state.update { it.copy(selectedClipId = id, selectedTextId = null, selectedAudioId = null, selectedPipId = null, selectedMosaicId = null) }
     }
 
     fun selectText(id: String?) {
-        _state.update { it.copy(selectedTextId = id, selectedClipId = null, selectedAudioId = null, selectedPipId = null) }
+        _state.update { it.copy(selectedTextId = id, selectedClipId = null, selectedAudioId = null, selectedPipId = null, selectedMosaicId = null) }
     }
 
     fun selectAudio(id: String?) {
-        _state.update { it.copy(selectedAudioId = id, selectedClipId = null, selectedTextId = null, selectedPipId = null) }
+        _state.update { it.copy(selectedAudioId = id, selectedClipId = null, selectedTextId = null, selectedPipId = null, selectedMosaicId = null) }
     }
 
     fun selectPip(id: String?) {
-        _state.update { it.copy(selectedPipId = id, selectedClipId = null, selectedTextId = null, selectedAudioId = null) }
+        _state.update { it.copy(selectedPipId = id, selectedClipId = null, selectedTextId = null, selectedAudioId = null, selectedMosaicId = null) }
     }
 
     /** Tap on empty timeline space: drop every selection. */
     fun clearSelection() {
         if (_state.value.hasSelection) {
-            _state.update { it.copy(selectedClipId = null, selectedTextId = null, selectedAudioId = null, selectedPipId = null) }
+            _state.update { it.copy(selectedClipId = null, selectedTextId = null, selectedAudioId = null, selectedPipId = null, selectedMosaicId = null) }
         }
     }
 
@@ -726,6 +731,70 @@ class EditorViewModel(
             })
         }
         if (commit) commitOrMutate("淡入淡出") { apply(it) } else previewTransform { apply(it) }
+    }
+
+    // ------------------------------------------------------------------
+    // Crossfade transitions (v1.2.1)
+    // ------------------------------------------------------------------
+
+    /**
+     * Set the crossfade-in duration of the selected clip (microseconds).
+     * The overlap shortens the timeline cumulatively; texts/audios/PiPs stay
+     * at their absolute positions (CapCut-like: the video shifts under them).
+     */
+    fun setClipTransition(clipId: String, us: Long, commit: Boolean = true) {
+        val apply: (Project) -> Project = { p ->
+            val idx = p.clips.indexOfFirst { it.id == clipId }
+            if (idx < 0) p
+            else p.copy(clips = TimelineOps.setTransitionIn(p.clips, idx, us))
+        }
+        if (commit) commitOrMutate("转场") { apply(it) } else previewTransform { apply(it) }
+    }
+
+    // ------------------------------------------------------------------
+    // Mosaic regions (v1.2.2)
+    // ------------------------------------------------------------------
+
+    /** Add a default-centered mosaic region to the selected clip and select it. */
+    fun addMosaicRegion(clipId: String) {
+        val region = com.RooMCutNext.core.model.MosaicRegion(id = IdGen.new("mos"))
+        var added = false
+        mutate("添加马赛克") { p ->
+            val result = TimelineOps.addMosaicRegion(p.clips, clipId, region)
+            if (result == null) p
+            else {
+                added = true
+                p.copy(clips = result.first)
+            }
+        }
+        if (added) {
+            _state.update { it.copy(selectedMosaicId = region.id) }
+        } else {
+            _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.panel_mosaic_full)) }
+        }
+    }
+
+    /** Update one region of the selected clip (slider drags preview live). */
+    fun updateMosaicRegion(clipId: String, region: com.RooMCutNext.core.model.MosaicRegion, commit: Boolean = true) {
+        val apply: (Project) -> Project = { p ->
+            p.copy(clips = TimelineOps.updateMosaicRegion(p.clips, clipId, region))
+        }
+        if (commit) commitOrMutate("编辑马赛克") { apply(it) } else previewTransform { apply(it) }
+    }
+
+    /** Remove one region of the selected clip. */
+    fun removeMosaicRegion(clipId: String, regionId: String) {
+        mutate("删除马赛克") { p ->
+            p.copy(clips = TimelineOps.removeMosaicRegion(p.clips, clipId, regionId))
+        }
+        if (_state.value.selectedMosaicId == regionId) {
+            _state.update { it.copy(selectedMosaicId = null) }
+        }
+    }
+
+    /** Select which region of the selected clip the mosaic panel edits. */
+    fun selectMosaic(regionId: String?) {
+        _state.update { it.copy(selectedMosaicId = regionId) }
     }
 
     // ------------------------------------------------------------------

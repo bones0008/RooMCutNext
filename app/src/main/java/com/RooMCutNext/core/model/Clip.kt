@@ -11,6 +11,15 @@ import kotlinx.serialization.Serializable
  * the tail closed. Old project JSON (schema v2, no gap field) deserializes
  * with gapBeforeUs = 0 everywhere = the old compact layout.
  *
+ * Timeline v4 — TRANSITIONS (v1.2.1): a clip may carry a [transitionInUs]
+ * crossfade with the PREVIOUS clip: the clip starts that much EARLIER,
+ * overlapping the previous clip's tail, and fades in over the overlap. The
+ * previous clip stays fully opaque underneath (bottom sequence), so the
+ * composite is a true crossfade with no dip-to-black. Transitions are only
+ * effective between ADJACENT clips (gapBeforeUs below
+ * [TRANSITION_MIN_GAP_US]); a black hole between two clips disables the
+ * transition. Old JSON deserializes with transitionInUs = 0 = hard cuts.
+ *
  * Source-side coordinates: [sourceInUs]/[sourceOutUs] address the source media
  * file directly; [durationUs] is the timeline duration after speed is applied.
  */
@@ -39,6 +48,16 @@ data class Clip(
     val fadeOutMs: Int = 0,
     val adjust: ColorAdjust = ColorAdjust(),
     val crop: CropSpec? = null,
+    /**
+     * Crossfade duration with the PREVIOUS clip, microseconds (0 = hard cut).
+     * Only effective when the clip is adjacent to its predecessor (no gap);
+     * see the class doc. The raw stored value is clamped into the legal
+     * domain by [com.RooMCutNext.core.ops.TimelineOps.effectiveTransitions]
+     * before any geometry is derived from it.
+     */
+    val transitionInUs: Long = 0L,
+    /** Per-clip mosaic regions (v1.2.2), normalized to this clip's frame. */
+    val mosaics: List<MosaicRegion> = emptyList(),
 ) {
     /** Span of source media used by this clip, microseconds. */
     val sourceSpanUs: Long get() = sourceOutUs - sourceInUs
@@ -115,6 +134,77 @@ data class ColorAdjust(
             gain(bGain, tempB, tintRB),
         )
     }
+}
+
+/**
+ * A rectangular pixelation region on a clip's frame (v1.2.2).
+ *
+ * Coordinates are normalized to the CLIP's own frame (after its rotation /
+ * crop effects, before compositing onto the project canvas), using the
+ * intuitive convention: x right, y DOWN, origin at the top-left corner of
+ * the visible frame, all values in 0..1. [x]/[y] is the region CENTER and
+ * [w]/[h] its size as fractions of the frame's width/height.
+ *
+ * [blockRatio] is the mosaic block size as a fraction of the frame WIDTH
+ * (e.g. 0.03 = blocks of ~3% frame width ≈ 58px on a 1920-wide frame);
+ * larger = coarser pixelation. Blocks are square in PIXEL space.
+ */
+@Serializable
+data class MosaicRegion(
+    val id: String,
+    /** Region center X, 0..1 of frame width (left = 0). */
+    val x: Float = 0.5f,
+    /** Region center Y, 0..1 of frame height (top = 0). */
+    val y: Float = 0.5f,
+    /** Region width, fraction of frame width. */
+    val w: Float = 0.4f,
+    /** Region height, fraction of frame height. */
+    val h: Float = 0.4f,
+    /** Mosaic block size, fraction of frame width (see class doc). */
+    val blockRatio: Float = 0.03f,
+)
+
+/** Transitions are disabled when the hole in front of a clip is at least this long. */
+const val TRANSITION_MIN_GAP_US: Long = 20_000L
+
+/** Longest crossfade offered (also the slider upper bound). */
+const val TRANSITION_MAX_US: Long = 2_000_000L
+
+/** A clip must keep at least this much body (non-fading) timeline duration. */
+const val TRANSITION_MIN_BODY_US: Long = 100_000L
+
+/**
+ * Effective (legally clamped) crossfade-in duration of every clip,
+ * microseconds — the single authority all geometry derives from.
+ *
+ * Rules applied to the RAW [Clip.transitionInUs] values:
+ *  - clip 0 and clips behind a black hole (gapBeforeUs ≥ [TRANSITION_MIN_GAP_US]): 0;
+ *  - a clip's crossfade may not eat into the PREVIOUS clip's fading head:
+ *    T[i] ≤ prevDuration − T[i−1] (the previous clip's body);
+ *  - a clip must keep a body of at least [TRANSITION_MIN_BODY_US];
+ *  - capped at [TRANSITION_MAX_US].
+ *
+ * The clamped values are computed with a forward pass, so T[i−1] inside the
+ * second rule is itself already clamped. Model-layer (not ops) because both
+ * [Project.clipsDurationUs] and TimelineOps.starts() must agree on it.
+ */
+fun effectiveTransitions(clips: List<Clip>): LongArray {
+    val out = LongArray(clips.size)
+    var prevEffectiveUs = 0L
+    for (i in clips.indices) {
+        val c = clips[i]
+        var t = 0L
+        if (i > 0 && c.gapBeforeUs < TRANSITION_MIN_GAP_US && c.transitionInUs > 0L) {
+            val prevBodyUs = clips[i - 1].durationUs - prevEffectiveUs
+            t = c.transitionInUs.coerceIn(
+                0L,
+                minOf(prevBodyUs, c.durationUs - TRANSITION_MIN_BODY_US, TRANSITION_MAX_US),
+            )
+        }
+        out[i] = t
+        prevEffectiveUs = t
+    }
+    return out
 }
 
 /**

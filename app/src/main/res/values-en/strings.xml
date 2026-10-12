@@ -158,6 +158,31 @@
     <string name="panel_pip_opacity">Opacity</string>
     <string name="panel_pip_delete">Delete this layer</string>
 
+    <!-- Crossfade transitions (v1.2.1) -->
+    <string name="action_transition">Transition</string>
+    <string name="panel_transition_title">Transition (crossfade)</string>
+    <string name="panel_transition_none">None</string>
+    <string name="panel_transition_duration">Duration</string>
+    <string name="panel_transition_sec_fmt">%1$.1f s</string>
+    <string name="panel_transition_first_clip">There is no clip before the first one, so it cannot have a transition. Select a later clip instead.</string>
+    <string name="panel_transition_gap">There is a black gap before this clip; crossfades need two clips side by side. Remove the gap (drag the clip tight) first.</string>
+    <string name="panel_transition_effective_fmt">Effective %1$s (limited by neighboring clips)</string>
+
+    <!-- Mosaic regions (v1.2.2) -->
+    <string name="action_mosaic">Mosaic</string>
+    <string name="panel_mosaic_title">Mosaic</string>
+    <string name="panel_mosaic_add">＋ Add region</string>
+    <string name="panel_mosaic_full">At most 4 mosaic regions per clip</string>
+    <string name="panel_mosaic_empty">No mosaic yet. Tap "＋ Add region", then drag the sliders until the mosaic covers what you want to hide (face, plate, watermark…).</string>
+    <string name="panel_mosaic_pick">Tap a region above to edit it</string>
+    <string name="panel_mosaic_region_fmt">Region %1$d</string>
+    <string name="panel_mosaic_position_x">Position X</string>
+    <string name="panel_mosaic_position_y">Position Y</string>
+    <string name="panel_mosaic_width">Width</string>
+    <string name="panel_mosaic_height">Height</string>
+    <string name="panel_mosaic_block">Block size</string>
+    <string name="panel_mosaic_delete">Delete this region</string>
+
     <!-- Voiceover recording (v1.1.4) -->
     <string name="panel_audio_record">Record voiceover</string>
     <string name="panel_audio_record_stop">Stop recording</string>

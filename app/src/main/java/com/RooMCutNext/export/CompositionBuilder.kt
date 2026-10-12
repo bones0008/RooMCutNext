@@ -24,8 +24,11 @@ import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.ops.TimelineOps
+import com.RooMCutNext.core.model.effectiveTransitions
 import androidx.media3.effect.AlphaScale
+import com.RooMCutNext.export.effects.FadeInEffect
 import com.RooMCutNext.export.effects.GainAudioProcessor
+import com.RooMCutNext.export.effects.MosaicEffect
 import com.RooMCutNext.export.effects.PipPresentation
 import com.RooMCutNext.export.effects.TimedTextOverlay
 import com.RooMCutNext.media.LutRegistry
@@ -90,13 +93,26 @@ object CompositionBuilder {
         forPreview: Boolean = false,
     ): BuildResult {
         val starts = TimelineOps.starts(project.clips)
+        // Effective (clamped) crossfade-in per clip — see effectiveTransitions.
+        val transitions = effectiveTransitions(project.clips)
         val skipped = mutableListOf<String>()
         val items = mutableListOf<EditedMediaItem>()
+        val transitionItems = mutableListOf<EditedMediaItem>()
+        var transitionCursorUs = 0L
 
-        // ---- primary (video) sequence ----
+        // ---- primary (video) sequence + transition overlay sequence (v1.2.1) ----
         // Gap-aware: a clip's leading hole becomes a black background item,
         // so the hole renders as true black (text overlays can sit on it) in
         // BOTH preview and export.
+        //
+        // CROSSFADES: a clip with an effective transition T is split into a
+        // HEAD (its first T, fading in) and a BODY (the rest). The BODY stays
+        // in the primary sequence — fully opaque, covering the overlap from
+        // underneath; the HEAD goes into a second parallel sequence stacked
+        // ABOVE the primary one, padded transparent up to its start. Because
+        // only the TOP layer fades (the one underneath is opaque), the
+        // composite is a true crossfade with no dip-to-black and no dependence
+        // on how the compositor resolves two semi-transparent layers.
         var emittedEndUs = 0L
         project.clips.forEachIndexed { index, clip ->
             val clipStartUs = starts[index]
@@ -112,7 +128,46 @@ object CompositionBuilder {
                 skipped += clip.id
                 return@forEachIndexed
             }
-            items += buildItem(project, clip, asset, file, clipStartUs, stripEffects)
+            val tUs = transitions[index]
+            val headSourceSpanUs = (tUs * clip.speed).toLong()
+
+            // Body: everything after the fading head (the whole clip when no
+            // transition). Opaque, in the primary sequence.
+            val bodyDurationUs = clip.durationUs - tUs
+            if (bodyDurationUs > 0L) {
+                items += buildClipItem(
+                    project = project, clip = clip, asset = asset, file = file,
+                    sourceInUs = clip.sourceInUs + headSourceSpanUs,
+                    sourceOutUs = clip.sourceOutUs,
+                    timelineStartUs = clipStartUs + tUs,
+                    timelineDurationUs = bodyDurationUs,
+                    fadeInUs = 0L,
+                    audioFadeInUs = 0L,
+                    audioFadeOutUs = if (tUs > 0L) 0L else clip.fadeOutMs * 1000L,
+                    stripEffects = stripEffects,
+                )
+            }
+
+            // Head: the fading-in overlap, in the transition overlay sequence.
+            if (tUs > 0L) {
+                if (clipStartUs - transitionCursorUs > 0L) {
+                    transitionItems += buildTransparentPadItem(
+                        project, mediaDir, clipStartUs - transitionCursorUs,
+                    )
+                }
+                transitionItems += buildClipItem(
+                    project = project, clip = clip, asset = asset, file = file,
+                    sourceInUs = clip.sourceInUs,
+                    sourceOutUs = clip.sourceInUs + headSourceSpanUs,
+                    timelineStartUs = clipStartUs,
+                    timelineDurationUs = tUs,
+                    fadeInUs = if (stripEffects) 0L else tUs,
+                    audioFadeInUs = clip.fadeInMs * 1000L,
+                    audioFadeOutUs = 0L,
+                    stripEffects = stripEffects,
+                )
+                transitionCursorUs = clipStartUs + tUs
+            }
             emittedEndUs = clipStartUs + clip.durationUs
         }
 
@@ -132,6 +187,14 @@ object CompositionBuilder {
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
         sequences += EditedMediaItemSequence.Builder(items).build()
+
+        // ---- crossfade overlay sequence (v1.2.1) ----
+        // Added BEFORE the PiP sequences so stickers and picture-in-picture
+        // stay ABOVE the fading heads (an overlay must not disappear behind
+        // a crossfade). No-op for projects without transitions.
+        if (transitionItems.isNotEmpty()) {
+            sequences += EditedMediaItemSequence.Builder(transitionItems).build()
+        }
 
         // ---- picture-in-picture sequences (v1.2), one per layer ----
         // Each layer is its own parallel video sequence stacked over the
@@ -175,12 +238,28 @@ object CompositionBuilder {
     // Video items
     // ------------------------------------------------------------------
 
-    private fun buildItem(
+    /**
+     * One video/image item covering a WINDOW of a clip (v1.2.1): the source
+     * span [sourceInUs, sourceOutUs) plays for [timelineDurationUs] starting
+     * at [timelineStartUs] on the global timeline.
+     *
+     * Crossfades split a clip into two windows over this one builder: a HEAD
+     * ([fadeInUs] > 0 — carries the crossfade-in effect and the clip's audio
+     * fade-in) and a BODY (opaque remainder, carries the audio fade-out).
+     * Windows with no transition are simply the whole clip.
+     */
+    private fun buildClipItem(
         project: Project,
         clip: Clip,
         asset: MediaAsset,
         file: File,
-        clipStartUs: Long,
+        sourceInUs: Long,
+        sourceOutUs: Long,
+        timelineStartUs: Long,
+        timelineDurationUs: Long,
+        fadeInUs: Long,
+        audioFadeInUs: Long,
+        audioFadeOutUs: Long,
         stripEffects: Boolean,
     ): EditedMediaItem {
         val uri = Uri.fromFile(file)
@@ -188,15 +267,15 @@ object CompositionBuilder {
         val mediaItem = if (asset.isImage) {
             MediaItem.Builder()
                 .setUri(uri)
-                .setImageDurationMs((clip.durationUs / 1000L).coerceAtLeast(1L))
+                .setImageDurationMs((timelineDurationUs / 1000L).coerceAtLeast(1L))
                 .build()
         } else {
             MediaItem.Builder()
                 .setUri(uri)
                 .setClippingConfiguration(
                     MediaItem.ClippingConfiguration.Builder()
-                        .setStartPositionUs(clip.sourceInUs)
-                        .setEndPositionUs(clip.sourceOutUs)
+                        .setStartPositionUs(sourceInUs)
+                        .setEndPositionUs(sourceOutUs)
                         .build()
                 )
                 .build()
@@ -246,12 +325,19 @@ object CompositionBuilder {
                     .build()
             }
 
-            // ---- text overlays whose window overlaps this clip ----
+            // ---- mosaic regions (v1.2.2) ----
+            clip.mosaics.forEach { region ->
+                videoEffects += MosaicEffect(region)
+            }
+
+            // ---- text overlays whose window overlaps THIS item's window ----
             // Windows are in GLOBAL timeline coordinates for BOTH preview and
             // export (see class doc for the v1.0.8 real-device verification).
-            val clipEndUs = clipStartUs + clip.durationUs
+            // Attaching the same overlays to head and body is safe: each item
+            // only covers its own window, so a text never renders twice.
+            val itemEndUs = timelineStartUs + timelineDurationUs
             val overlapping = project.texts
-                .filter { it.startUs < clipEndUs && it.endUs > clipStartUs }
+                .filter { it.startUs < itemEndUs && it.endUs > timelineStartUs }
                 .sortedBy { it.startUs }
             overlapping.chunked(MAX_OVERLAYS_PER_EFFECT).forEach { chunk ->
                 videoEffects += OverlayEffect(
@@ -264,14 +350,23 @@ object CompositionBuilder {
                     }
                 )
             }
+
+            // ---- crossfade-in: alpha ramp over the head's first fadeInUs ----
+            // Global window + item-local fallback live inside FadeMath; see
+            // FadeInEffect for the timestamp-convention rationale.
+            if (fadeInUs > 0L) {
+                videoEffects += FadeInEffect(fadeInUs, timelineStartUs)
+            }
         }
 
         // ---- audio ----
         val audioEffects = mutableListOf<AudioProcessor>()
         if (!stripEffects && !asset.isImage && !clip.muted &&
-            (clip.volume != 1f || clip.fadeInMs > 0 || clip.fadeOutMs > 0)
+            (clip.volume != 1f || audioFadeInUs > 0 || audioFadeOutUs > 0)
         ) {
-            audioEffects += GainAudioProcessor(clip.volume, clip.fadeInMs * 1000L, clip.fadeOutMs * 1000L, clip.durationUs)
+            audioEffects += GainAudioProcessor(
+                clip.volume, audioFadeInUs, audioFadeOutUs, timelineDurationUs,
+            )
         }
 
         val effects = Effects(audioEffects, videoEffects)
@@ -284,7 +379,7 @@ object CompositionBuilder {
             // Preview (CompositionPlayer) never checks it, which is why this
             // only breaks EXPORT. Frames are generated at frameRate via
             // ConstantRateTimestampIterator, so the project fps is correct.
-            builder.setDurationUs(clip.durationUs)
+            builder.setDurationUs(timelineDurationUs)
             builder.setFrameRate(project.fps.toInt().coerceAtLeast(1))
         } else {
             // MANDATORY on Media3 1.11.1: CompositionPlayer requires every
@@ -300,7 +395,7 @@ object CompositionBuilder {
             // silent/blank-frame aux sources are built in the same coordinates
             // and clipped identically, so the full source duration is the
             // correct value here. maxOf() guards against metadata skew.
-            val sourceDurationUs = maxOf(asset.durationUs, clip.sourceOutUs).coerceAtLeast(1L)
+            val sourceDurationUs = maxOf(asset.durationUs, sourceOutUs).coerceAtLeast(1L)
             builder.setDurationUs(sourceDurationUs)
             if (clip.speed != 1f) {
                 builder.setSpeed(SpeedParameters(ConstantSpeedProvider(clip.speed), /* shouldMaintainPitch = */ true))
@@ -308,6 +403,41 @@ object CompositionBuilder {
             if (clip.muted) builder.setRemoveAudio(true)
         }
         return builder.build()
+    }
+
+    /**
+     * Fully transparent still covering [padUs] — the video analog of the
+     * audio silence pad, used by the crossfade overlay sequence so its fading
+     * heads land at the right global positions (v1.2.1). Structural like the
+     * PiP pads: its AlphaScale(0)+Presentation stay on even in degraded
+     // compatibility preview, otherwise it would flash black.
+     */
+    private fun buildTransparentPadItem(
+        project: Project,
+        mediaDir: File,
+        padUs: Long,
+    ): EditedMediaItem {
+        val pad = GeneratedMedia.blackPng(mediaDir, 2, 2)
+        val mediaItem = MediaItem.Builder()
+            .setUri(Uri.fromFile(pad))
+            .setImageDurationMs((padUs / 1000L).coerceAtLeast(1L))
+            .build()
+        return EditedMediaItem.Builder(mediaItem)
+            .setEffects(
+                Effects(
+                    emptyList<AudioProcessor>(),
+                    listOf(
+                        alphaScale(0f),
+                        androidx.media3.effect.Presentation.createForWidthAndHeight(
+                            project.width, project.height,
+                            androidx.media3.effect.Presentation.LAYOUT_STRETCH_TO_FIT,
+                        ),
+                    ),
+                )
+            )
+            .setDurationUs(padUs)
+            .setFrameRate(project.fps.toInt().coerceAtLeast(1))
+            .build()
     }
 
     /**

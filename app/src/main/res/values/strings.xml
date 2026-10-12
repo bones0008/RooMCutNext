@@ -158,6 +158,31 @@
     <string name="panel_pip_opacity">不透明度</string>
     <string name="panel_pip_delete">删除这一层</string>
 
+    <!-- Crossfade transitions (v1.2.1) -->
+    <string name="action_transition">转场</string>
+    <string name="panel_transition_title">转场（叠化）</string>
+    <string name="panel_transition_none">无</string>
+    <string name="panel_transition_duration">时长</string>
+    <string name="panel_transition_sec_fmt">%1$.1f 秒</string>
+    <string name="panel_transition_first_clip">第一段素材前面没有其他素材，无法添加转场。选中后一段素材再设置。</string>
+    <string name="panel_transition_gap">与前一段素材之间有空隙（黑场），转场需要两段素材首尾相接。先把空隙去掉（拖动素材贴紧）后再试。</string>
+    <string name="panel_transition_effective_fmt">实际生效 %1$s（受相邻片段长度限制）</string>
+
+    <!-- Mosaic regions (v1.2.2) -->
+    <string name="action_mosaic">马赛克</string>
+    <string name="panel_mosaic_title">马赛克</string>
+    <string name="panel_mosaic_add">＋ 添加区域</string>
+    <string name="panel_mosaic_full">每段素材最多 4 个马赛克区域</string>
+    <string name="panel_mosaic_empty">还没有马赛克区域。点「＋ 添加区域」后拖动滑杆，把马赛克盖在要遮住的地方（脸、车牌、水印…）。</string>
+    <string name="panel_mosaic_pick">点上方区域进行编辑</string>
+    <string name="panel_mosaic_region_fmt">区域 %1$d</string>
+    <string name="panel_mosaic_position_x">水平位置</string>
+    <string name="panel_mosaic_position_y">垂直位置</string>
+    <string name="panel_mosaic_width">宽度</string>
+    <string name="panel_mosaic_height">高度</string>
+    <string name="panel_mosaic_block">块大小</string>
+    <string name="panel_mosaic_delete">删除此区域</string>
+
     <!-- Voiceover recording (v1.1.4) -->
     <string name="panel_audio_record">旁白录音</string>
     <string name="panel_audio_record_stop">停止录音</string>

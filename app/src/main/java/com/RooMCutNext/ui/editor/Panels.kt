@@ -833,6 +833,196 @@ fun PipSheet(vm: EditorViewModel, state: EditorUiState) {
 }
 
 // ===========================================================================
+// Crossfade transitions (v1.2.1)
+// ===========================================================================
+
+@Composable
+fun TransitionSheet(vm: EditorViewModel, state: EditorUiState) {
+    val clip = state.selectedClip ?: return
+    SheetTitle(stringResource(R.string.panel_transition_title))
+    val clips = state.project.clips
+    val index = clips.indexOfFirst { it.id == clip.id }
+
+    when {
+        index <= 0 -> {
+            TransitionHint(stringResource(R.string.panel_transition_first_clip))
+            return
+        }
+        clip.gapBeforeUs >= com.RooMCutNext.core.model.TRANSITION_MIN_GAP_US -> {
+            TransitionHint(stringResource(R.string.panel_transition_gap))
+            return
+        }
+    }
+
+    // Quick presets ( microseconds).
+    val presets = listOf(
+        0L to stringResource(R.string.panel_transition_none),
+        300_000L to "0.3s",
+        500_000L to "0.5s",
+        1_000_000L to "1s",
+        2_000_000L to "2s",
+    )
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        presets.forEach { (us, label) ->
+            FilterChip(
+                selected = clip.transitionInUs == us,
+                onClick = { vm.setClipTransition(clip.id, us) },
+                label = { Text(label) },
+            )
+        }
+    }
+    LabeledSlider(
+        label = stringResource(R.string.panel_transition_duration),
+        value = (clip.transitionInUs / 1_000_000f).coerceIn(0f, 2f),
+        valueRange = 0f..2f,
+        valueLabel = stringResource(R.string.panel_transition_sec_fmt, clip.transitionInUs / 1_000_000f),
+        onValueChange = { vm.setClipTransition(clip.id, (it * 1_000_000f).toLong(), commit = false) },
+        onValueChangeFinished = { vm.setClipTransition(clip.id, clip.transitionInUs) },
+    )
+
+    // The chain constraints (previous clip's fading head, own minimum body)
+    // can shorten the EFFECTIVE fade below the stored slider value — surface
+    // that instead of letting the user wonder why the overlap looks shorter.
+    val effectiveUs = com.RooMCutNext.core.model.effectiveTransitions(clips).getOrNull(index) ?: 0L
+    if (effectiveUs < clip.transitionInUs) {
+        Text(
+            stringResource(
+                R.string.panel_transition_effective_fmt,
+                TimeCode.formatShort(effectiveUs),
+            ),
+            style = MaterialTheme.typography.labelSmall,
+            color = WarnColor,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+@Composable
+private fun TransitionHint(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+    )
+    Spacer(Modifier.height(8.dp))
+}
+
+// ===========================================================================
+// Mosaic regions (v1.2.2)
+// ===========================================================================
+
+@Composable
+fun MosaicSheet(vm: EditorViewModel, state: EditorUiState) {
+    SheetTitle(stringResource(R.string.panel_mosaic_title))
+    val clip = state.selectedClip ?: run {
+        Text(
+            stringResource(R.string.panel_need_clip),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+        )
+        return
+    }
+
+    // Region chips + add button (cap enforced by the VM with a toast).
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        clip.mosaics.forEachIndexed { i, region ->
+            FilterChip(
+                selected = state.selectedMosaicId == region.id,
+                onClick = { vm.selectMosaic(region.id) },
+                label = { Text(stringResource(R.string.panel_mosaic_region_fmt, i + 1)) },
+            )
+        }
+        if (clip.mosaics.size < com.RooMCutNext.core.ops.TimelineOps.MOSAIC_MAX_REGIONS) {
+            ActionChip(stringResource(R.string.panel_mosaic_add)) {
+                vm.addMosaicRegion(clip.id)
+            }
+        }
+    }
+
+    // Switching clips pre-selects the first region so the sliders are usable
+    // immediately; after an explicit delete the selection stays empty.
+    androidx.compose.runtime.LaunchedEffect(clip.id) {
+        if (state.selectedMosaicId == null || clip.mosaics.none { it.id == state.selectedMosaicId }) {
+            vm.selectMosaic(clip.mosaics.firstOrNull()?.id)
+        }
+    }
+
+    val region = state.selectedMosaic
+    if (region == null) {
+        Text(
+            stringResource(if (clip.mosaics.isEmpty()) R.string.panel_mosaic_empty else R.string.panel_mosaic_pick),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+        Spacer(Modifier.height(8.dp))
+        return
+    }
+
+    // Sliders preview LIVE through the same composition pipeline (WYSIWYG):
+    // drag until the mosaic covers the face/logo, watching the preview.
+    LabeledSlider(
+        label = stringResource(R.string.panel_mosaic_position_x),
+        value = region.x,
+        valueRange = 0.02f..0.98f,
+        valueLabel = "${(region.x * 100).toInt()}%",
+        onValueChange = { vm.updateMosaicRegion(clip.id, region.copy(x = it), commit = false) },
+        onValueChangeFinished = { vm.updateMosaicRegion(clip.id, region) },
+    )
+    LabeledSlider(
+        label = stringResource(R.string.panel_mosaic_position_y),
+        value = region.y,
+        valueRange = 0.02f..0.98f,
+        valueLabel = "${(region.y * 100).toInt()}%",
+        onValueChange = { vm.updateMosaicRegion(clip.id, region.copy(y = it), commit = false) },
+        onValueChangeFinished = { vm.updateMosaicRegion(clip.id, region) },
+    )
+    LabeledSlider(
+        label = stringResource(R.string.panel_mosaic_width),
+        value = region.w,
+        valueRange = 0.05f..1f,
+        valueLabel = "${(region.w * 100).toInt()}%",
+        onValueChange = { vm.updateMosaicRegion(clip.id, region.copy(w = it), commit = false) },
+        onValueChangeFinished = { vm.updateMosaicRegion(clip.id, region) },
+    )
+    LabeledSlider(
+        label = stringResource(R.string.panel_mosaic_height),
+        value = region.h,
+        valueRange = 0.05f..1f,
+        valueLabel = "${(region.h * 100).toInt()}%",
+        onValueChange = { vm.updateMosaicRegion(clip.id, region.copy(h = it), commit = false) },
+        onValueChangeFinished = { vm.updateMosaicRegion(clip.id, region) },
+    )
+    LabeledSlider(
+        label = stringResource(R.string.panel_mosaic_block),
+        value = region.blockRatio,
+        valueRange = 0.01f..0.25f,
+        valueLabel = "${(region.blockRatio * 1000).toInt() / 10f}%",
+        onValueChange = { vm.updateMosaicRegion(clip.id, region.copy(blockRatio = it), commit = false) },
+        onValueChangeFinished = { vm.updateMosaicRegion(clip.id, region) },
+    )
+    TextButton(
+        onClick = { vm.removeMosaicRegion(clip.id, region.id) },
+        modifier = Modifier.padding(horizontal = 16.dp),
+    ) {
+        Text(stringResource(R.string.panel_mosaic_delete), color = DangerColor)
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+// ===========================================================================
 // Audio
 // ===========================================================================
 

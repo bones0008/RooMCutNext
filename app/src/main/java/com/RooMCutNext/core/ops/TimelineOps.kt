@@ -7,7 +7,11 @@ import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.ColorAdjust
 import com.RooMCutNext.core.model.IMAGE_MAX_DURATION_US
 import com.RooMCutNext.core.model.MediaAsset
+import com.RooMCutNext.core.model.MosaicRegion
 import com.RooMCutNext.core.model.TextOverlayItem
+import com.RooMCutNext.core.model.TRANSITION_MAX_US
+import com.RooMCutNext.core.model.TRANSITION_MIN_BODY_US
+import com.RooMCutNext.core.model.effectiveTransitions
 import kotlin.math.max
 import kotlin.math.min
 
@@ -44,14 +48,22 @@ object TimelineOps {
      * Cumulative start time of each clip on the timeline, microseconds.
      * clips.size + 1 entries; entry i includes clips[i].gapBeforeUs (the hole
      * in front of clip i belongs to the timeline span BEFORE the clip).
+     *
+     * v1.2.1 TRANSITIONS: a clip with an effective crossfade-in (see
+     * [effectiveTransitions]) starts that much EARLIER — its start is pulled
+     * back onto the previous clip's tail, so the two overlap and the total
+     * shortens cumulatively. The running cursor uses TRUE positions, so each
+     * clip's overlap only pulls itself back, never the clips after it.
      */
     fun starts(clips: List<Clip>): LongArray {
+        val transitions = effectiveTransitions(clips)
         val out = LongArray(clips.size + 1)
         var acc = 0L
         for (i in clips.indices) {
             acc += clips[i].gapBeforeUs
-            out[i] = acc
-            acc += clips[i].durationUs
+            val start = (acc - transitions[i]).coerceAtLeast(0L)
+            out[i] = start
+            acc = start + clips[i].durationUs
         }
         out[clips.size] = acc
         return out
@@ -212,6 +224,64 @@ object TimelineOps {
 
     fun update(clips: List<Clip>, clipId: String, transform: (Clip) -> Clip): List<Clip> =
         clips.map { if (it.id == clipId) transform(it) else it }
+
+    // ------------------------------------------------------------------
+    // Crossfade transitions (v1.2.1)
+    // ------------------------------------------------------------------
+
+    /**
+     * Set the RAW crossfade-in duration of clips[index] (microseconds).
+     *
+     * The stored value is clamped to what the UI can meaningfully offer:
+     * 0 (first clip / explicit none) .. min(TRANSITION_MAX_US, the clip's own
+     * duration minus a minimal body, the PREVIOUS clip's full duration).
+     * Tighter chain constraints (a previous fading head, a gap in front) are
+     * NOT baked into the stored value — they are applied on every read by
+     * [effectiveTransitions], so trimming a neighbor later never corrupts
+     * the saved project, it just shortens the effective fade.
+     */
+    fun setTransitionIn(clips: List<Clip>, index: Int, requestedUs: Long): List<Clip> {
+        if (index !in clips.indices) return clips
+        val clip = clips[index]
+        val maxUs = if (index == 0) 0L else minOf(
+            TRANSITION_MAX_US,
+            clip.durationUs - TRANSITION_MIN_BODY_US,
+            clips[index - 1].durationUs,
+        )
+        val t = requestedUs.coerceIn(0L, maxUs.coerceAtLeast(0L))
+        val updated = clip.copy(transitionInUs = t)
+        if (updated == clip) return clips
+        return clips.toMutableList().also { it[index] = updated }
+    }
+
+    // ------------------------------------------------------------------
+    // Mosaic regions (v1.2.2)
+    // ------------------------------------------------------------------
+
+    /** Most mosaic regions a single clip may carry (each is one GL pass). */
+    const val MOSAIC_MAX_REGIONS: Int = 4
+
+    /** Add a mosaic region to a clip; returns the new region (null when full / no clip). */
+    fun addMosaicRegion(clips: List<Clip>, clipId: String, region: MosaicRegion): Pair<List<Clip>, MosaicRegion>? {
+        val clip = clips.firstOrNull { it.id == clipId } ?: return null
+        if (clip.mosaics.size >= MOSAIC_MAX_REGIONS) return null
+        val updated = clip.copy(mosaics = clip.mosaics + region)
+        return clips.map { if (it.id == clipId) updated else it } to region
+    }
+
+    /** Replace one region of a clip (same id), keeping list order. */
+    fun updateMosaicRegion(clips: List<Clip>, clipId: String, region: MosaicRegion): List<Clip> =
+        clips.map { clip ->
+            if (clip.id != clipId) clip
+            else clip.copy(mosaics = clip.mosaics.map { if (it.id == region.id) region else it })
+        }
+
+    /** Remove one region of a clip by id. */
+    fun removeMosaicRegion(clips: List<Clip>, clipId: String, regionId: String): List<Clip> =
+        clips.map { clip ->
+            if (clip.id != clipId) clip
+            else clip.copy(mosaics = clip.mosaics.filter { it.id != regionId })
+        }
 
     /**
      * v1.1.2: copy one clip's full color grading (LUT + strength + basic
