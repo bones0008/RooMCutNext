@@ -51,6 +51,14 @@ data class AudioTrimPreview(
     val sourceOutUs: Long,
 )
 
+/** Live voiceover take in progress (v1.1.4). */
+data class VoiceoverState(
+    /** Milliseconds since the take started (drives the in-panel clock). */
+    val elapsedMs: Long = 0L,
+    /** Timeline position where the resulting AudioClip will land. */
+    val startUs: Long = 0L,
+)
+
 data class EditorUiState(
     val project: Project = Project(id = "", name = ""),
     val selectedClipId: String? = null,
@@ -79,6 +87,8 @@ data class EditorUiState(
     val diagLog: List<String> = emptyList(),
     /** Hidden diagnostics: toggled by tapping the project title 5 times. */
     val diagOverlayVisible: Boolean = false,
+    /** Live voiceover recording (v1.1.4): elapsed ms + timeline start of the take. */
+    val voiceover: VoiceoverState? = null,
 ) {
     val totalDurationUs: Long get() = project.totalDurationUs
     val selectedClip: Clip? get() = selectedClipId?.let { project.clipById(it) }
@@ -471,6 +481,11 @@ class EditorViewModel(
     }
 
     fun clearToast() = _state.update { it.copy(toast = null) }
+
+    /** Show a transient notice from view-layer code (frame export etc.). */
+    fun flashToast(message: String) {
+        _state.update { it.copy(toast = message) }
+    }
 
     fun clearPlaybackError() = _state.update { it.copy(playbackError = null) }
 
@@ -938,6 +953,111 @@ class EditorViewModel(
     fun deleteAudio(id: String) {
         mutate("删除音频") { p -> p.copy(audios = TimelineOps.deleteAudio(p.audios, id)) }
         _state.update { it.copy(selectedAudioId = null, activePanel = null) }
+    }
+
+    // ------------------------------------------------------------------
+    // Voiceover recording (v1.1.4)
+    // ------------------------------------------------------------------
+
+    private var voiceRecorder: com.RooMCutNext.media.VoiceRecorder? = null
+    private var voiceoverJob: Job? = null
+    private var voiceoverFile: File? = null
+    private var voiceoverStartUs = 0L
+    private var voiceoverStartWallMs = 0L
+
+    /** True while a voiceover take is in progress. */
+    val isRecordingVoiceover: Boolean get() = _state.value.voiceover != null
+
+    /**
+     * Start a narration take at the playhead: playback runs along so the
+     * user can narrate against the picture; mic audio goes to an m4a inside
+     * the project media dir. [stopVoiceover] turns it into an AudioClip.
+     */
+    fun startVoiceover() {
+        if (voiceRecorder != null) return
+        val s = _state.value
+        val startUs = s.playheadUs.coerceAtLeast(0L)
+        val file = File(repo.mediaDir(projectId), "${IdGen.new("vo")}.m4a")
+        val recorder = com.RooMCutNext.media.VoiceRecorder(app, file)
+        try {
+            recorder.start()
+        } catch (e: Exception) {
+            _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.voiceover_start_failed)) }
+            return
+        }
+        voiceRecorder = recorder
+        voiceoverFile = file
+        voiceoverStartUs = startUs
+        voiceoverStartWallMs = android.os.SystemClock.elapsedRealtime()
+        _state.update { it.copy(voiceover = VoiceoverState(elapsedMs = 0L, startUs = startUs)) }
+        // Play along (from the very end, restart like a normal play tap).
+        if (s.project.hasContent && !s.isPlaying) {
+            if (s.playheadUs >= s.project.totalDurationUs) seekTo(0L)
+            playback.play()
+        }
+        voiceoverJob = viewModelScope.launch {
+            while (voiceRecorder != null) {
+                _state.update {
+                    it.copy(voiceover = it.voiceover?.copy(
+                        elapsedMs = android.os.SystemClock.elapsedRealtime() - voiceoverStartWallMs,
+                    ))
+                }
+                delay(200L)
+            }
+        }
+    }
+
+    /**
+     * Finish the take. Valid recordings become an AudioClip at the take's
+     * timeline position; too-short takes are discarded with a notice.
+     */
+    fun stopVoiceover() {
+        val recorder = voiceRecorder ?: return
+        voiceRecorder = null
+        voiceoverJob?.cancel()
+        voiceoverJob = null
+        val file = voiceoverFile ?: return
+        voiceoverFile = null
+        // Stop the picture too — the user wants to listen to the take.
+        playback.pause()
+        val startUs = voiceoverStartUs
+        val hadTake = recorder.stop()
+        _state.update { it.copy(voiceover = null) }
+        if (!hadTake) {
+            _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.voiceover_too_short)) }
+            return
+        }
+        viewModelScope.launch {
+            val asset = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.RooMCutNext.media.MetadataExtractor.extract(file)
+            }
+            if (asset == null || asset.durationUs <= 0L) {
+                file.delete()
+                _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.voiceover_too_short)) }
+                return@launch
+            }
+            val clip = AudioClip(
+                id = IdGen.new("aud"),
+                assetId = asset.id,
+                startUs = startUs,
+                sourceInUs = 0L,
+                sourceOutUs = asset.durationUs,
+            )
+            mutate("旁白录音") { p ->
+                p.copy(
+                    assets = p.assets + asset,
+                    audios = TimelineOps.insertAudio(p.audios, clip),
+                )
+            }
+            _state.update {
+                it.copy(
+                    selectedAudioId = clip.id,
+                    selectedClipId = null,
+                    selectedTextId = null,
+                    toast = app.getString(com.RooMCutNext.R.string.voiceover_added_fmt, asset.displayName),
+                )
+            }
+        }
     }
 
     // ------------------------------------------------------------------

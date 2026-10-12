@@ -484,6 +484,15 @@ private fun ImportChip(label: String, onClick: () -> Unit) {
 private fun formatSigned(v: Float): String =
     if (kotlin.math.abs(v) < 0.005f) "0" else "%+.2f".format(v)
 
+/** mm:ss for the live voiceover clock (rolls over to h:mm:ss past an hour). */
+private fun formatElapsedMs(ms: Long): String {
+    val total = ms / 1000
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
+}
+
 // ===========================================================================
 // Text
 // ===========================================================================
@@ -695,7 +704,45 @@ private fun FontChipRow(
 // ===========================================================================
 
 @Composable
-fun AudioSheet(vm: EditorViewModel, state: EditorUiState, onAddMusic: () -> Unit = {}) {
+fun AudioSheet(vm: EditorViewModel, state: EditorUiState, onAddMusic: () -> Unit = {}, onRecord: () -> Unit = {}) {
+    // v1.1.4: voiceover section is global (not tied to any selection) and
+    // always at the top of the audio panel.
+    val vo = state.voiceover
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (vo != null) {
+            // Live take: red pulse dot + elapsed clock + stop button.
+            Box(
+                Modifier
+                    .size(10.dp)
+                    .background(DangerColor, CircleShape)
+            )
+            Text(
+                formatElapsedMs(vo.elapsedMs),
+                style = MaterialTheme.typography.titleSmall,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                color = DangerColor,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+            Spacer(Modifier.weight(1f))
+            Button(onClick = { vm.stopVoiceover() }) {
+                Text(stringResource(R.string.panel_audio_record_stop))
+            }
+        } else {
+            Text(
+                stringResource(R.string.panel_audio_record),
+                Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Button(onClick = onRecord) {
+                Text(stringResource(R.string.panel_audio_record))
+            }
+        }
+    }
     // Independent audio clip selected -> its own controls.
     val audio = state.selectedAudio
     if (audio != null) {

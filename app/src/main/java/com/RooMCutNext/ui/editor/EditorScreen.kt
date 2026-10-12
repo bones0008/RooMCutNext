@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Delete
@@ -75,6 +76,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontFamily
@@ -91,6 +93,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.launch
 import com.RooMCutNext.R
 import com.RooMCutNext.core.util.TimeCode
 import com.RooMCutNext.export.ExportBus
@@ -172,6 +175,14 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         if (granted) vm.startExport() else vm.openPanel(null)
     }
 
+    // ---- v1.1.4: microphone permission for voiceover ----
+    val requestMic = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) vm.startVoiceover()
+        else vm.flashToast(context.getString(R.string.record_permission_denied))
+    }
+
     fun launchMediaPicker() {
         pickMedia.launch(mediaMimeTypes)
     }
@@ -190,7 +201,12 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
     DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             when (event) {
-                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> vm.playback.pause()
+                // A backgrounded activity cannot keep the mic: finish the
+                // take (keeping it when long enough) instead of losing it.
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> {
+                    vm.playback.pause()
+                    if (vm.isRecordingVoiceover) vm.stopVoiceover()
+                }
                 androidx.lifecycle.Lifecycle.Event.ON_STOP -> vm.saveNow()
                 else -> Unit
             }
@@ -296,6 +312,13 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         // Portrait projects get a TALL preview (58% of the flexible space)
         // instead of a 16:9 letterbox sliver; landscape keeps 16:9.
         val portrait = state.project.height > state.project.width
+        // v1.1.4: kept for frame export — PixelCopy needs the live PlayerView.
+        var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
+        val scope = rememberCoroutineScope()
+        val grabLabel = stringResource(R.string.action_grab_frame)
+        val frameSavedLabel = stringResource(R.string.frame_saved_fmt)
+        val frameFailedLabel = stringResource(R.string.frame_save_failed)
+        val frameEmptyLabel = stringResource(R.string.frame_empty_timeline)
         Box(
             Modifier
                 .fillMaxWidth()
@@ -315,6 +338,7 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                         // PlaybackController.bindView). The update block below
                         // keeps the binding correct across recompositions.
                         vm.playback.bindView(view)
+                        playerViewRef = view
                     }
                 },
                 update = { view ->
@@ -326,9 +350,60 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 onRelease = { view ->
                     view.player = null
                     vm.playback.unbindView()
+                    playerViewRef = null
                 },
                 modifier = Modifier.fillMaxSize(),
             )
+
+            // v1.1.4: save the current frame (WYSIWYG — includes grading,
+            // crops and text overlays exactly as previewed) into the gallery.
+            IconButton(
+                onClick = {
+                    val view = playerViewRef
+                    if (view == null || !state.project.hasContent) {
+                        vm.flashToast(frameEmptyLabel)
+                        return@IconButton
+                    }
+                    scope.launch {
+                        val bmp = com.RooMCutNext.media.FrameExporter.grabCurrentFrame(view)
+                        if (bmp == null) {
+                            vm.flashToast(frameFailedLabel)
+                            return@launch
+                        }
+                        // Aspect of what is actually on screen: the player's
+                        // current video size, falling back to the project
+                        // canvas (image-only timelines report 0).
+                        val vs = view.player?.videoSize
+                        val contentW = if (vs != null && vs.width > 0) vs.width else state.project.width
+                        val contentH = if (vs != null && vs.height > 0) vs.height else state.project.height
+                        val cropped = com.RooMCutNext.media.FrameExporter.cropToContent(bmp, contentW, contentH)
+                        val uri = com.RooMCutNext.media.FrameExporter.saveToGallery(
+                            context, cropped, state.project.name,
+                        )
+                        if (uri != null) {
+                            vm.flashToast(frameSavedLabel.format(
+                                "${state.project.name}_frame"
+                            ))
+                        } else {
+                            vm.flashToast(frameFailedLabel)
+                        }
+                        if (cropped !== bmp) cropped.recycle()
+                        bmp.recycle()
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .size(36.dp)
+                    .background(Color(0x66000000), androidx.compose.foundation.shape.CircleShape),
+            ) {
+                Icon(
+                    Icons.Filled.PhotoCamera,
+                    grabLabel,
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
 
             // ---- DIAG overlay (v1.0.6-diag): player lifecycle events on screen.
             // Hidden by default in the clean build; tap the project title 5x
@@ -441,6 +516,17 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                     onImportLut = { pickLut.launch(lutMimeTypes) },
                     onImportFont = { pickFont.launch(fontMimeTypes) },
                     onAddMusic = { pickAudio.launch(audioMimeTypes) },
+                    onRecord = {
+                        // v1.1.4: mic permission gate before the take starts.
+                        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                                context, android.Manifest.permission.RECORD_AUDIO
+                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        ) {
+                            vm.startVoiceover()
+                        } else {
+                            requestMic.launch(android.Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
                     onReplace = {
                         replaceMedia.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
@@ -727,6 +813,7 @@ private fun ToolPanelHost(
     onImportLut: () -> Unit,
     onImportFont: () -> Unit,
     onAddMusic: () -> Unit,
+    onRecord: () -> Unit,
     onReplace: () -> Unit,
     onNeedPermission: () -> Unit,
 ) {
@@ -820,7 +907,7 @@ private fun ToolPanelHost(
                     PanelKind.CROP -> CropSheet(vm, state)
                     PanelKind.ADJUST -> AdjustSheet(vm, state, onImportLut = onImportLut)
                     PanelKind.TEXT -> TextSheet(vm, state, onImportFont = onImportFont)
-                    PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = onAddMusic)
+                    PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = onAddMusic, onRecord = onRecord)
                     PanelKind.INFO -> InfoSheet(vm, state, onReplace = onReplace)
                     PanelKind.GOTO -> GotoSheet(vm, state)
                     PanelKind.EXPORT -> ExportSheet(

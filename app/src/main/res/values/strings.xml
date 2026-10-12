@@ -147,6 +147,14 @@
     <string name="panel_audio_clip_hint">独立音频轨 · 拖动移动，拖两端修剪，播放头处点“分割”切开</string>
     <string name="panel_audio_delete">删除音频</string>
 
+    <!-- Voiceover recording (v1.1.4) -->
+    <string name="panel_audio_record">旁白录音</string>
+    <string name="panel_audio_record_stop">停止录音</string>
+    <string name="voiceover_start_failed">无法开始录音（麦克风被占用或权限被拒）</string>
+    <string name="voiceover_too_short">录音太短，已丢弃</string>
+    <string name="voiceover_added_fmt">已添加旁白：%1$s（在录音起点位置）</string>
+    <string name="record_permission_denied">需要麦克风权限才能录音</string>
+
     <!-- Info panel -->
     <string name="panel_info_title">片段信息</string>
     <string name="panel_info_resolution">分辨率</string>
@@ -191,6 +199,12 @@
     <string name="panel_need_clip">请先在时间线中选择一个素材</string>
     <string name="panel_text_gone">文字已被删除</string>
     <string name="panel_clip_of_fmt">素材 %1$d/%2$d</string>
+
+    <!-- Frame export (v1.1.4) -->
+    <string name="action_grab_frame">保存当前帧</string>
+    <string name="frame_saved_fmt">已保存当前帧：%1$s</string>
+    <string name="frame_save_failed">保存当前帧失败</string>
+    <string name="frame_empty_timeline">时间线上没有画面可保存</string>
 
     <!-- Export notification -->
     <string name="export_channel_name">导出进度</string>

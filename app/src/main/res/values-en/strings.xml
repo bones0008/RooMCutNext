@@ -147,6 +147,14 @@
     <string name="panel_audio_clip_hint">Independent audio track · drag to move, drag edges to trim, Split cuts at the playhead</string>
     <string name="panel_audio_delete">Delete audio</string>
 
+    <!-- Voiceover recording (v1.1.4) -->
+    <string name="panel_audio_record">Record voiceover</string>
+    <string name="panel_audio_record_stop">Stop recording</string>
+    <string name="voiceover_start_failed">Could not start recording (mic busy or permission denied)</string>
+    <string name="voiceover_too_short">Recording too short, discarded</string>
+    <string name="voiceover_added_fmt">Voiceover added: %1$s (at the take start)</string>
+    <string name="record_permission_denied">Microphone permission is required</string>
+
     <!-- Info panel -->
     <string name="panel_info_title">Clip info</string>
     <string name="panel_info_resolution">Resolution</string>
@@ -191,6 +199,12 @@
     <string name="panel_need_clip">Select a clip in the timeline first</string>
     <string name="panel_text_gone">The text was deleted</string>
     <string name="panel_clip_of_fmt">Clip %1$d/%2$d</string>
+
+    <!-- Frame export (v1.1.4) -->
+    <string name="action_grab_frame">Save current frame</string>
+    <string name="frame_saved_fmt">Frame saved: %1$s</string>
+    <string name="frame_save_failed">Failed to save the frame</string>
+    <string name="frame_empty_timeline">Nothing on the timeline to save</string>
 
     <!-- Export notification -->
     <string name="export_channel_name">Export progress</string>
