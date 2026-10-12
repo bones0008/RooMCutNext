@@ -102,6 +102,8 @@
     <string name="panel_adjust_b">蓝色 B</string>
     <string name="panel_adjust_filter_section">滤镜</string>
     <string name="panel_adjust_param_section">基础调色</string>
+    <string name="panel_adjust_apply_all">应用到全部素材</string>
+    <string name="adjust_applied_all_fmt">调色已应用到 %1$d 段素材（含图片）</string>
     <string name="panel_filter_none">无</string>
     <string name="panel_filter_strength">滤镜强度</string>
     <string name="panel_filter_import">导入 LUT</string>

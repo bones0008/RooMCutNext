@@ -322,11 +322,23 @@ fun AdjustSheet(vm: EditorViewModel, state: EditorUiState, onImportLut: () -> Un
             onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(bGain = it), commit = false) },
             onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
         )
-        TextButton(
-            onClick = { vm.setClipAdjust(clip.id, com.RooMCutNext.core.model.ColorAdjust()) },
-            modifier = Modifier.padding(horizontal = 16.dp),
-        ) {
-            Text(stringResource(R.string.panel_adjust_reset), color = WarnColor)
+        // v1.1.2: copy this clip's grading onto every clip (videos + images).
+        // Only meaningful with more than one clip on the timeline.
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            if (state.project.clips.size > 1) {
+                TextButton(
+                    onClick = { vm.applyAdjustToAll(clip.adjust) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(stringResource(R.string.panel_adjust_apply_all), color = AccentColor)
+                }
+            }
+            TextButton(
+                onClick = { vm.setClipAdjust(clip.id, com.RooMCutNext.core.model.ColorAdjust()) },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(stringResource(R.string.panel_adjust_reset), color = WarnColor)
+            }
         }
     }
 }

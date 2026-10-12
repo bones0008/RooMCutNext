@@ -3,6 +3,7 @@ package com.RooMCutNext.core.ops
 import com.RooMCutNext.core.model.AUDIO_MIN_DURATION_US
 import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
+import com.RooMCutNext.core.model.ColorAdjust
 import com.RooMCutNext.core.model.IMAGE_MAX_DURATION_US
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.TextOverlayItem
@@ -207,6 +208,15 @@ object TimelineOps {
 
     fun update(clips: List<Clip>, clipId: String, transform: (Clip) -> Clip): List<Clip> =
         clips.map { if (it.id == clipId) transform(it) else it }
+
+    /**
+     * v1.1.2: copy one clip's full color grading (LUT + strength + basic
+     * parameters) onto EVERY clip on the timeline — videos and images alike
+     * (images are ordinary clips with an image asset). Trim/speed/etc stay
+     * untouched; only the [Clip.adjust] payload is replaced.
+     */
+    fun applyAdjustToAll(clips: List<Clip>, adjust: ColorAdjust): List<Clip> =
+        clips.map { it.copy(adjust = adjust) }
 
     // ------------------------------------------------------------------
     // Trim

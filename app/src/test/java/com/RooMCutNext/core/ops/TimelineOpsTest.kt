@@ -621,4 +621,41 @@ class TimelineOpsTest {
         assertEquals(8_000_000L, project.totalDurationUs)
         assertTrue(project.hasContent)
     }
+
+    // ---------------- apply adjust to all (v1.1.2) ----------------
+
+    @Test
+    fun `applyAdjustToAll copies grading onto every clip`() {
+        val grading = com.RooMCutNext.core.model.ColorAdjust(
+            brightness = 0.2f, contrast = -0.1f, saturation = 0.4f,
+            temperature = 0.3f, tint = -0.05f,
+            rGain = 0.1f, gGain = 0f, bGain = -0.2f,
+            lutId = "warm", lutStrength = 0.7f,
+        )
+        val clips = listOf(clip(), clip(), clip())
+        val out = TimelineOps.applyAdjustToAll(clips, grading)
+        assertEquals(3, out.size)
+        out.forEach { assertEquals(grading, it.adjust) }
+    }
+
+    @Test
+    fun `applyAdjustToAll touches nothing but adjust`() {
+        val grading = com.RooMCutNext.core.model.ColorAdjust(brightness = 0.9f)
+        val original = clip(inUs = 1_000_000L, outUs = 4_000_000L).copy(speed = 2f, volume = 0.5f)
+        val out = TimelineOps.applyAdjustToAll(listOf(original), grading)
+        assertEquals(original.id, out[0].id)
+        assertEquals(original.sourceInUs, out[0].sourceInUs)
+        assertEquals(original.sourceOutUs, out[0].sourceOutUs)
+        assertEquals(original.speed, out[0].speed)
+        assertEquals(original.volume, out[0].volume)
+        assertEquals(grading, out[0].adjust)
+    }
+
+    @Test
+    fun `applyAdjustToAll with neutral grading clears existing filters`() {
+        val graded = clip().copy(adjust = com.RooMCutNext.core.model.ColorAdjust(lutId = "cinema"))
+        val out = TimelineOps.applyAdjustToAll(listOf(graded), com.RooMCutNext.core.model.ColorAdjust())
+        assertNull(out[0].adjust.lutId)
+        assertTrue(out[0].adjust.isNeutral)
+    }
 }

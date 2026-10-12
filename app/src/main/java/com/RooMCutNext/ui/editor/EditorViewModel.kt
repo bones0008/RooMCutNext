@@ -655,6 +655,25 @@ class EditorViewModel(
         }
     }
 
+    /**
+     * v1.1.2: copy the given clip's full color grading (LUT + strength +
+     * basic parameters) onto EVERY clip on the timeline — videos and images
+     * alike. One history step, so a single undo reverts the whole batch.
+     */
+    fun applyAdjustToAll(adjust: ColorAdjust) {
+        val s = _state.value
+        val clips = s.project.clips
+        // No-op when the timeline is empty or every clip already carries this
+        // exact grading (also keeps the undo stack free of empty entries).
+        if (clips.isEmpty() || clips.all { it.adjust == adjust }) return
+        mutate("调色应用到全部") { p ->
+            p.copy(clips = TimelineOps.applyAdjustToAll(p.clips, adjust))
+        }
+        _state.update {
+            it.copy(toast = app.getString(com.RooMCutNext.R.string.adjust_applied_all_fmt, clips.size))
+        }
+    }
+
     fun setClipVolume(clipId: String, volume: Float, commit: Boolean = true) {
         val v = volume.coerceIn(0f, 2f)
         val apply: (Project) -> Project = { p ->

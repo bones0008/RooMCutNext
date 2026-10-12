@@ -102,6 +102,8 @@
     <string name="panel_adjust_b">Blue</string>
     <string name="panel_adjust_filter_section">Filters</string>
     <string name="panel_adjust_param_section">Basic Grading</string>
+    <string name="panel_adjust_apply_all">Apply to all clips</string>
+    <string name="adjust_applied_all_fmt">Grading applied to %1$d clips (images included)</string>
     <string name="panel_filter_none">None</string>
     <string name="panel_filter_strength">Filter strength</string>
     <string name="panel_filter_import">Import LUT</string>
