@@ -336,30 +336,63 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 .then(if (portrait) Modifier.weight(1.4f) else Modifier.aspectRatio(16f / 9f))
                 .background(Color.Black)
         ) {
+            // v1.2.3: the preview stage is ONE FrameLayout holding
+            //   [0] the PlayerView (body composition, bottom) and
+            //   [1] an empty overlay layer the OverlayPreviewController fills
+            //       with PiP TextureViews/ImageViews and the crossfade head
+            //       (view-layer compositing — see OverlayPreviewController for
+            //       why the composition itself stays single-video-sequence).
+            // Keeping both in one Android view guarantees the overlay layer
+            // always exactly covers the PlayerView bounds.
             AndroidView(
                 factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        useController = false
-                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        setShutterBackgroundColor(android.graphics.Color.BLACK)
-                    }.also { view ->
+                    android.widget.FrameLayout(ctx).apply {
+                        val pv = PlayerView(ctx).apply {
+                            useController = false
+                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                            setShutterBackgroundColor(android.graphics.Color.BLACK)
+                        }
+                        addView(
+                            pv,
+                            android.widget.FrameLayout.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                        val overlayLayer = android.widget.FrameLayout(ctx).apply {
+                            // Purely a host for the overlay engine's children;
+                            // never interactive.
+                            isClickable = false
+                        }
+                        addView(
+                            overlayLayer,
+                            android.widget.FrameLayout.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
                         // v1.0.8 black-screen fix: create + bind the player at
                         // view-factory time so the output surface exists BEFORE
                         // the first setComposition()/prepare() (see
                         // PlaybackController.bindView). The update block below
                         // keeps the binding correct across recompositions.
-                        vm.playback.bindView(view)
-                        playerViewRef = view
+                        vm.playback.bindView(pv)
+                        vm.overlays.attach(overlayLayer)
+                        playerViewRef = pv
                     }
                 },
-                update = { view ->
-                    if (view.player !== vm.playback.player) {
-                        view.player = vm.playback.player
+                update = { stage ->
+                    val pv = (stage.getChildAt(0) as? PlayerView) ?: return@AndroidView
+                    if (pv.player !== vm.playback.player) {
+                        pv.player = vm.playback.player
                     }
-                    vm.reportPreviewViewSize(view.width, view.height)
+                    vm.reportPreviewViewSize(stage.width, stage.height)
                 },
-                onRelease = { view ->
-                    view.player = null
+                onRelease = { stage ->
+                    vm.overlays.detach()
+                    (stage.getChildAt(0) as? PlayerView)?.let { view ->
+                        view.player = null
+                    }
                     vm.playback.unbindView()
                     playerViewRef = null
                 },

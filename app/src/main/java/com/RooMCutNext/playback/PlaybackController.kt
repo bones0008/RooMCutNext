@@ -4,8 +4,6 @@ import android.content.Context
 import android.util.Log
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.effect.DefaultVideoFrameProcessor
-import androidx.media3.effect.MultipleInputVideoGraph
 import androidx.media3.transformer.CompositionPlayer
 import androidx.media3.ui.PlayerView
 import com.RooMCutNext.core.model.Project
@@ -38,6 +36,17 @@ import kotlinx.coroutines.launch
  * structure changes (user removes the offending layer etc.) the next
  * refresh retries full effects instead of staying degraded forever (the
  * stuck chip was why "delete project & recreate" was the only way out).
+ *
+ * v1.2.3: the preview composition is ALWAYS a single video sequence (see
+ * CompositionBuilder's PREVIEW vs EXPORT split). The v1.2.2 experiment that
+ * rebuilt the player with MultipleInputVideoGraph for PiP / transitions is
+ * GONE — upstream Media3 1.11.1 cannot seek a multi-video-sequence
+ * CompositionPlayer (androidx/media #2439/#3058: playback dies outright)
+ * and DefaultVideoCompositor deadlocks when an input's frame queue empties
+ * at an item transition (#2742). Both broke the editor the moment a PiP was
+ * added. PiP layers and crossfade heads now preview through the view-layer
+ * OverlayPreviewController; export still uses the multi-sequence Composition
+ * via Transformer, which does not go through CompositionPlayer at all.
  */
 class PlaybackController(
     private val context: Context,
@@ -67,29 +76,19 @@ class PlaybackController(
     private var lastSyncedClipsHash: Int = 0
     private var lastSyncedTextsHash: Int = 0
     private var lastSyncedAudiosHash: Int = 0
-    // v1.2.2: PiP layers are part of the structure that drives refreshes —
-    // adding/removing/adjusting a layer must rebuild the composition.
+    // v1.2.2→v1.2.3: PiP WINDOWING (which clip spans which window + the
+    // total duration they drive) is part of the preview composition's
+    // structure; GEOMETRY (x/y/scale/opacity) is NOT — it renders in the
+    // view layer now, so dragging a PiP slider never rebuilds the player.
     private var lastSyncedPipsHash: Int = 0
 
     // v1.2.2: structure snapshot at the time of the last degrade; a change
     // here means "the user touched the timeline, retry full effects".
     private var degradedStructureHash: Int = 0
 
-    // v1.2.2: true while the controller itself is re-refreshing inside
+    // v1.2.3: true while the controller itself is re-refreshing inside
     // degradeAndRetry() — suppresses the recovery logic for that one pass.
     private var insideDegradedRetry = false
-
-    /**
-     * v1.2.2: multi-input video graph flag for the CURRENT player. Media3
-     * 1.11.1's CompositionPlayer defaults to SingleInputVideoGraph, which
-     * THROWS "This VideoGraph supports only one input" the moment a second
-     * VIDEO sequence (PiP / crossfade heads) registers its sink — that was
-     * the "PiP shows nothing + permanent degraded mode" root cause. When the
-     * project has more than one video sequence the player is (re)built with
-     * MultipleInputVideoGraph, matching what Transformer already does for
-     * exports automatically.
-     */
-    private var multiInputPlayer = false
 
     /** Preview view bound from the UI layer; the player is created eagerly so
      *  its output surface is attached BEFORE the first composition prepare. */
@@ -161,40 +160,19 @@ class PlaybackController(
 
     fun ensurePlayer(): CompositionPlayer {
         if (player != null) return player!!
-        val builder = CompositionPlayer.Builder(context)
-        if (multiInputPlayer) {
-            // Must be a DefaultVideoFrameProcessor.Factory — checked inside
-            // MultipleInputVideoGraph's constructor.
-            val frameProcessorFactory = DefaultVideoFrameProcessor.Factory.Builder().build()
-            builder.setVideoGraphFactory(MultipleInputVideoGraph.Factory(frameProcessorFactory))
-        }
-        val p = builder.build()
+        // v1.2.3: ALWAYS the default single-input graph — the preview
+        // composition carries exactly one video sequence (see class doc),
+        // and the player is NEVER rebuilt mid-session: a stable surface and
+        // player instance across every timeline edit (the v1.2.2 rebuild
+        // dance existed only to switch video graph factories).
+        val p = CompositionPlayer.Builder(context).build()
         p.addListener(listener)
         p.volume = 1f
         player = p
         firstFrameCount = 0
-        diag("player created multiInput=$multiInputPlayer")
+        diag("player created")
         startPolling()
         return p
-    }
-
-    /**
-     * v1.2.2: swap the player for one with the right video graph factory.
-     * Rebuilding is rare (only when the number of video sequences crosses 1)
-     * — adding the first PiP / transition, or removing the last one. The
-     * bound PlayerView is re-attached so the output surface survives.
-     */
-    private fun rebuildPlayerFor(multiInput: Boolean) {
-        if (multiInput == multiInputPlayer && player != null) return
-        diag("rebuild player multiInput=$multiInput")
-        player?.run {
-            runCatching { removeListener(listener) }
-            runCatching { release() }
-        }
-        player = null
-        multiInputPlayer = multiInput
-        val p = ensurePlayer()
-        boundView?.player = p
     }
 
     /**
@@ -231,7 +209,13 @@ class PlaybackController(
         val clipsHash = project.clips.hashCode()
         val textsHash = project.texts.hashCode()
         val audiosHash = project.audios.hashCode()
-        val pipsHash = project.pips.hashCode()
+        // PiP signature = windows only (id/asset/start/duration). Geometry
+        // (xRatio/yRatio/scale/opacity) is deliberately excluded: it lives in
+        // the view-layer overlay and must not rebuild the composition — that
+        // was why every slider drag churned the whole pipeline.
+        val pipsHash = project.pips.fold(1) { acc, p ->
+            31 * acc + listOf(p.id, p.assetId, p.startUs, p.durationUs).hashCode()
+        }
         val structureHash = listOf(clipsHash, textsHash, audiosHash, pipsHash).hashCode()
 
         // v1.2.2: recover from degraded mode as soon as the user changes
@@ -253,15 +237,6 @@ class PlaybackController(
         lastSyncedAudiosHash = audiosHash
         lastSyncedPipsHash = pipsHash
 
-        // v1.2.2: more than one VIDEO sequence needs the multi-input video
-        // graph (see multiInputPlayer). PiP layers and crossfade heads each
-        // add one video sequence above the body.
-        val needsMultiInput = project.pips.isNotEmpty() ||
-            project.clips.any { it.transitionInUs > 0L }
-        if (player == null || needsMultiInput != multiInputPlayer) {
-            rebuildPlayerFor(needsMultiInput)
-        }
-
         val p = ensurePlayer()
 
         val buildResult = try {
@@ -281,9 +256,13 @@ class PlaybackController(
         val itemCount = buildResult.composition.sequences.sumOf { it.editedMediaItems.size }
         diag("setComp: ${seqCount}seq/${itemCount}item dur=${totalUs / 1000}ms seek=${seekUs / 1000}ms")
         try {
-            p.setComposition(buildResult.composition)
+            // v1.2.3: bake the start position into setComposition — the
+            // sequence players receive it via setMediaSource(source, posMs)
+            // BEFORE prepare, instead of a post-prepare seekTo(). The
+            // single-video-sequence preview supports both, but this order is
+            // the official CompositionPlayer flow and avoids one seek pass.
+            p.setComposition(buildResult.composition, seekUs / 1000L)
             p.prepare()
-            if (seekUs > 0) p.seekTo(seekUs / 1000L)
             if (wasPlaying) p.play() else p.pause()
             diag("prepare OK")
         } catch (e: Exception) {

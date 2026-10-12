@@ -26,6 +26,7 @@ import com.RooMCutNext.media.FontRegistry
 import com.RooMCutNext.media.LutRegistry
 import com.RooMCutNext.media.MediaImporter
 import com.RooMCutNext.media.ThumbnailStore
+import com.RooMCutNext.playback.OverlayPreviewController
 import com.RooMCutNext.playback.PlaybackController
 import java.io.File
 import kotlinx.coroutines.Job
@@ -159,6 +160,16 @@ class EditorViewModel(
 
     val playback = PlaybackController(application, viewModelScope)
 
+    /**
+     * v1.2.3: view-layer preview engine for PiP layers and crossfade heads.
+     * The CompositionPlayer stays single-video-sequence (seek/scrub-safe —
+     * upstream Media3 cannot seek multi-video-sequence previews) and this
+     * engine composites everything that would have been a second video
+     * sequence on top of the PlayerView. Driven from the UI state below so
+     * it follows play/pause/scrub/slider drags at the state-update rate.
+     */
+    val overlays = OverlayPreviewController(application)
+
     /** Localized notice shown when preview falls back to compatibility mode. */
     private val degradedNotice: String =
         application.getString(com.RooMCutNext.R.string.preview_degraded_toast)
@@ -207,6 +218,18 @@ class EditorViewModel(
         }
 
         refreshPlayback(force = true)
+
+        // v1.2.3: drive the view-layer overlay engine (PiP layers + crossfade
+        // heads) from the UI state. The state flow already updates at the
+        // playback poll rate while playing (~30Hz) and on every user action
+        // while paused (scrub / frame-step / slider drags), which is exactly
+        // the sync cadence the overlays need. viewModelScope runs on Main, so
+        // the engine may touch views and players directly.
+        viewModelScope.launch {
+            state.collect { s ->
+                overlays.sync(s.project, repo.mediaDir(s.project.id), s.playheadUs, s.isPlaying)
+            }
+        }
 
         viewModelScope.launch {
             ExportBus.state.collect { es ->
@@ -1386,6 +1409,7 @@ class EditorViewModel(
 
     override fun onCleared() {
         saveNow()
+        overlays.release()
         playback.release()
         super.onCleared()
     }

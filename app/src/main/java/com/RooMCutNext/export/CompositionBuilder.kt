@@ -65,6 +65,27 @@ import java.io.File
  *
  * Effects chain per clip (order matters):
  *   rotate/flip -> crop -> color adjust -> text overlays
+ *
+ *  v1.2.3 — PREVIEW vs EXPORT split (upstream Media3 workaround):
+ *  CompositionPlayer with MORE THAN ONE VIDEO sequence is broken in
+ *  Media3 1.11.1 — seeking a multi-video-sequence composition kills
+ *  playback entirely (androidx/media #2439, closed as dup of #2439/#3058:
+ *  "Seeking is currently not supported for multiple video sequences like
+ *  PiP and Grid view"), and DefaultVideoCompositor deadlocks whenever any
+ *  input's frame queue runs empty during an item transition (#2742) — which
+ *  our padded PiP sequences hit at every pad→video boundary. An EDITOR
+ *  cannot live without seek/scrub, so:
+ *
+ *    forPreview=true  → ONE video sequence only (the body — bodies + gap
+ *                       pads serialize 1:1 with the timeline; during a
+ *                       crossfade window the body shows the PREVIOUS clip's
+ *                       tail, exactly the crossfade's bottom layer). PiP
+ *                       layers and crossfade heads are drawn by the
+ *                       view-layer OverlayPreviewController instead.
+ *    forPreview=false → the full multi-sequence Composition for Transformer
+ *                       (export multi-input compositing is a supported
+ *                       upstream path and does NOT go through
+ *                       CompositionPlayer).
  */
 object CompositionBuilder {
 
@@ -148,8 +169,12 @@ object CompositionBuilder {
                 )
             }
 
-            // Head: the fading-in overlap, in the transition overlay sequence.
-            if (tUs > 0L) {
+            // Head: the fading-in overlap. In EXPORT it goes into a second
+            // parallel sequence above the body; in PREVIEW it is supplied by
+            // the view-layer overlay engine (see headOverlaySpecs) — building
+            // it here would make the preview composition multi-video-sequence,
+            // which CompositionPlayer cannot seek (Media3 #2439).
+            if (tUs > 0L && !forPreview) {
                 if (clipStartUs - transitionCursorUs > 0L) {
                     transitionItems += buildTransparentPadItem(
                         project, mediaDir, clipStartUs - transitionCursorUs,
@@ -193,11 +218,20 @@ object CompositionBuilder {
             items += buildBlackPadItem(project, mediaDir, 0L, totalDurationUs, stripEffects)
         }
 
-        // ---- sequence STACKING ORDER (v1.2.2 rewrite) ----
-        // Media3 1.11.1's DefaultVideoCompositor draws its inputs back-to-front
-        // with the PRIMARY sequence (index 0) ALWAYS ON TOP — verified against
-        // the shipped bytecode (custom draw order is still a TODO upstream,
-        // b/262694346). The stack we need is (bottom -> top):
+        // ---- sequence STACKING ----
+        // PREVIEW (v1.2.3): exactly ONE video sequence — the body. The body
+        // items + gap pads + tail pad serialize 1:1 with the timeline (a
+        // crossfade head's window is covered by the previous clip's body
+        // tail), so the playhead maps to the player position unchanged and
+        // every CompositionPlayer feature (seek, scrubbing mode, frame step)
+        // keeps working. PiP layers and crossfade heads render above this via
+        // OverlayPreviewController (TextureViews synced to the master
+        // position) — geometry mirrors PipPresentation/export math.
+        //
+        // EXPORT: Media3 1.11.1's DefaultVideoCompositor draws its inputs
+        // back-to-front with the PRIMARY sequence (index 0) ALWAYS ON TOP —
+        // verified against the shipped bytecode (custom draw order is still
+        // a TODO upstream, b/262694346). The stack we need is (bottom -> top):
         //     main body -> crossfade heads -> PiP layers (later = higher)
         // so the sequences are listed TOP-FIRST:
         //     [PiP reversed..., transition heads, main body, ... audio lanes]
@@ -206,26 +240,29 @@ object CompositionBuilder {
         // sequences[0] must be a full-length VIDEO sequence because
         // CompositionPlayer derives the preview duration from it. Every
         // video sequence below is therefore padded out to totalDurationUs.
-        // A single video sequence (no PiP, no transitions) behaves exactly as
-        // before — body alone in slot 0.
         val sequences = mutableListOf<EditedMediaItemSequence>()
 
-        // PiP layers — reversed, so the LAST-added layer sits HIGHEST.
-        // (Structural: kept even in degraded mode — see buildPipSequence.)
-        if (!stripEffects || project.pips.isNotEmpty()) {
-            project.pips.asReversed().forEach { pip ->
-                buildPipSequence(project, mediaDir, pip, totalDurationUs)?.let { sequences += it }
+        if (forPreview) {
+            // Single video sequence: the body alone. PiP layers and crossfade
+            // heads are view-layer overlays (see OverlayPreviewController).
+        } else {
+            // PiP layers — reversed, so the LAST-added layer sits HIGHEST.
+            // (Structural: kept even in degraded mode — see buildPipSequence.)
+            if (!stripEffects || project.pips.isNotEmpty()) {
+                project.pips.asReversed().forEach { pip ->
+                    buildPipSequence(project, mediaDir, pip, totalDurationUs)?.let { sequences += it }
+                }
             }
-        }
 
-        // Crossfade overlay sequence: fading heads land ABOVE the bodies.
-        if (transitionItems.isNotEmpty()) {
-            if (totalDurationUs - transitionCursorUs >= MIN_GAP_US) {
-                transitionItems += buildTransparentPadItem(
-                    project, mediaDir, totalDurationUs - transitionCursorUs,
-                )
+            // Crossfade overlay sequence: fading heads land ABOVE the bodies.
+            if (transitionItems.isNotEmpty()) {
+                if (totalDurationUs - transitionCursorUs >= MIN_GAP_US) {
+                    transitionItems += buildTransparentPadItem(
+                        project, mediaDir, totalDurationUs - transitionCursorUs,
+                    )
+                }
+                sequences += EditedMediaItemSequence.Builder(transitionItems).build()
             }
-            sequences += EditedMediaItemSequence.Builder(transitionItems).build()
         }
 
         // Main body: the BOTTOM visual layer (or the only sequence when no
@@ -259,8 +296,118 @@ object CompositionBuilder {
     }
 
     // ------------------------------------------------------------------
+    // View-layer preview overlay specs (v1.2.3)
+    // ------------------------------------------------------------------
+
+    /**
+     * One crossfade HEAD window for the preview overlay engine.
+     *
+     * In preview the body sequence alone covers the timeline; during a
+     * crossfade window the body shows the PREVIOUS clip's tail (the bottom
+     * layer) and the overlay engine plays THIS head on top with an alpha ramp
+     * — the same decomposition the export composition uses (head sequence
+     * over body sequence). Pure data, no Media3 types, so the window math is
+     * unit-testable.
+     */
+    data class HeadOverlaySpec(
+        val clipId: String,
+        val assetId: String,
+        /** Timeline window [startUs, startUs+durationUs) of the fading head. */
+        val startUs: Long,
+        /** Effective (clamped) transition length — also the fade ramp width. */
+        val durationUs: Long,
+        /** Source span of the head, already divided by the clip speed. */
+        val sourceInUs: Long,
+        val sourceOutUs: Long,
+        val speed: Float,
+        val muted: Boolean,
+        val volume: Float,
+    )
+
+    /**
+     * The crossfade head windows of the project (pure function of the model).
+     * Mirrors the head-item construction inside [build]: for each clip with an
+     * effective transition T, the head covers [startUs, startUs+T) and plays
+     * source [sourceIn, sourceIn + T*speed).
+     */
+    fun headOverlaySpecs(project: Project): List<HeadOverlaySpec> {
+        val starts = TimelineOps.starts(project.clips)
+        val transitions = effectiveTransitions(project.clips)
+        val specs = mutableListOf<HeadOverlaySpec>()
+        project.clips.forEachIndexed { i, clip ->
+            val tUs = transitions[i]
+            if (tUs <= 0L) return@forEachIndexed
+            val asset = project.assetById(clip.assetId) ?: return@forEachIndexed
+            val headSpanUs = (tUs * clip.speed).toLong()
+            specs += HeadOverlaySpec(
+                clipId = clip.id,
+                assetId = clip.assetId,
+                startUs = starts[i],
+                durationUs = tUs,
+                sourceInUs = clip.sourceInUs,
+                sourceOutUs = (clip.sourceInUs + headSpanUs).coerceAtMost(clip.sourceOutUs),
+                speed = clip.speed,
+                muted = clip.muted,
+                volume = clip.volume,
+            )
+        }
+        return specs
+    }
+
+    // ------------------------------------------------------------------
     // Video items
     // ------------------------------------------------------------------
+
+    /**
+     * The per-clip "look" effects shared by every render path (composition
+     * items AND the preview overlay engine's head player):
+     * rotate/flip -> crop -> LUT -> brightness/contrast/saturation -> RGB
+     * gains -> mosaic. Positioning (canvas Presentation), text overlays and
+     * fades are path-specific and stay in the callers.
+     */
+    fun clipLookEffects(clip: Clip, stripEffects: Boolean): List<Effect> {
+        if (stripEffects) return emptyList()
+        val effects = mutableListOf<Effect>()
+        if (clip.rotationDeg != 0 || clip.flipH || clip.flipV) {
+            effects += ScaleAndRotateTransformation.Builder()
+                .setScale(if (clip.flipH) -1f else 1f, if (clip.flipV) -1f else 1f)
+                .setRotationDegrees(clip.rotationDeg.toFloat())
+                .build()
+        }
+        // ⚠ Crop argument order in Media3 1.11.1 is (left, right, BOTTOM, TOP)
+        // — see class doc. CropSpec stores GL-style top/bottom.
+        clip.crop?.let { effects += Crop(it.left, it.right, it.bottom, it.top) }
+
+        // Color grading — LUT first so the sliders below act on the graded
+        // image (users expect the brightness slider to "fix" a dark filter).
+        if (clip.adjust.lutId != null) {
+            LutRegistry.effectFor(clip.adjust.lutId, clip.adjust.lutStrength)
+                ?.let { effects += it }
+        }
+        if (clip.adjust.brightness != 0f) effects += Brightness(clip.adjust.brightness)
+        if (clip.adjust.contrast != 0f) effects += Contrast(clip.adjust.contrast)
+        if (clip.adjust.saturation != 0f) {
+            // HslAdjustment saturation domain is [-100, 100] (unlike
+            // Brightness/Contrast which are [-1, 1]): scale the slider.
+            effects += HslAdjustment.Builder()
+                .adjustSaturation((clip.adjust.saturation * 100f).coerceIn(-100f, 100f))
+                .build()
+        }
+        // Temperature + tint + direct RGB gains compose into ONE matrix
+        // effect (see ColorAdjust.channelGains) — one shader pass.
+        if (!clip.adjust.isGainNeutral) {
+            val gains = clip.adjust.channelGains()
+            effects += RgbAdjustment.Builder()
+                .setRedScale(gains[0])
+                .setGreenScale(gains[1])
+                .setBlueScale(gains[2])
+                .build()
+        }
+
+        // Mosaic regions (privacy) — must survive onto every render path.
+        clip.mosaics.forEach { region -> effects += MosaicEffect(region) }
+        return effects
+    }
 
     /**
      * One video/image item covering a WINDOW of a clip (v1.2.1): the source
@@ -309,51 +456,7 @@ object CompositionBuilder {
         // (skipped entirely in compatibility/degraded preview mode; clipping,
         // speed and mute stay so the timeline geometry is preserved)
         val videoEffects = mutableListOf<Effect>()
-
-        if (!stripEffects) {
-            if (clip.rotationDeg != 0 || clip.flipH || clip.flipV) {
-                videoEffects += ScaleAndRotateTransformation.Builder()
-                    .setScale(if (clip.flipH) -1f else 1f, if (clip.flipV) -1f else 1f)
-                    .setRotationDegrees(clip.rotationDeg.toFloat())
-                    .build()
-            }
-            // ⚠ Crop argument order in Media3 1.11.1 is (left, right, BOTTOM, TOP)
-            // — see class doc. CropSpec stores GL-style top/bottom.
-            clip.crop?.let { videoEffects += Crop(it.left, it.right, it.bottom, it.top) }
-
-            // ---- color grading (v1.1) ----
-            // Order matters: the LUT look goes on FIRST so the parameter
-            // sliders below act on the graded image (users expect the
-            // brightness slider to "fix" a dark filter, matching CapCut).
-            if (clip.adjust.lutId != null) {
-                LutRegistry.effectFor(clip.adjust.lutId, clip.adjust.lutStrength)
-                    ?.let { videoEffects += it }
-            }
-            if (clip.adjust.brightness != 0f) videoEffects += Brightness(clip.adjust.brightness)
-            if (clip.adjust.contrast != 0f) videoEffects += Contrast(clip.adjust.contrast)
-            if (clip.adjust.saturation != 0f) {
-                // HslAdjustment saturation domain is [-100, 100] (unlike
-                // Brightness/Contrast which are [-1, 1]): scale the slider.
-                videoEffects += HslAdjustment.Builder()
-                    .adjustSaturation((clip.adjust.saturation * 100f).coerceIn(-100f, 100f))
-                    .build()
-            }
-            // Temperature + tint + direct RGB gains compose into ONE matrix
-            // effect (see ColorAdjust.channelGains) — one shader pass.
-            if (!clip.adjust.isGainNeutral) {
-                val gains = clip.adjust.channelGains()
-                videoEffects += RgbAdjustment.Builder()
-                    .setRedScale(gains[0])
-                    .setGreenScale(gains[1])
-                    .setBlueScale(gains[2])
-                    .build()
-            }
-
-            // ---- mosaic regions (v1.2.2) ----
-            clip.mosaics.forEach { region ->
-                videoEffects += MosaicEffect(region)
-            }
-        }
+        videoEffects += clipLookEffects(clip, stripEffects)
 
         // ---- canvas fit (v1.2.2, STRUCTURAL: also active in degraded mode) ----
         // Letterboxes the clip onto the project canvas with transparent bars
