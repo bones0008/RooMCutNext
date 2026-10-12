@@ -707,7 +707,7 @@ private fun FontChipRow(
 // ===========================================================================
 
 @Composable
-fun PipSheet(vm: EditorViewModel, state: EditorUiState) {
+fun PipSheet(vm: EditorViewModel, state: EditorUiState, onImportMedia: () -> Unit) {
     SheetTitle(stringResource(R.string.panel_pip_title))
     val pip = state.selectedPip
     if (pip == null) {
@@ -720,22 +720,48 @@ fun PipSheet(vm: EditorViewModel, state: EditorUiState) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
         )
         val candidates = state.project.assets.filter { !it.isAudio }
-        if (candidates.isEmpty()) {
-            Text(
-                stringResource(R.string.panel_pip_no_assets),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-            )
-        } else {
-            Row(
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            // v1.2.2: import a NEW file straight as a PiP layer — it goes into
+            // the library and onto the playhead WITHOUT landing on the
+            // timeline. This is the sticker / overlay import path.
+            Column(
                 Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    .width(84.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable { onImportMedia() }
+                    .padding(6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                candidates.forEach { asset ->
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(40.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "＋",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = PipColor,
+                    )
+                }
+                Text(
+                    stringResource(R.string.panel_pip_import_new),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = PipColor,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+            candidates.forEach { asset ->
                     Column(
                         Modifier
                             .width(84.dp)
@@ -782,8 +808,15 @@ fun PipSheet(vm: EditorViewModel, state: EditorUiState) {
                             modifier = Modifier.padding(top = 3.dp),
                         )
                     }
-                }
             }
+        }
+        if (candidates.isEmpty()) {
+            Text(
+                stringResource(R.string.panel_pip_no_assets),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            )
         }
         Spacer(Modifier.height(8.dp))
         return

@@ -304,6 +304,12 @@ class EditorViewModel(
             return
         }
         playback.refresh(project, repo.mediaDir(project.id), _state.value.playheadUs, force)
+        // v1.2.2: keep the compatibility-preview chip in sync — the controller
+        // now recovers automatically once the timeline structure changes, so
+        // the chip must clear together with it.
+        if (_state.value.previewDegraded && !playback.degraded) {
+            _state.update { it.copy(previewDegraded = false) }
+        }
     }
 
     private fun scheduleAutosave() {
@@ -323,7 +329,17 @@ class EditorViewModel(
     // Import
     // ------------------------------------------------------------------
 
-    fun importUris(uris: List<Uri>) {
+    /**
+     * Import files. Default: video/image assets append to the timeline,
+     * audio becomes independent-layer clips.
+     *
+     * v1.2.2 [asPip]: import FOR the picture-in-picture panel — assets go
+     * into the library and are inserted directly as PiP layers at the
+     * playhead WITHOUT touching the timeline (the "imported sticker also
+     * lands on the timeline" trap). This is also the sticker workflow:
+     * import a transparent PNG here and it becomes a sticker.
+     */
+    fun importUris(uris: List<Uri>, asPip: Boolean = false) {
         if (uris.isEmpty()) return
         viewModelScope.launch {
             _state.update { it.copy(importing = ImportingState(0, uris.size, "")) }
@@ -340,10 +356,12 @@ class EditorViewModel(
                         "asset ${a.type.name.lowercase()} ${a.width}x${a.height}@${if (a.fps > 0f) "${a.fps.toInt()}fps" else "-"}$hdr"
                     )
                 }
-                mutate("导入素材") { p ->
+                val playheadUs = _state.value.playheadUs.coerceAtLeast(0L)
+                var lastPipId: String? = null
+                mutate(if (asPip) "导入画中画素材" else "导入素材") { p ->
                     var np = p.copy(assets = p.assets + outcome.assets)
                     val visuals = outcome.assets.filter { !it.isAudio }
-                    if (np.clips.isEmpty() && visuals.isNotEmpty()) {
+                    if (!asPip && np.clips.isEmpty() && visuals.isNotEmpty()) {
                         val firstVideo = visuals.firstOrNull { !it.isImage }
                         if (firstVideo != null) {
                             np = np.copy(
@@ -356,12 +374,28 @@ class EditorViewModel(
                             np = np.copy(width = firstImage.width, height = firstImage.height)
                         }
                     }
-                    // Video / image assets append as timeline clips.
-                    visuals.forEach { asset -> np = np.copy(clips = np.clips + newClipFor(asset)) }
+                    if (asPip) {
+                        // Straight into PiP layers at the playhead — the timeline
+                        // is not touched (v1.2.2 workflow fix).
+                        visuals.forEach { asset ->
+                            val durationUs = if (asset.isImage) IMAGE_DEFAULT_DURATION_US else asset.durationUs
+                            val layer = PipLayer(
+                                id = IdGen.new("pip"),
+                                assetId = asset.id,
+                                startUs = playheadUs,
+                                durationUs = durationUs.coerceAtLeast(TimelineOps.PIP_MIN_DURATION_US),
+                            )
+                            lastPipId = layer.id
+                            np = np.copy(pips = TimelineOps.insertPip(np.pips, layer))
+                        }
+                    } else {
+                        // Video / image assets append as timeline clips.
+                        visuals.forEach { asset -> np = np.copy(clips = np.clips + newClipFor(asset)) }
+                    }
                     // Audio assets become independent-layer audio clips placed
                     // sequentially from the current playhead.
                     if (outcome.assets.any { it.isAudio }) {
-                        var cursor = np.clipsDurationUs.coerceAtLeast(_state.value.playheadUs)
+                        var cursor = np.clipsDurationUs.coerceAtLeast(playheadUs)
                         outcome.assets.filter { it.isAudio }.forEach { asset ->
                             np = np.copy(
                                 audios = TimelineOps.insertAudio(
@@ -379,6 +413,12 @@ class EditorViewModel(
                         }
                     }
                     np
+                }
+                if (asPip && lastPipId != null) {
+                    // Select the newly imported layer so its sliders show up.
+                    _state.update {
+                        it.copy(selectedPipId = lastPipId, selectedClipId = null, selectedTextId = null, selectedAudioId = null)
+                    }
                 }
                 viewModelScope.launch { preloadThumbnails(outcome.assets) }
             }

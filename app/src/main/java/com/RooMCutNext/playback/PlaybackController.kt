@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.effect.DefaultVideoFrameProcessor
+import androidx.media3.effect.MultipleInputVideoGraph
 import androidx.media3.transformer.CompositionPlayer
 import androidx.media3.ui.PlayerView
 import com.RooMCutNext.core.model.Project
@@ -32,6 +34,10 @@ import kotlinx.coroutines.launch
  * useless for debugging). On the FIRST error the controller retries once in
  * "compatibility mode" — same timeline, per-clip GL effects stripped — so a
  * device with a fragile effects pipeline can still preview, trim and export.
+ * v1.2.2: the degraded state now RECOVERS automatically — once the project
+ * structure changes (user removes the offending layer etc.) the next
+ * refresh retries full effects instead of staying degraded forever (the
+ * stuck chip was why "delete project & recreate" was the only way out).
  */
 class PlaybackController(
     private val context: Context,
@@ -61,6 +67,29 @@ class PlaybackController(
     private var lastSyncedClipsHash: Int = 0
     private var lastSyncedTextsHash: Int = 0
     private var lastSyncedAudiosHash: Int = 0
+    // v1.2.2: PiP layers are part of the structure that drives refreshes —
+    // adding/removing/adjusting a layer must rebuild the composition.
+    private var lastSyncedPipsHash: Int = 0
+
+    // v1.2.2: structure snapshot at the time of the last degrade; a change
+    // here means "the user touched the timeline, retry full effects".
+    private var degradedStructureHash: Int = 0
+
+    // v1.2.2: true while the controller itself is re-refreshing inside
+    // degradeAndRetry() — suppresses the recovery logic for that one pass.
+    private var insideDegradedRetry = false
+
+    /**
+     * v1.2.2: multi-input video graph flag for the CURRENT player. Media3
+     * 1.11.1's CompositionPlayer defaults to SingleInputVideoGraph, which
+     * THROWS "This VideoGraph supports only one input" the moment a second
+     * VIDEO sequence (PiP / crossfade heads) registers its sink — that was
+     * the "PiP shows nothing + permanent degraded mode" root cause. When the
+     * project has more than one video sequence the player is (re)built with
+     * MultipleInputVideoGraph, matching what Transformer already does for
+     * exports automatically.
+     */
+    private var multiInputPlayer = false
 
     /** Preview view bound from the UI layer; the player is created eagerly so
      *  its output surface is attached BEFORE the first composition prepare. */
@@ -132,14 +161,40 @@ class PlaybackController(
 
     fun ensurePlayer(): CompositionPlayer {
         if (player != null) return player!!
-        val p = CompositionPlayer.Builder(context).build()
+        val builder = CompositionPlayer.Builder(context)
+        if (multiInputPlayer) {
+            // Must be a DefaultVideoFrameProcessor.Factory — checked inside
+            // MultipleInputVideoGraph's constructor.
+            val frameProcessorFactory = DefaultVideoFrameProcessor.Factory.Builder().build()
+            builder.setVideoGraphFactory(MultipleInputVideoGraph.Factory(frameProcessorFactory))
+        }
+        val p = builder.build()
         p.addListener(listener)
         p.volume = 1f
         player = p
         firstFrameCount = 0
-        diag("player created")
+        diag("player created multiInput=$multiInputPlayer")
         startPolling()
         return p
+    }
+
+    /**
+     * v1.2.2: swap the player for one with the right video graph factory.
+     * Rebuilding is rare (only when the number of video sequences crosses 1)
+     * — adding the first PiP / transition, or removing the last one. The
+     * bound PlayerView is re-attached so the output surface survives.
+     */
+    private fun rebuildPlayerFor(multiInput: Boolean) {
+        if (multiInput == multiInputPlayer && player != null) return
+        diag("rebuild player multiInput=$multiInput")
+        player?.run {
+            runCatching { removeListener(listener) }
+            runCatching { release() }
+        }
+        player = null
+        multiInputPlayer = multiInput
+        val p = ensurePlayer()
+        boundView?.player = p
     }
 
     /**
@@ -170,19 +225,44 @@ class PlaybackController(
      * @param force rebuild even if clips/texts did not structurally change
      */
     fun refresh(project: Project, mediaDir: File, preservePositionUs: Long, force: Boolean = false) {
-        val p = ensurePlayer()
         lastProject = project
         lastMediaDir = mediaDir
         lastPositionUs = preservePositionUs
         val clipsHash = project.clips.hashCode()
         val textsHash = project.texts.hashCode()
         val audiosHash = project.audios.hashCode()
-        if (!force && clipsHash == lastSyncedClipsHash && textsHash == lastSyncedTextsHash && audiosHash == lastSyncedAudiosHash) {
+        val pipsHash = project.pips.hashCode()
+        val structureHash = listOf(clipsHash, textsHash, audiosHash, pipsHash).hashCode()
+
+        // v1.2.2: recover from degraded mode as soon as the user changes
+        // ANYTHING structural — the offending layer may be gone, so retry
+        // full effects (worst case it degrades again, which is no worse than
+        // the old permanently-stuck behavior).
+        if (degraded && !insideDegradedRetry && structureHash != degradedStructureHash) {
+            degraded = false
+            diag("degraded RECOVERED (structure changed)")
+        }
+
+        if (!force && clipsHash == lastSyncedClipsHash && textsHash == lastSyncedTextsHash &&
+            audiosHash == lastSyncedAudiosHash && pipsHash == lastSyncedPipsHash
+        ) {
             return
         }
         lastSyncedClipsHash = clipsHash
         lastSyncedTextsHash = textsHash
         lastSyncedAudiosHash = audiosHash
+        lastSyncedPipsHash = pipsHash
+
+        // v1.2.2: more than one VIDEO sequence needs the multi-input video
+        // graph (see multiInputPlayer). PiP layers and crossfade heads each
+        // add one video sequence above the body.
+        val needsMultiInput = project.pips.isNotEmpty() ||
+            project.clips.any { it.transitionInUs > 0L }
+        if (player == null || needsMultiInput != multiInputPlayer) {
+            rebuildPlayerFor(needsMultiInput)
+        }
+
+        val p = ensurePlayer()
 
         val buildResult = try {
             // forPreview=true: GL effects receive GLOBAL timeline timestamps in
@@ -225,6 +305,7 @@ class PlaybackController(
         lastSyncedClipsHash = 0
         lastSyncedTextsHash = 0
         lastSyncedAudiosHash = 0
+        lastSyncedPipsHash = 0
         lastProject = null
         lastMediaDir = null
     }
@@ -232,11 +313,25 @@ class PlaybackController(
     /** One-shot automatic fallback: rebuild without per-clip effects. */
     private fun degradeAndRetry() {
         degraded = true
+        val project = lastProject
+        val mediaDir = lastMediaDir
+        // Snapshot the structure so the recovery check in refresh() can tell
+        // "the timeline the user has now" from "the timeline that degraded".
+        degradedStructureHash = project?.let {
+            listOf(
+                it.clips.hashCode(), it.texts.hashCode(),
+                it.audios.hashCode(), it.pips.hashCode(),
+            ).hashCode()
+        } ?: 0
         diag("DEGRADED retry (effects stripped)")
         onDegraded?.invoke()
-        val project = lastProject ?: return
-        val mediaDir = lastMediaDir ?: return
-        refresh(project, mediaDir, lastPositionUs, force = true)
+        if (project == null || mediaDir == null) return
+        insideDegradedRetry = true
+        try {
+            refresh(project, mediaDir, lastPositionUs, force = true)
+        } finally {
+            insideDegradedRetry = false
+        }
     }
 
     /** "ERROR_CODE_UNSPECIFIED · VideoFrameProcessingException: <root cause>". */

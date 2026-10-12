@@ -151,7 +151,8 @@
     <string name="action_pip">PiP</string>
     <string name="panel_pip_title">PiP / Sticker</string>
     <string name="panel_pip_pick_hint">Pick an asset to insert as a picture-in-picture layer at the playhead (transparent PNGs become stickers)</string>
-    <string name="panel_pip_no_assets">No video/image assets in this project yet — import some via Add media first</string>
+    <string name="panel_pip_import_new">Import new\n(straight into a PiP layer, no timeline)</string>
+    <string name="panel_pip_no_assets">No other assets yet? Use Import new to add one directly as a PiP layer</string>
     <string name="panel_pip_position_x">Position X</string>
     <string name="panel_pip_position_y">Position Y</string>
     <string name="panel_pip_size">Size</string>

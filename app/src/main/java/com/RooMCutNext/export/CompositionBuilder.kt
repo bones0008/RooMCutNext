@@ -181,32 +181,56 @@ object CompositionBuilder {
             )
         }
 
+        // v1.2.2: EMPTY-body guard. Clips may all be gone (user deleted them)
+        // while texts / audios / PiP layers still exist — pad the body with a
+        // full-length black canvas item instead of failing. The old
+        // BuildException here left the editor unusable with no way out except
+        // deleting the project (degraded mode stuck, "no playable clips").
         if (items.isEmpty()) {
-            throw BuildException("No playable clips (media files missing?)")
+            if (totalDurationUs <= 0L) {
+                throw BuildException("No playable clips (media files missing?)")
+            }
+            items += buildBlackPadItem(project, mediaDir, 0L, totalDurationUs, stripEffects)
         }
 
+        // ---- sequence STACKING ORDER (v1.2.2 rewrite) ----
+        // Media3 1.11.1's DefaultVideoCompositor draws its inputs back-to-front
+        // with the PRIMARY sequence (index 0) ALWAYS ON TOP — verified against
+        // the shipped bytecode (custom draw order is still a TODO upstream,
+        // b/262694346). The stack we need is (bottom -> top):
+        //     main body -> crossfade heads -> PiP layers (later = higher)
+        // so the sequences are listed TOP-FIRST:
+        //     [PiP reversed..., transition heads, main body, ... audio lanes]
+        // Audio lanes carry no video track and never register a compositor
+        // input (audio mixing only), so their position is irrelevant — but
+        // sequences[0] must be a full-length VIDEO sequence because
+        // CompositionPlayer derives the preview duration from it. Every
+        // video sequence below is therefore padded out to totalDurationUs.
+        // A single video sequence (no PiP, no transitions) behaves exactly as
+        // before — body alone in slot 0.
         val sequences = mutableListOf<EditedMediaItemSequence>()
-        sequences += EditedMediaItemSequence.Builder(items).build()
 
-        // ---- crossfade overlay sequence (v1.2.1) ----
-        // Added BEFORE the PiP sequences so stickers and picture-in-picture
-        // stay ABOVE the fading heads (an overlay must not disappear behind
-        // a crossfade). No-op for projects without transitions.
+        // PiP layers — reversed, so the LAST-added layer sits HIGHEST.
+        // (Structural: kept even in degraded mode — see buildPipSequence.)
+        if (!stripEffects || project.pips.isNotEmpty()) {
+            project.pips.asReversed().forEach { pip ->
+                buildPipSequence(project, mediaDir, pip, totalDurationUs)?.let { sequences += it }
+            }
+        }
+
+        // Crossfade overlay sequence: fading heads land ABOVE the bodies.
         if (transitionItems.isNotEmpty()) {
+            if (totalDurationUs - transitionCursorUs >= MIN_GAP_US) {
+                transitionItems += buildTransparentPadItem(
+                    project, mediaDir, totalDurationUs - transitionCursorUs,
+                )
+            }
             sequences += EditedMediaItemSequence.Builder(transitionItems).build()
         }
 
-        // ---- picture-in-picture sequences (v1.2), one per layer ----
-        // Each layer is its own parallel video sequence stacked over the
-        // primary one: a transparent leading pad (so the layer only shows
-        // during its window) followed by the layer's media with a
-        // PipPresentation matrix (position + scale) and AlphaScale
-        // (opacity). Stickers are PiP layers over transparent PNG assets.
-        if (!stripEffects || project.pips.isNotEmpty()) {
-            project.pips.forEach { pip ->
-                buildPipSequence(project, mediaDir, pip)?.let { sequences += it }
-            }
-        }
+        // Main body: the BOTTOM visual layer (or the only sequence when no
+        // PiP / transitions exist).
+        sequences += EditedMediaItemSequence.Builder(items).build()
 
         // ---- audio sequences (one per non-overlapping lane) ----
         if (!stripEffects || project.audios.isNotEmpty()) {
@@ -329,12 +353,39 @@ object CompositionBuilder {
             clip.mosaics.forEach { region ->
                 videoEffects += MosaicEffect(region)
             }
+        }
 
+        // ---- canvas fit (v1.2.2, STRUCTURAL: also active in degraded mode) ----
+        // Letterboxes the clip onto the project canvas with transparent bars
+        // so a landscape source in a portrait project no longer stretches
+        // edge to edge — it scales into the canvas and the compositor (or the
+        // final surface) shows black bars. Order matters:
+        //   AFTER  rotate/crop/grading/mosaic — those run in SOURCE space;
+        //   BEFORE text overlays — text is positioned in CANVAS space.
+        // A 90/270-degree rotation swaps the source aspect; matching aspects
+        // skip the pass entirely (Presentation would be a no-op).
+        if (asset.width > 0 && asset.height > 0) {
+            val rotatedQuarter = clip.rotationDeg == 90 || clip.rotationDeg == 270
+            val srcW = if (rotatedQuarter) asset.height else asset.width
+            val srcH = if (rotatedQuarter) asset.width else asset.height
+            val aspectDelta = kotlin.math.abs(
+                srcW.toDouble() / srcH - project.width.toDouble() / project.height,
+            )
+            if (aspectDelta > 1e-4) {
+                videoEffects += Presentation.createForWidthAndHeight(
+                    project.width, project.height, Presentation.LAYOUT_SCALE_TO_FIT,
+                )
+            }
+        }
+
+        if (!stripEffects) {
             // ---- text overlays whose window overlaps THIS item's window ----
             // Windows are in GLOBAL timeline coordinates for BOTH preview and
             // export (see class doc for the v1.0.8 real-device verification).
             // Attaching the same overlays to head and body is safe: each item
             // only covers its own window, so a text never renders twice.
+            // Canvas-space: the canvas Presentation above runs BEFORE these in
+            // the chain, so the overlay canvas maps to the project canvas.
             val itemEndUs = timelineStartUs + timelineDurationUs
             val overlapping = project.texts
                 .filter { it.startUs < itemEndUs && it.endUs > timelineStartUs }
@@ -495,19 +546,25 @@ object CompositionBuilder {
     private fun alphaScale(value: Float): Effect = AlphaScale(value)
 
     /**
-     * One sequence per PiP layer:
-     *   [optional transparent pad 0 -> startUs] + [layer media, clipped]
+     * One sequence per PiP layer, padded to FULL timeline length:
+     *   [transparent pad 0 -> startUs] + [layer media, clipped]
+     *   + [transparent pad endUs -> totalDurationUs]
      *
-     * The pad reuses the black-PNG generator at a tiny 2×2 size and is fully
-     * transparent (AlphaScale 0), stretched to the canvas — the video analog
-     * of the silence pad used by audio lanes. The layer item carries the
-     * PipPresentation matrix for position/scale; its own audio (if any) is
-     * kept and mixed automatically by the Composition.
+     * v1.2.2: the layer renders into a FULL-CANVAS frame (PipPresentation
+     * outputs the canvas size with transparent surround), and the sequence
+     * must run the whole timeline because it may sit in slot 0 of the
+     * composition (the primary sequence, whose duration drives the preview)
+     * and because the compositor needs frames from every input at all times.
+     * The pads reuse the black-PNG generator at a tiny 2×2 size, fully
+     * transparent (AlphaScale 0), stretched to the canvas. The layer item
+     * carries the PipPresentation matrix for position/scale; its own audio
+     * (if any) is kept and mixed automatically by the Composition.
      */
     private fun buildPipSequence(
         project: Project,
         mediaDir: File,
         pip: PipLayer,
+        totalDurationUs: Long,
     ): EditedMediaItemSequence? {
         val asset = project.assetById(pip.assetId) ?: return null
         val file = File(mediaDir, asset.fileName)
@@ -516,27 +573,7 @@ object CompositionBuilder {
         val items = mutableListOf<EditedMediaItem>()
 
         if (pip.startUs >= MIN_GAP_US) {
-            val pad = GeneratedMedia.blackPng(mediaDir, 2, 2)
-            val padItem = MediaItem.Builder()
-                .setUri(Uri.fromFile(pad))
-                .setImageDurationMs((pip.startUs / 1000L).coerceAtLeast(1L))
-                .build()
-            items += EditedMediaItem.Builder(padItem)
-                .setEffects(
-                    Effects(
-                        emptyList<androidx.media3.common.audio.AudioProcessor>(),
-                        listOf(
-                            alphaScale(0f),
-                            androidx.media3.effect.Presentation.createForWidthAndHeight(
-                                project.width, project.height,
-                                androidx.media3.effect.Presentation.LAYOUT_STRETCH_TO_FIT,
-                            ),
-                        ),
-                    )
-                )
-                .setDurationUs(pip.startUs)
-                .setFrameRate(project.fps.toInt().coerceAtLeast(1))
-                .build()
+            items += buildTransparentPadItem(project, mediaDir, pip.startUs)
         }
 
         val clippedDurationUs = pip.durationUs.coerceAtMost(
@@ -580,6 +617,14 @@ object CompositionBuilder {
             builder.setDurationUs(maxOf(asset.durationUs, pip.durationUs).coerceAtLeast(1L))
         }
         items += builder.build()
+
+        // Tail pad to full timeline length (v1.2.2) — the sequence may be the
+        // composition's primary (duration driver) and the compositor needs a
+        // frame from every input at every primary timestamp.
+        val tailUs = totalDurationUs - (pip.startUs + pip.durationUs)
+        if (tailUs >= MIN_GAP_US) {
+            items += buildTransparentPadItem(project, mediaDir, tailUs)
+        }
 
         return EditedMediaItemSequence.Builder(items).build().takeIf { clippedDurationUs > 0L }
     }

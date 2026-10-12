@@ -5,19 +5,28 @@ import androidx.media3.common.util.Size
 import androidx.media3.effect.MatrixTransformation
 
 /**
- * Places and scales a picture-in-picture layer on the output canvas (v1.2).
+ * Places and scales a picture-in-picture layer on the output canvas.
  *
- * Media3 1.11.1 has no ScaleAndTranslatePresentation (added in 1.12), but
- * [MatrixTransformation] gives full control over the normalized texture
- * coordinates, which is strictly more flexible: position, scale, and (later)
- * timestamp-driven animation all live in one matrix.
+ * v1.2.2 rewrite — the layer must render into a FULL CANVAS frame whose
+ * non-content area is transparent, because Media3 1.11.1's
+ * DefaultVideoCompositor composites whole SEQUENCES (each sequence is one
+ * input texture):
+ *   - configure() now returns the CANVAS size, so the pre-processor's output
+ *     texture is the canvas and the vertex matrix below draws the layer's
+ *     content into a sub-rectangle of it. Everything outside that rectangle
+ *     keeps the FBO clear color (transparent black), so the layers below
+ *     show through — src-over compositing then does the right thing.
+ *   - The old version returned the INPUT size as output, which only makes
+ *     sense in a single-input pipeline; in the multi-input compositor the
+ *     texture would be non-uniformly re-stretched onto the primary's size,
+ *     corrupting both the position and the scale.
  *
- * Coordinate system: the layer's input texture is normalized to [0,1]² over
- * the OUTPUT canvas, so one unit of x equals [canvasWidth] pixels and one
- * unit of y equals [canvasHeight] pixels. The matrix
- *   1. uniformly scales so the layer's DISPLAY WIDTH becomes
+ * Matrix semantics (Media3 normalized VERTEX space — the texture quad is
+ * transformed within the normalized output frame; identity stretches the
+ * texture over the whole output frame):
+ *   1. uniform scale so the layer's DISPLAY WIDTH becomes
  *      [PipLayer.scale] × canvasWidth (input aspect ratio preserved), then
- *   2. translates the center to (centerX, centerY).
+ *   2. translate the quad's center to (centerX, centerY).
  *
  * The GL y axis points UP in Media3's normalized space (a plain translate
  * of +y moves content towards the top), so [centerY] is flipped internally;
@@ -39,11 +48,10 @@ class PipPresentation(
     override fun configure(width: Int, height: Int): Size {
         inputWidth = width
         inputHeight = height
-        // Output keeps the input size: the VideoFrameProcessor composites
-        // sequences in normalized space on the primary canvas, so the
-        // layer's own output resolution is irrelevant; only the matrix maps
-        // it onto the canvas.
-        return Size(width, height)
+        // Output is the FULL canvas: the matrix below maps the layer into a
+        // sub-rectangle; the rest of the frame stays transparent (FBO clear),
+        // which is what makes sequence-on-sequence compositing work.
+        return Size(canvasWidth, canvasHeight)
     }
 
     override fun getMatrix(timestampUs: Long): Matrix {

@@ -151,7 +151,8 @@
     <string name="action_pip">画中画</string>
     <string name="panel_pip_title">画中画 / 贴纸</string>
     <string name="panel_pip_pick_hint">选择一个素材，在播放头位置插入为画中画层（透明背景 PNG 图片即贴纸）</string>
-    <string name="panel_pip_no_assets">项目里还没有可用的视频/图片素材，先用「添加素材」导入</string>
+    <string name="panel_pip_import_new">导入新素材\n（不上时间线，直接作为画中画层）</string>
+    <string name="panel_pip_no_assets">还没有其他素材？点左侧「导入新素材」直接加入画中画层</string>
     <string name="panel_pip_position_x">水平位置</string>
     <string name="panel_pip_position_y">垂直位置</string>
     <string name="panel_pip_size">大小</string>

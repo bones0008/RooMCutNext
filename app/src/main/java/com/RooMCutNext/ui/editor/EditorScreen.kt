@@ -141,6 +141,14 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris -> vm.importUris(uris) }
 
+    // v1.2.2: import straight into a PiP layer at the playhead WITHOUT
+    // touching the timeline — the sticker / overlay workflow. The main
+    // 添加素材 keeps its "append to the timeline" behavior; this entry is
+    // the answer to "the sticker I imported also landed on the timeline".
+    val pickPipMedia = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris -> vm.importUris(uris, asPip = true) }
+
     val audioMimeTypes = arrayOf(
         "audio/*",
         "application/ogg", "application/x-flac", "application/flac",
@@ -519,6 +527,7 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                     onImportLut = { pickLut.launch(lutMimeTypes) },
                     onImportFont = { pickFont.launch(fontMimeTypes) },
                     onAddMusic = { pickAudio.launch(audioMimeTypes) },
+                    onImportPipMedia = { pickPipMedia.launch(mediaMimeTypes) },
                     onRecord = {
                         // v1.1.4: mic permission gate before the take starts.
                         if (androidx.core.content.ContextCompat.checkSelfPermission(
@@ -832,6 +841,7 @@ private fun ToolPanelHost(
     onImportLut: () -> Unit,
     onImportFont: () -> Unit,
     onAddMusic: () -> Unit,
+    onImportPipMedia: () -> Unit,
     onRecord: () -> Unit,
     onReplace: () -> Unit,
     onNeedPermission: () -> Unit,
@@ -929,7 +939,7 @@ private fun ToolPanelHost(
                     PanelKind.CROP -> CropSheet(vm, state)
                     PanelKind.ADJUST -> AdjustSheet(vm, state, onImportLut = onImportLut)
                     PanelKind.TEXT -> TextSheet(vm, state, onImportFont = onImportFont)
-                    PanelKind.PIP -> PipSheet(vm, state)
+                    PanelKind.PIP -> PipSheet(vm, state, onImportMedia = onImportPipMedia)
                     PanelKind.TRANSITION -> TransitionSheet(vm, state)
                     PanelKind.MOSAIC -> MosaicSheet(vm, state)
                     PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = onAddMusic, onRecord = onRecord)
