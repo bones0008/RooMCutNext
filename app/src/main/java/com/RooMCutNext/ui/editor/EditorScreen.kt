@@ -750,11 +750,19 @@ private fun ToolPanelHost(
         null
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.surface)
+    // v1.1.3: M3 Surface (non-clickable) instead of Column + background().
+    // Surface provides LocalContentColor = contentColorFor(surface) =
+    // onSurface to the whole subtree, so every Text without an explicit
+    // color (slider labels, chip labels, info rows…) renders in the theme's
+    // on-color again. Plain background() provides nothing — those texts
+    // fell back to the raw composition-local default (BLACK) and were
+    // unreadable on the dark surface. The old ModalBottomSheet performed
+    // exactly this provide internally.
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxSize(),
     ) {
+        Column(Modifier.fillMaxSize()) {
         // ---- pinned header: title + target clip + close ----
         Row(
             Modifier
@@ -823,6 +831,7 @@ private fun ToolPanelHost(
                 }
             }
             Spacer(Modifier.height(12.dp))
+        }
         }
     }
 }
