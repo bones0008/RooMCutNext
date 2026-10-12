@@ -134,7 +134,7 @@ Native Android single-layer timeline video editor.
 
 最简单的方式（无需任何开发环境）：
 
-1. 把 `RooMCutNext-v1.1.2.apk` 传到手机（微信/网盘/USB 均可）
+1. 把 `RooMCutNext-v1.1.3.apk` 传到手机（微信/网盘/USB 均可）
 2. 在手机上点开该文件，系统询问「允许安装未知来源应用」时选择允许
 3. 安装完成，桌面出现「RooMCutNext」图标
 
