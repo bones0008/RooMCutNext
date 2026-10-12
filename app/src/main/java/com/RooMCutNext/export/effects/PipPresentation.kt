@@ -32,6 +32,19 @@ import androidx.media3.effect.MatrixTransformation
  * of +y moves content towards the top), so [centerY] is flipped internally;
  * callers keep the intuitive "0 = top edge, 1 = bottom edge" convention.
  *
+ * v1.2.9 EXPORT POSITION FIX — the translate was computed in a [-0.5, 0.5]
+ * normalized space, but Media3 1.11.1's MatrixTransformation operates in
+ * NORMALIZED DEVICE COORDINATES (-1 to 1 — see the interface javadoc and
+ * MatrixUtils.getGlMatrixArray, which converts the android.graphics.Matrix
+ * to a GL 4x4 with NO rescaling; the media3 composition demo confirms the
+ * translate magnitude convention). A translate of tx shifts the quad by
+ * tx / 2 of the output width, so `centerX - 0.5` placed the PiP at HALF the
+ * intended offset from the canvas center: the exported position was
+ * compressed 2x toward the center — invisible at dead center, up to ±25% of
+ * the canvas off near the edges ("the PiP sits somewhere else in the export
+ * than in the editor"). Correct mapping: NDC x = 2*centerX - 1, and for the
+ * y-flip (GL NDC +y is up, UI y is down): NDC y = 1 - 2*centerY.
+ *
  * Degenerate inputs (0-sized configure) fall back to the identity matrix.
  */
 class PipPresentation(
@@ -60,18 +73,20 @@ class PipPresentation(
             return matrix
         }
         // Display width in normalized x units is exactly displayWidthRatio
-        // (ratio of canvas width). Keep the input aspect for the height:
-        // display height in pixels = displayWidthRatio * canvasWidth * inH/inW
-        // -> normalized y units = that / canvasHeight.
+        // (ratio of canvas width). Keep the input aspect for the height —
+        // the scaleY formula and the NDC center mapping live in PipNdcMath
+        // (pure, JVM unit-tested).
         val scaleX = displayWidthRatio.coerceIn(0.02f, 1f)
-        val scaleY = scaleX * (canvasWidth.toFloat() / canvasHeight) *
-            (inputHeight.toFloat() / inputWidth)
+        val scaleY = PipNdcMath.scaleY(
+            scaleX, canvasWidth, canvasHeight, inputWidth, inputHeight,
+        )
         matrix.postScale(scaleX, scaleY)
-        // GL y-up: flip the intuitive y (0=top) into GL space (0=bottom),
-        // then move the CENTER to the target point.
-        val tx = (centerX.coerceIn(0f, 1f)) - 0.5f
-        val ty = ((1f - centerY.coerceIn(0f, 1f))) - 0.5f
-        matrix.postTranslate(tx, ty)
+        // v1.2.9: translate in NDC units (-1..1) — see PipNdcMath for the
+        // convention evidence and the v1.2.8→v1.2.9 fix rationale.
+        matrix.postTranslate(
+            PipNdcMath.centerXNdc(centerX),
+            PipNdcMath.centerYNdc(centerY),
+        )
         return matrix
     }
 }

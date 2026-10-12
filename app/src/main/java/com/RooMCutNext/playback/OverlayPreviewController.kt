@@ -92,11 +92,14 @@ import java.util.concurrent.ConcurrentHashMap
  *    swap is invisible), heads fall back to a PLAIN player for the rest of
  *    the session — the fade renders without the clip's grading/mosaic for
  *    those ≤2s (geometry stays aspect-correct);
- *  - v1.2.8: a playing forward window exit fades out over a 200ms TAIL
+ *  - v1.2.8: a playing forward window exit fades out over a 400ms TAIL
  *    (HeadWindowMath) that covers the body player's item-boundary crossing;
  *    the composite during the tail is the incoming clip over itself at a
- *    ≤200ms offset — imperceptible, and the price of never flashing the
- *    outgoing clip.
+ *    ≤400ms offset — imperceptible, and the price of never flashing the
+ *    outgoing clip. (Was 200ms: on devices where the body's decoder re-init
+ *    at the crossing takes longer than that, the outgoing clip's last frame
+ *    leaked through full-screen for a few frames after the tail expired —
+ *    "the first clip's picture flashes once right after the transition".)
  */
 class OverlayPreviewController(private val context: Context) {
 
@@ -130,7 +133,7 @@ class OverlayPreviewController(private val context: Context) {
     private val endedHoldMarginUs = 100_000L
 
     /**
-     * v1.2.8: fade-out tail after a FORWARD window exit (playing only).
+     * v1.2.8→v1.2.9: fade-out tail after a FORWARD window exit (playing only).
      *
      * The flash bug this fixes: at the window end the head's alpha used to
      * drop 1 → 0 in one tick, handing the picture to the body player at the
@@ -144,28 +147,27 @@ class OverlayPreviewController(private val context: Context) {
      * clip's own content at the window end) across this tail covers the
      * crossing; a paused playhead skips the tail so frame-stepping stays
      * sample-accurate. See HeadWindowMath.
+     *
+     * v1.2.9: 200ms → 400ms. On devices where the body's decoder re-init +
+     * effects reconfigure at the crossing exceeds 200ms, the outgoing clip's
+     * last frame leaked through FULL-SCREEN for the frames after the tail
+     * expired — a shorter re-run of the same flash ("right when the 2
+     * seconds end, the first clip's last frame pops for one blink"). The
+     * composite during the tail remains the incoming clip over itself at a
+     * ≤400ms offset — still imperceptible.
      */
-    private val headHoldTailUs = 200_000L
+    private val headHoldTailUs = 400_000L
 
     /**
-     * v1.2.8: cooldown between CORRECTIVE seeks of a playing head player.
-     *
-     * The lag bug this fixes: drift-correction used to re-seek whenever the
-     * player fell >120ms behind. A seek flushes the decoder and re-decodes
-     * from the previous keyframe — the player emerges from the seek FARTHER
-     * behind, the next tick seeks again: a seek-storm cycle that read as
-     * "the second clip is choppy during the transition". Now: at most one
-     * corrective seek per cooldown, landing [headSeekHysteresisUs] BEHIND
-     * the playhead so the player is not instantly re-eligible, and hard
-     * realignment (no cooldown) only for big jumps (> [headHardRealignDriftUs],
-     * e.g. a seek that landed mid-window).
+     * v1.2.9: cooldown between HARD realign seeks of a playing head player
+     * (see the v1.2.9 note in driveHead — ordinary drift is no longer seeked
+     * at all while playing, so this only bounds the genuinely-broken case).
      */
     private val headCorrectiveSeekCooldownMs = 500L
 
-    /** v1.2.8: land corrective seeks this far BEHIND the playhead. */
-    private val headSeekHysteresisUs = 60_000L
-
-    /** v1.2.8: drift big enough to hard-realign immediately, cooldown aside. */
+    /** v1.2.9: drift big enough to hard-realign a PLAYING head (cooldown
+     * aside). Below this a constant lag is deliberately left alone — see
+     * the v1.2.9 note in driveHead. */
     private val headHardRealignDriftUs = 400_000L
 
     /**
@@ -799,35 +801,43 @@ class OverlayPreviewController(private val context: Context) {
         //    blanket ENDED skip showed the held last frame under the ramping
         //    alpha forever, which read as "the second clip never plays".
         //
-        // v1.2.8: WHILE PLAYING, corrective seeks are additionally rate-
-        // limited (cooldown + hysteresis landing) — the old "seek whenever
-        // drift > 120ms" looped: every seek flushes the decoder and re-decodes
-        // from the previous keyframe, so the player emerged from each seek
-        // FARTHER behind and was instantly re-eligible → a seek-storm that
-        // read as "the second clip is choppy during the transition". Paused
-        // (scrub) tracking keeps the old tight behavior: seeks are cheap and
-        // frame-accurate when nothing is rendering.
+        // v1.2.9 — WHILE PLAYING, moderate drift is DELIBERATELY LEFT ALONE.
+        // v1.2.8 rate-limited the old "seek whenever drift > 120ms" rule
+        // (cooldown + hysteresis landing) instead of removing it, and the
+        // result was still a self-sustaining hiccup cycle locked to the
+        // cooldown: ExoPlayer never time-compresses to close a position gap,
+        // so a player that started ~200ms late (normal spin-up latency at
+        // window entry) sits at a CONSTANT ~200ms lag — permanently over the
+        // 120ms threshold. Every cooldown expiry re-seeked; each seek
+        // re-decoded from a keyframe, re-opened the lag and visibly froze
+        // the picture for its decoder restart: "the second clip stutters
+        // exactly every 500ms" (4 hiccups in a 2s window — the cooldown WAS
+        // the frame clock; dragging the timeline was smooth because the
+        // paused path tracks tightly with no cooldown at all). During a 2s
+        // crossfade a constant sub-400ms lag has no visual reference to
+        // betray it (the fading layer is brand-new content — ±200ms of WHICH
+        // frame of it is showing is invisible), and the head's audio skew is
+        // buried under the outgoing clip's audio. The seeks were the only
+        // visible harm. So while playing, ONLY a genuinely broken alignment
+        // (> [headHardRealignDriftUs], e.g. after a seek landed mid-window)
+        // hard-realigns, cooldown-gated. Paused (scrub) tracking keeps the
+        // old tight behavior: seeks are cheap and frame-accurate when
+        // nothing is rendering.
         val expectedPosUs = (localUs * spec.speed).toLong()
         when (player.playbackState) {
             Player.STATE_READY -> {
                 val posUs = player.currentPosition * 1000L
                 val drift = expectedPosUs - posUs
-                val threshold = if (isPlaying) seekDriftThresholdUs else scrubDriftThresholdUs
-                if (kotlin.math.abs(drift) > threshold) {
+                if (!isPlaying) {
+                    if (kotlin.math.abs(drift) > scrubDriftThresholdUs) {
+                        runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
+                    }
+                } else if (kotlin.math.abs(drift) > headHardRealignDriftUs) {
                     val nowMs = android.os.SystemClock.uptimeMillis()
-                    val hardRealign = !isPlaying ||
-                        kotlin.math.abs(drift) > headHardRealignDriftUs
-                    if (hardRealign || nowMs - headLastCorrectiveSeekMs >= headCorrectiveSeekCooldownMs) {
-                        val targetUs = if (isPlaying) {
-                            // Land slightly BEHIND the playhead: below the
-                            // drift threshold, so the player is not instantly
-                            // re-eligible for another seek.
-                            (expectedPosUs - headSeekHysteresisUs).coerceAtLeast(0L)
-                        } else {
-                            expectedPosUs
-                        }
-                        runCatching { player.seekTo((targetUs / 1000L).coerceAtLeast(0L)) }
-                        if (isPlaying) headLastCorrectiveSeekMs = nowMs
+                    if (nowMs - headLastCorrectiveSeekMs >= headCorrectiveSeekCooldownMs) {
+                        runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
+                        headLastCorrectiveSeekMs = nowMs
+                        diag("head hard-realign ${drift / 1000}ms")
                     }
                 }
             }
