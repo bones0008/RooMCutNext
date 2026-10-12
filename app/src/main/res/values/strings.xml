@@ -183,6 +183,13 @@
     <string name="panel_export_cancel">取消导出</string>
     <string name="panel_export_close">关闭</string>
 
+    <!-- Inline tool panel host (v1.1.1): replaces the old full-screen
+         ModalBottomSheet so the preview is never covered while editing. -->
+    <string name="panel_close">关闭</string>
+    <string name="panel_need_clip">请先在时间线中选择一个素材</string>
+    <string name="panel_text_gone">文字已被删除</string>
+    <string name="panel_clip_of_fmt">素材 %1$d/%2$d</string>
+
     <!-- Export notification -->
     <string name="export_channel_name">导出进度</string>
     <string name="export_notif_title">正在导出 %1$s</string>

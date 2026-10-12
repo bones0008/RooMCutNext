@@ -183,6 +183,13 @@
     <string name="panel_export_cancel">Cancel export</string>
     <string name="panel_export_close">Close</string>
 
+    <!-- Inline tool panel host (v1.1.1): replaces the old full-screen
+         ModalBottomSheet so the preview is never covered while editing. -->
+    <string name="panel_close">Close</string>
+    <string name="panel_need_clip">Select a clip in the timeline first</string>
+    <string name="panel_text_gone">The text was deleted</string>
+    <string name="panel_clip_of_fmt">Clip %1$d/%2$d</string>
+
     <!-- Export notification -->
     <string name="export_channel_name">Export progress</string>
     <string name="export_notif_title">Exporting %1$s</string>

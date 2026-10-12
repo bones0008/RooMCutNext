@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -29,6 +31,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Crop
@@ -56,6 +59,7 @@ import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -64,8 +68,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -82,6 +84,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.ViewModelProvider
@@ -203,6 +206,11 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            // v1.1.1: lift the whole layout above the IME so text fields in
+            // the inline tool panel (文字/精确定位) stay visible while typing.
+            // Kept AFTER background() so the background still paints edge to
+            // edge; when no keyboard is showing this is a no-op.
+            .imePadding()
     ) {
 
         // ---------------- top bar ----------------
@@ -410,15 +418,43 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         // ---------------- transport + timecodes ----------------
         PlaybackBar(vm = vm, state = state)
 
-        // ---------------- timeline ----------------
+        // ---------------- timeline / inline tool panel ----------------
+        // v1.1.1: while a tool panel is open it takes over the timeline area
+        // — the preview above is NEVER covered, so sliders can be dragged
+        // with the grading effect fully visible. Every panel scrolls inside
+        // this bounded region; closing it brings the timeline back.
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            TimelineView(
-                vm = vm,
-                onAddMedia = { launchMediaPicker() },
-                onImportFromFileManager = {
-                    openDocuments.launch(mediaMimeTypes)
-                },
-            )
+            val panel = state.activePanel
+            if (panel == null) {
+                TimelineView(
+                    vm = vm,
+                    onAddMedia = { launchMediaPicker() },
+                    onImportFromFileManager = {
+                        openDocuments.launch(mediaMimeTypes)
+                    },
+                )
+            } else {
+                ToolPanelHost(
+                    vm = vm,
+                    state = state,
+                    panel = panel,
+                    onImportLut = { pickLut.launch(lutMimeTypes) },
+                    onImportFont = { pickFont.launch(fontMimeTypes) },
+                    onAddMusic = { pickAudio.launch(audioMimeTypes) },
+                    onReplace = {
+                        replaceMedia.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                        )
+                    },
+                    onNeedPermission = {
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            vm.startExport()
+                        }
+                    },
+                )
+            }
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
         }
 
@@ -430,7 +466,12 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onRotate = { vm.openPanel(PanelKind.ROTATE) },
             onCrop = { vm.openPanel(PanelKind.CROP) },
             onAdjust = { vm.openPanel(PanelKind.ADJUST) },
-            onText = { vm.addTextAtPlayhead() },
+            // Toggle: tapping 文字 while the text panel is already open
+            // closes it instead of stacking another empty overlay.
+            onText = {
+                if (state.activePanel == PanelKind.TEXT) vm.openPanel(null)
+                else vm.addTextAtPlayhead()
+            },
             // "音频" is now purely an audio SETTINGS tool: it opens the audio
             // panel for the selected clip (video: volume/mute/fades; audio:
             // its own controls). Importing audio lives in 添加素材 instead.
@@ -438,43 +479,6 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onInfo = { vm.openPanel(PanelKind.INFO) },
             onGoto = { vm.openPanel(PanelKind.GOTO) },
         )
-    }
-
-    // ---------------- bottom sheet panels ----------------
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    state.activePanel?.let { panel ->
-        ModalBottomSheet(
-            onDismissRequest = { vm.openPanel(null) },
-            sheetState = sheetState,
-            containerColor = MaterialTheme.colorScheme.surface,
-        ) {
-            when (panel) {
-                PanelKind.SPEED -> SpeedSheet(vm, state)
-                PanelKind.ROTATE -> RotateSheet(vm, state)
-                PanelKind.CROP -> CropSheet(vm, state)
-                PanelKind.ADJUST -> AdjustSheet(vm, state, onImportLut = { pickLut.launch(lutMimeTypes) })
-                PanelKind.TEXT -> TextSheet(vm, state, onImportFont = { pickFont.launch(fontMimeTypes) })
-                PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = { pickAudio.launch(audioMimeTypes) })
-                PanelKind.INFO -> InfoSheet(vm, state, onReplace = {
-                    replaceMedia.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                    )
-                })
-                PanelKind.GOTO -> GotoSheet(vm, state)
-                PanelKind.EXPORT -> ExportSheet(
-                    vm = vm,
-                    state = state,
-                    onNeedPermission = {
-                        if (Build.VERSION.SDK_INT >= 33) {
-                            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        } else {
-                            vm.startExport()
-                        }
-                    },
-                )
-            }
-            Spacer(Modifier.height(24.dp))
-        }
     }
 }
 
@@ -632,6 +636,10 @@ private fun ActionToolbar(
     onGoto: () -> Unit,
 ) {
     val hasClip = state.selectedClip != null
+    // v1.1.1: the button of the currently-open inline panel is highlighted
+    // (dim-accent background) so the user always knows which tool is active
+    // while the timeline area is showing the panel instead.
+    val active = state.activePanel
     // v1.0.10: 分割/删除/复制 moved up into the timecode row; 文字/音频 moved
     // right next to 添加素材 (they are the most-used actions and used to hide
     // off-screen in the scroll). Order: add, text, audio, then per-clip tools.
@@ -643,15 +651,15 @@ private fun ActionToolbar(
             .padding(vertical = 6.dp),
     ) {
         Spacer(Modifier.width(8.dp))
-        ToolbarButton(Icons.Filled.Add, stringResource(R.string.timeline_add_media), enabled = true, onClick = onAddMedia)
-        ToolbarButton(Icons.Filled.TextFields, stringResource(R.string.action_text), enabled = true, onClick = onText)
-        ToolbarButton(Icons.Filled.MusicNote, stringResource(R.string.action_audio), enabled = true, onClick = onAudio)
-        ToolbarButton(Icons.Filled.Speed, stringResource(R.string.action_speed), enabled = hasClip, onClick = onSpeed)
-        ToolbarButton(Icons.Filled.RotateRight, stringResource(R.string.action_rotate), enabled = hasClip, onClick = onRotate)
-        ToolbarButton(Icons.Filled.Crop, stringResource(R.string.action_crop), enabled = hasClip, onClick = onCrop)
-        ToolbarButton(Icons.Filled.Tune, stringResource(R.string.action_adjust), enabled = hasClip, onClick = onAdjust)
-        ToolbarButton(Icons.Filled.Info, stringResource(R.string.action_info), enabled = hasClip, onClick = onInfo)
-        ToolbarButton(Icons.Filled.GpsFixed, stringResource(R.string.action_goto), enabled = true, onClick = onGoto)
+        ToolbarButton(Icons.Filled.Add, stringResource(R.string.timeline_add_media), enabled = true, active = false, onClick = onAddMedia)
+        ToolbarButton(Icons.Filled.TextFields, stringResource(R.string.action_text), enabled = true, active = active == PanelKind.TEXT, onClick = onText)
+        ToolbarButton(Icons.Filled.MusicNote, stringResource(R.string.action_audio), enabled = true, active = active == PanelKind.AUDIO, onClick = onAudio)
+        ToolbarButton(Icons.Filled.Speed, stringResource(R.string.action_speed), enabled = hasClip, active = active == PanelKind.SPEED, onClick = onSpeed)
+        ToolbarButton(Icons.Filled.RotateRight, stringResource(R.string.action_rotate), enabled = hasClip, active = active == PanelKind.ROTATE, onClick = onRotate)
+        ToolbarButton(Icons.Filled.Crop, stringResource(R.string.action_crop), enabled = hasClip, active = active == PanelKind.CROP, onClick = onCrop)
+        ToolbarButton(Icons.Filled.Tune, stringResource(R.string.action_adjust), enabled = hasClip, active = active == PanelKind.ADJUST, onClick = onAdjust)
+        ToolbarButton(Icons.Filled.Info, stringResource(R.string.action_info), enabled = hasClip, active = active == PanelKind.INFO, onClick = onInfo)
+        ToolbarButton(Icons.Filled.GpsFixed, stringResource(R.string.action_goto), enabled = true, active = active == PanelKind.GOTO, onClick = onGoto)
         Spacer(Modifier.width(8.dp))
     }
 }
@@ -661,30 +669,178 @@ private fun ToolbarButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     enabled: Boolean,
+    active: Boolean = false,
     onClick: () -> Unit,
 ) {
     Surface(
         onClick = onClick,
         enabled = enabled,
         shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface,
+        color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
         modifier = Modifier.padding(2.dp),
     ) {
         Column(
             Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            val tint = when {
+                active -> AccentColor
+                enabled -> MaterialTheme.colorScheme.onSurface
+                else -> MaterialTheme.colorScheme.outline
+            }
             Icon(
                 icon, null,
-                tint = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                tint = tint,
                 modifier = Modifier.size(22.dp),
             )
             Text(
                 label,
                 style = MaterialTheme.typography.labelSmall,
-                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                color = tint,
                 maxLines = 1,
             )
         }
+    }
+}
+
+// ===========================================================================
+// Inline tool panel host (v1.1.1)
+//
+// The old ModalBottomSheet expanded over the preview and blocked the very
+// thing the user was adjusting. The inline host lives INSIDE the timeline
+// area instead: the preview, transport bar and action toolbar all stay
+// visible, the panel gets the timeline's bounded height, and its body is a
+// single shared vertical scroller — every tool (调色/文字/音频/…) scrolls the
+// same way while the grading result stays fully in view.
+// ===========================================================================
+
+/** Panels that operate on the selected video clip (guard + header badge). */
+private val CLIP_PANELS = setOf(
+    PanelKind.SPEED, PanelKind.ROTATE, PanelKind.CROP, PanelKind.ADJUST, PanelKind.INFO,
+)
+
+@Composable
+private fun ToolPanelHost(
+    vm: EditorViewModel,
+    state: EditorUiState,
+    panel: PanelKind,
+    onImportLut: () -> Unit,
+    onImportFont: () -> Unit,
+    onAddMusic: () -> Unit,
+    onReplace: () -> Unit,
+    onNeedPermission: () -> Unit,
+) {
+    val titleRes = when (panel) {
+        PanelKind.SPEED -> R.string.panel_speed_title
+        PanelKind.ROTATE -> R.string.panel_rotate_title
+        PanelKind.CROP -> R.string.panel_crop_title
+        PanelKind.ADJUST -> R.string.panel_adjust_title
+        PanelKind.TEXT -> R.string.panel_text_title
+        PanelKind.AUDIO -> R.string.panel_audio_title
+        PanelKind.INFO -> R.string.panel_info_title
+        PanelKind.EXPORT -> R.string.panel_export_title
+        PanelKind.GOTO -> R.string.panel_goto_title
+    }
+    // The timeline is hidden while the panel is open, so the header shows
+    // WHICH clip the clip-targeted tools are editing.
+    val clipIndex = state.project.clips.indexOfFirst { it.id == state.selectedClipId }
+    val clipBadge = if (panel in CLIP_PANELS && clipIndex >= 0) {
+        stringResource(R.string.panel_clip_of_fmt, clipIndex + 1, state.project.clips.size)
+    } else {
+        null
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface)
+    ) {
+        // ---- pinned header: title + target clip + close ----
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(40.dp)
+                .padding(start = 12.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                stringResource(titleRes),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            if (clipBadge != null) {
+                Text(
+                    clipBadge,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            IconButton(
+                onClick = { vm.openPanel(null) },
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Close,
+                    stringResource(R.string.panel_close),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        // ---- scrollable body: the ONE vertical scroller shared by every
+        // panel. Sheets emit plain ColumnScope content, so they stack
+        // vertically and scroll together; sliders keep their horizontal
+        // drag gesture, vertical drags scroll the panel. ----
+        Column(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+        ) {
+            val needsClip = panel in CLIP_PANELS
+            when {
+                needsClip && state.selectedClip == null ->
+                    PanelEmptyHint(stringResource(R.string.panel_need_clip))
+                panel == PanelKind.TEXT && state.selectedText == null ->
+                    PanelEmptyHint(stringResource(R.string.panel_text_gone))
+                else -> when (panel) {
+                    PanelKind.SPEED -> SpeedSheet(vm, state)
+                    PanelKind.ROTATE -> RotateSheet(vm, state)
+                    PanelKind.CROP -> CropSheet(vm, state)
+                    PanelKind.ADJUST -> AdjustSheet(vm, state, onImportLut = onImportLut)
+                    PanelKind.TEXT -> TextSheet(vm, state, onImportFont = onImportFont)
+                    PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = onAddMusic)
+                    PanelKind.INFO -> InfoSheet(vm, state, onReplace = onReplace)
+                    PanelKind.GOTO -> GotoSheet(vm, state)
+                    PanelKind.EXPORT -> ExportSheet(
+                        vm = vm,
+                        state = state,
+                        onNeedPermission = onNeedPermission,
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+/** Friendly fallback when a panel's target was deleted mid-edit. */
+@Composable
+private fun PanelEmptyHint(text: String) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 40.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
     }
 }

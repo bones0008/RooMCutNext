@@ -449,6 +449,13 @@ class EditorViewModel(
     }
 
     fun openPanel(panel: PanelKind?) {
+        // v1.1.1 toggle: tapping the toolbar button of the already-open
+        // panel closes it — the inline panel sits in the timeline area, so
+        // closing it reveals the timeline again.
+        if (panel != null && panel == _state.value.activePanel) {
+            _state.update { it.copy(activePanel = null) }
+            return
+        }
         // Reopening the export sheet must never show a stale finished result
         // from an earlier run: only a live RUNNING export is kept, everything
         // else (COMPLETED / FAILED / CANCELLED) is cleared so the "start

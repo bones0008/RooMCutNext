@@ -19,9 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.RotateLeft
@@ -226,10 +224,12 @@ fun AdjustSheet(vm: EditorViewModel, state: EditorUiState, onImportLut: () -> Un
     val clip = state.selectedClip ?: return
     SheetTitle(stringResource(R.string.panel_adjust_title))
 
+    // v1.1.1: the panel body scrolls in the ToolPanelHost; the sheet itself
+    // must NOT own a vertical scroller (nested same-direction scroll would
+    // swallow the host's scrolling).
     Column(
         Modifier
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
             .padding(bottom = 8.dp),
     ) {
         // ---- LUT filter section ----
@@ -486,10 +486,10 @@ fun TextSheet(vm: EditorViewModel, state: EditorUiState, onImportFont: () -> Uni
     val item = state.selectedText ?: return
     SheetTitle(stringResource(R.string.panel_text_title))
 
+    // v1.1.1: scrolling owned by the ToolPanelHost (see AdjustSheet note).
     Column(
         Modifier
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
             .padding(bottom = 8.dp),
     ) {
         var text by remember(item.id) { mutableStateOf(item.text) }
@@ -833,7 +833,7 @@ fun InfoSheet(vm: EditorViewModel, state: EditorUiState, onReplace: () -> Unit =
     val asset = state.project.assetById(clip.assetId) ?: return
     SheetTitle(stringResource(R.string.panel_info_title))
     Column(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp).verticalScroll(rememberScrollState()),
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         InfoRow(stringResource(R.string.panel_info_resolution), "${asset.width}×${asset.height}")
