@@ -52,14 +52,69 @@ data class Clip(
     fun speedLabel(): String = if (speed == speed.toInt().toFloat()) "${speed.toInt()}x" else "${speed}x"
 }
 
-/** Basic color adjustment applied to the whole clip. All values in -1..1 (0 = neutral). */
+/**
+ * Color adjustment applied to the whole clip. Slider values in -1..1 (0 = neutral).
+ *
+ * Besides the classic brightness/contrast/saturation, v1.1 adds:
+ *  - [temperature]/[tint]: white-balance style adjustments;
+ *  - [rGain]/[gGain]/[bGain]: direct per-channel gains;
+ *  - [lutId]/[lutStrength]: a LUT look-up filter (see LutRegistry).
+ *
+ * All gain-ish values compose multiplicatively into ONE matrix effect in
+ * [com.RooMCutNext.export.CompositionBuilder] — see [channelGains].
+ */
 @Serializable
 data class ColorAdjust(
     val brightness: Float = 0f,
     val contrast: Float = 0f,
     val saturation: Float = 0f,
+    /** White balance: -1 cool (blue) .. +1 warm (orange). */
+    val temperature: Float = 0f,
+    /** Tint: -1 green .. +1 magenta. */
+    val tint: Float = 0f,
+    /** Direct red channel gain, -1..1 (rendered as 1+v, clamped to 0..2). */
+    val rGain: Float = 0f,
+    /** Direct green channel gain, -1..1. */
+    val gGain: Float = 0f,
+    /** Direct blue channel gain, -1..1. */
+    val bGain: Float = 0f,
+    /** LUT filter id (LutRegistry), null = no filter. */
+    val lutId: String? = null,
+    /** LUT opacity/strength, 0..1 (1 = full effect). */
+    val lutStrength: Float = 1f,
 ) {
-    val isNeutral: Boolean get() = brightness == 0f && contrast == 0f && saturation == 0f
+    val isNeutral: Boolean get() =
+        brightness == 0f && contrast == 0f && saturation == 0f &&
+            temperature == 0f && tint == 0f &&
+            rGain == 0f && gGain == 0f && bGain == 0f && lutId == null
+
+    /** True when the per-channel matrix part has no effect (LUT may still apply). */
+    val isGainNeutral: Boolean get() =
+        temperature == 0f && tint == 0f && rGain == 0f && gGain == 0f && bGain == 0f
+
+    /**
+     * Combined per-channel scale factors (R, G, B) for a single RgbAdjustment.
+     *
+     * temperature shifts R vs B (warm/cool); tint shifts G vs R+B
+     * (green/magenta); r/g/bGain are direct multipliers. Everything composes
+     * multiplicatively and each factor is clamped to 0..2.5.
+     */
+    fun channelGains(): FloatArray {
+        val tempR = 1f + 0.4f * temperature
+        val tempB = 1f - 0.4f * temperature
+        val tintG = 1f - 0.35f * tint
+        val tintRB = 1f + 0.175f * tint
+        fun gain(direct: Float, vararg factors: Float): Float {
+            var v = (1f + direct).coerceIn(0f, 2f)
+            factors.forEach { f -> v *= f }
+            return v.coerceIn(0f, 2.5f)
+        }
+        return floatArrayOf(
+            gain(rGain, tempR, tintRB),
+            gain(gGain, tintG),
+            gain(bGain, tempB, tintRB),
+        )
+    }
 }
 
 /**

@@ -61,7 +61,7 @@
     <string name="action_speed">变速</string>
     <string name="action_rotate">旋转</string>
     <string name="action_crop">裁剪</string>
-    <string name="action_adjust">调节</string>
+    <string name="action_adjust">调色</string>
     <string name="action_text">文字</string>
     <string name="action_audio">音频</string>
     <string name="action_info">信息</string>
@@ -89,18 +89,38 @@
     <string name="panel_crop_horizontal">水平边距</string>
     <string name="panel_crop_vertical">垂直边距</string>
 
-    <!-- Adjust panel -->
-    <string name="panel_adjust_title">画面调整</string>
+    <!-- Adjust / color-grading panel (v1.1: LUT filters + basic params) -->
+    <string name="panel_adjust_title">调色</string>
     <string name="panel_adjust_brightness">亮度</string>
     <string name="panel_adjust_contrast">对比度</string>
     <string name="panel_adjust_saturation">饱和度</string>
     <string name="panel_adjust_reset">重置</string>
+    <string name="panel_adjust_temperature">色温</string>
+    <string name="panel_adjust_tint">色调</string>
+    <string name="panel_adjust_r">红色 R</string>
+    <string name="panel_adjust_g">绿色 G</string>
+    <string name="panel_adjust_b">蓝色 B</string>
+    <string name="panel_adjust_filter_section">滤镜</string>
+    <string name="panel_adjust_param_section">基础调色</string>
+    <string name="panel_filter_none">无</string>
+    <string name="panel_filter_strength">滤镜强度</string>
+    <string name="panel_filter_import">导入 LUT</string>
+    <string name="panel_filter_import_hint">支持 .cube 文件（Premiere/达芬奇导出）</string>
+    <string name="lut_imported_fmt">已导入滤镜 %1$s</string>
+    <string name="lut_import_failed">无法解析该 LUT 文件（仅支持 .cube 三维查找表）</string>
+    <string name="lut_deleted_fmt">已删除滤镜 %1$s</string>
 
     <!-- Text panel -->
     <string name="panel_text_title">文字</string>
     <string name="panel_text_content">文字内容</string>
     <string name="panel_text_size">字号</string>
     <string name="panel_text_color">文字颜色</string>
+    <string name="panel_text_font">字体</string>
+    <string name="panel_text_font_import">导入字体</string>
+    <string name="panel_text_font_import_hint">支持 TTF / OTF 文件</string>
+    <string name="font_imported_fmt">已导入字体 %1$s</string>
+    <string name="font_import_failed">无法识别该字体文件（仅支持 TTF / OTF）</string>
+    <string name="font_deleted_fmt">已删除字体 %1$s</string>
     <string name="panel_text_stroke">描边宽度</string>
     <string name="panel_text_shadow">阴影强度</string>
     <string name="panel_text_bold">加粗</string>

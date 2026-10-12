@@ -61,7 +61,7 @@
     <string name="action_speed">Speed</string>
     <string name="action_rotate">Rotate</string>
     <string name="action_crop">Crop</string>
-    <string name="action_adjust">Adjust</string>
+    <string name="action_adjust">Color</string>
     <string name="action_text">Text</string>
     <string name="action_audio">Audio</string>
     <string name="action_info">Info</string>
@@ -89,18 +89,38 @@
     <string name="panel_crop_horizontal">Horizontal margins</string>
     <string name="panel_crop_vertical">Vertical margins</string>
 
-    <!-- Adjust panel -->
-    <string name="panel_adjust_title">Adjustments</string>
+    <!-- Adjust / color-grading panel (v1.1: LUT filters + basic params) -->
+    <string name="panel_adjust_title">Color Grading</string>
     <string name="panel_adjust_brightness">Brightness</string>
     <string name="panel_adjust_contrast">Contrast</string>
     <string name="panel_adjust_saturation">Saturation</string>
     <string name="panel_adjust_reset">Reset</string>
+    <string name="panel_adjust_temperature">Temperature</string>
+    <string name="panel_adjust_tint">Tint</string>
+    <string name="panel_adjust_r">Red</string>
+    <string name="panel_adjust_g">Green</string>
+    <string name="panel_adjust_b">Blue</string>
+    <string name="panel_adjust_filter_section">Filters</string>
+    <string name="panel_adjust_param_section">Basic Grading</string>
+    <string name="panel_filter_none">None</string>
+    <string name="panel_filter_strength">Filter strength</string>
+    <string name="panel_filter_import">Import LUT</string>
+    <string name="panel_filter_import_hint">.cube files (Premiere/DaVinci exports)</string>
+    <string name="lut_imported_fmt">Filter imported: %1$s</string>
+    <string name="lut_import_failed">Cannot parse this LUT file (.cube 3D LUTs only)</string>
+    <string name="lut_deleted_fmt">Filter deleted: %1$s</string>
 
     <!-- Text panel -->
     <string name="panel_text_title">Text</string>
     <string name="panel_text_content">Content</string>
     <string name="panel_text_size">Size</string>
     <string name="panel_text_color">Text color</string>
+    <string name="panel_text_font">Font</string>
+    <string name="panel_text_font_import">Import font</string>
+    <string name="panel_text_font_import_hint">TTF / OTF files</string>
+    <string name="font_imported_fmt">Font imported: %1$s</string>
+    <string name="font_import_failed">Not a usable font file (TTF / OTF only)</string>
+    <string name="font_deleted_fmt">Font deleted: %1$s</string>
     <string name="panel_text_stroke">Outline width</string>
     <string name="panel_text_shadow">Shadow</string>
     <string name="panel_text_bold">Bold</string>

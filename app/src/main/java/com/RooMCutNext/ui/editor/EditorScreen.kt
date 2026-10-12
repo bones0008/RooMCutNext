@@ -144,6 +144,25 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         if (uri != null && clipId != null) vm.replaceClipAsset(clipId, uri)
     }
 
+    // ---- v1.1: font & LUT import pickers (document picker; most providers
+    // report .ttf/.cube as generic octet-stream, so include it) ----
+    val fontMimeTypes = arrayOf(
+        "font/ttf", "font/otf",
+        "application/x-font-ttf", "application/x-font-otf",
+        "application/octet-stream",
+    )
+    val lutMimeTypes = arrayOf(
+        "application/octet-stream", "text/plain", "application/x-cube",
+    )
+
+    val pickFont = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> vm.importFont(uri) }
+
+    val pickLut = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> vm.importLut(uri) }
+
     val requestNotifications = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -433,8 +452,8 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 PanelKind.SPEED -> SpeedSheet(vm, state)
                 PanelKind.ROTATE -> RotateSheet(vm, state)
                 PanelKind.CROP -> CropSheet(vm, state)
-                PanelKind.ADJUST -> AdjustSheet(vm, state)
-                PanelKind.TEXT -> TextSheet(vm, state)
+                PanelKind.ADJUST -> AdjustSheet(vm, state, onImportLut = { pickLut.launch(lutMimeTypes) })
+                PanelKind.TEXT -> TextSheet(vm, state, onImportFont = { pickFont.launch(fontMimeTypes) })
                 PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = { pickAudio.launch(audioMimeTypes) })
                 PanelKind.INFO -> InfoSheet(vm, state, onReplace = {
                     replaceMedia.launch(

@@ -21,6 +21,8 @@ import com.RooMCutNext.core.util.IdGen
 import com.RooMCutNext.data.ProjectRepository
 import com.RooMCutNext.export.ExportBus
 import com.RooMCutNext.export.ExportService
+import com.RooMCutNext.media.FontRegistry
+import com.RooMCutNext.media.LutRegistry
 import com.RooMCutNext.media.MediaImporter
 import com.RooMCutNext.media.ThumbnailStore
 import com.RooMCutNext.playback.PlaybackController
@@ -69,6 +71,10 @@ data class EditorUiState(
     val audioTrimPreview: AudioTrimPreview? = null,
     val missingAssetIds: Set<String> = emptySet(),
     val exportState: ExportBus.ExportState? = null,
+    /** Selectable fonts (v1.1): system + bundled + user-imported. */
+    val availableFonts: List<FontRegistry.FontSpec> = emptyList(),
+    /** Selectable LUT filters (v1.1): bundled + user-imported. */
+    val availableLuts: List<LutRegistry.LutSpec> = emptyList(),
     /** On-screen diagnostic log (last lines) — only shown when overlay enabled. */
     val diagLog: List<String> = emptyList(),
     /** Hidden diagnostics: toggled by tapping the project title 5 times. */
@@ -153,6 +159,12 @@ class EditorViewModel(
     val structureVersion = _structureVersion.asStateFlow()
 
     init {
+        _state.update {
+            it.copy(
+                availableFonts = FontRegistry.specs(),
+                availableLuts = LutRegistry.specs(),
+            )
+        }
         playback.onPositionUs = { us ->
             if (!scrubbingByTouch) _state.update { it.copy(playheadUs = us.coerceAtLeast(0L)) }
         }
@@ -693,6 +705,91 @@ class EditorViewModel(
         } else {
             previewTransform { p ->
                 p.copy(texts = p.texts.map { if (it.id == item.id) item else it })
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Fonts & LUT filters (v1.1)
+    // ------------------------------------------------------------------
+
+    private val app: Application get() = getApplication()
+
+    /**
+     * Import a picked font file and — when a text overlay is selected —
+     * apply it right away (that is why the user opened the picker).
+     */
+    fun importFont(uri: Uri?) {
+        if (uri == null) return
+        viewModelScope.launch {
+            val spec = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                FontRegistry.importUri(app, uri)
+            }
+            if (spec == null) {
+                _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.font_import_failed)) }
+                return@launch
+            }
+            _state.update { it.copy(availableFonts = FontRegistry.specs()) }
+            _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.font_imported_fmt, spec.displayName())) }
+            _state.value.selectedTextId?.let { textId ->
+                _state.value.project.textById(textId)?.let { item ->
+                    mutate("字体") { p ->
+                        p.copy(texts = p.texts.map { if (it.id == textId) it.copy(style = it.style.copy(fontId = spec.id)) else it })
+                    }
+                }
+            }
+        }
+    }
+
+    /** Long-press delete on a user-imported font. */
+    fun deleteUserFont(id: String) {
+        viewModelScope.launch {
+            val name = FontRegistry.specs().firstOrNull { it.id == id }?.displayName() ?: id
+            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                FontRegistry.deleteUserFont(id)
+            }
+            if (ok) {
+                _state.update { it.copy(availableFonts = FontRegistry.specs()) }
+                _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.font_deleted_fmt, name)) }
+            }
+        }
+    }
+
+    /** Import a picked .cube LUT and apply it to the selected clip when any. */
+    fun importLut(uri: Uri?) {
+        if (uri == null) return
+        viewModelScope.launch {
+            val spec = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                LutRegistry.importUri(app, uri)
+            }
+            if (spec == null) {
+                _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.lut_import_failed)) }
+                return@launch
+            }
+            _state.update { it.copy(availableLuts = LutRegistry.specs()) }
+            _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.lut_imported_fmt, spec.displayName())) }
+            _state.value.selectedClipId?.let { clipId ->
+                mutate("滤镜") { p ->
+                    p.copy(clips = TimelineOps.update(p.clips, clipId) {
+                        it.copy(adjust = it.adjust.copy(lutId = spec.id, lutStrength = 1f))
+                    })
+                }
+            }
+        }
+    }
+
+    /** Long-press delete on a user-imported LUT. */
+    fun deleteUserLut(id: String) {
+        viewModelScope.launch {
+            val name = LutRegistry.specs().firstOrNull { it.id == id }?.displayName() ?: id
+            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                LutRegistry.deleteUserLut(id)
+            }
+            if (ok) {
+                _state.update { it.copy(availableLuts = LutRegistry.specs()) }
+                _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.lut_deleted_fmt, name)) }
+                // Clips still referencing the deleted LUT degrade to no
+                // filter at build time; nothing to clean in project JSON.
             }
         }
     }

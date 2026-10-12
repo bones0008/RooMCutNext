@@ -9,6 +9,7 @@ import android.text.TextPaint
 import androidx.media3.common.util.Size
 import androidx.media3.effect.CanvasOverlay
 import com.RooMCutNext.core.model.TextOverlayItem
+import com.RooMCutNext.media.FontRegistry
 
 /**
  * A [CanvasOverlay] rendering one timeline text overlay inside a time window
@@ -31,12 +32,18 @@ class TimedTextOverlay(
     private var strokeLayout: StaticLayout? = null
     private var paintTextSize = 0f
 
+    // v1.1: user-selectable font (bundled subset fonts + imports). Resolves
+    // to the platform default for "system"/unknown ids, so old projects and
+    // deleted user fonts degrade gracefully. Same resolution on the preview
+    // and export paths — both construct this overlay.
+    private val typeface: Typeface = FontRegistry.resolve(item.style.fontId, item.style.bold)
+
     private val fillPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = if (item.style.bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        typeface = this@TimedTextOverlay.typeface
     }
     private val strokePaint: TextPaint? = if (item.style.strokeWidthRatio > 0f) {
         TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            typeface = if (item.style.bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            typeface = this@TimedTextOverlay.typeface
             style = Paint.Style.STROKE
             strokeJoin = Paint.Join.ROUND
         }

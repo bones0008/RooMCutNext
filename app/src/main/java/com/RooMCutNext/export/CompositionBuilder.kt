@@ -10,6 +10,7 @@ import androidx.media3.effect.Crop
 import androidx.media3.effect.HslAdjustment
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
+import androidx.media3.effect.RgbAdjustment
 import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -24,6 +25,7 @@ import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.ops.TimelineOps
 import com.RooMCutNext.export.effects.GainAudioProcessor
 import com.RooMCutNext.export.effects.TimedTextOverlay
+import com.RooMCutNext.media.LutRegistry
 import java.io.File
 
 /**
@@ -200,6 +202,15 @@ object CompositionBuilder {
             // ⚠ Crop argument order in Media3 1.11.1 is (left, right, BOTTOM, TOP)
             // — see class doc. CropSpec stores GL-style top/bottom.
             clip.crop?.let { videoEffects += Crop(it.left, it.right, it.bottom, it.top) }
+
+            // ---- color grading (v1.1) ----
+            // Order matters: the LUT look goes on FIRST so the parameter
+            // sliders below act on the graded image (users expect the
+            // brightness slider to "fix" a dark filter, matching CapCut).
+            if (clip.adjust.lutId != null) {
+                LutRegistry.effectFor(clip.adjust.lutId, clip.adjust.lutStrength)
+                    ?.let { videoEffects += it }
+            }
             if (clip.adjust.brightness != 0f) videoEffects += Brightness(clip.adjust.brightness)
             if (clip.adjust.contrast != 0f) videoEffects += Contrast(clip.adjust.contrast)
             if (clip.adjust.saturation != 0f) {
@@ -207,6 +218,16 @@ object CompositionBuilder {
                 // Brightness/Contrast which are [-1, 1]): scale the slider.
                 videoEffects += HslAdjustment.Builder()
                     .adjustSaturation((clip.adjust.saturation * 100f).coerceIn(-100f, 100f))
+                    .build()
+            }
+            // Temperature + tint + direct RGB gains compose into ONE matrix
+            // effect (see ColorAdjust.channelGains) — one shader pass.
+            if (!clip.adjust.isGainNeutral) {
+                val gains = clip.adjust.channelGains()
+                videoEffects += RgbAdjustment.Builder()
+                    .setRedScale(gains[0])
+                    .setGreenScale(gains[1])
+                    .setBlueScale(gains[2])
                     .build()
             }
 

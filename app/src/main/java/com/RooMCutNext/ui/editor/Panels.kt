@@ -1,10 +1,11 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 package com.RooMCutNext.ui.editor
 
 import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -43,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -215,42 +218,254 @@ fun CropSheet(vm: EditorViewModel, state: EditorUiState) {
 }
 
 // ===========================================================================
-// Adjustments (brightness / contrast / saturation)
+// Adjustments -> full color grading (v1.1): LUT filters + basic parameters
 // ===========================================================================
 
 @Composable
-fun AdjustSheet(vm: EditorViewModel, state: EditorUiState) {
+fun AdjustSheet(vm: EditorViewModel, state: EditorUiState, onImportLut: () -> Unit = {}) {
     val clip = state.selectedClip ?: return
     SheetTitle(stringResource(R.string.panel_adjust_title))
-    LabeledSlider(
-        label = stringResource(R.string.panel_adjust_brightness),
-        value = clip.adjust.brightness,
-        valueRange = -1f..1f,
-        valueLabel = formatSigned(clip.adjust.brightness),
-        onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(brightness = it), commit = false) },
-        onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
-    )
-    LabeledSlider(
-        label = stringResource(R.string.panel_adjust_contrast),
-        value = clip.adjust.contrast,
-        valueRange = -1f..1f,
-        valueLabel = formatSigned(clip.adjust.contrast),
-        onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(contrast = it), commit = false) },
-        onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
-    )
-    LabeledSlider(
-        label = stringResource(R.string.panel_adjust_saturation),
-        value = clip.adjust.saturation,
-        valueRange = -1f..1f,
-        valueLabel = formatSigned(clip.adjust.saturation),
-        onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(saturation = it), commit = false) },
-        onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
-    )
-    TextButton(
-        onClick = { vm.setClipAdjust(clip.id, com.RooMCutNext.core.model.ColorAdjust()) },
-        modifier = Modifier.padding(horizontal = 16.dp),
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = 8.dp),
     ) {
-        Text(stringResource(R.string.panel_adjust_reset), color = WarnColor)
+        // ---- LUT filter section ----
+        SectionLabel(stringResource(R.string.panel_adjust_filter_section))
+        LutChipRow(
+            luts = state.availableLuts,
+            selectedLutId = clip.adjust.lutId,
+            onSelect = { lutId ->
+                vm.setClipAdjust(clip.id, clip.adjust.copy(lutId = lutId, lutStrength = 1f))
+            },
+            onImport = onImportLut,
+            onDelete = { vm.deleteUserLut(it) },
+        )
+        if (clip.adjust.lutId != null) {
+            LabeledSlider(
+                label = stringResource(R.string.panel_filter_strength),
+                value = clip.adjust.lutStrength,
+                valueRange = 0f..1f,
+                valueLabel = "${(clip.adjust.lutStrength * 100).toInt()}%",
+                onValueChange = {
+                    vm.setClipAdjust(clip.id, clip.adjust.copy(lutStrength = it), commit = false)
+                },
+                onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
+            )
+        }
+
+        // ---- basic grading section ----
+        SectionLabel(stringResource(R.string.panel_adjust_param_section))
+        LabeledSlider(
+            label = stringResource(R.string.panel_adjust_brightness),
+            value = clip.adjust.brightness,
+            valueRange = -1f..1f,
+            valueLabel = formatSigned(clip.adjust.brightness),
+            onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(brightness = it), commit = false) },
+            onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_adjust_contrast),
+            value = clip.adjust.contrast,
+            valueRange = -1f..1f,
+            valueLabel = formatSigned(clip.adjust.contrast),
+            onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(contrast = it), commit = false) },
+            onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_adjust_saturation),
+            value = clip.adjust.saturation,
+            valueRange = -1f..1f,
+            valueLabel = formatSigned(clip.adjust.saturation),
+            onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(saturation = it), commit = false) },
+            onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_adjust_temperature),
+            value = clip.adjust.temperature,
+            valueRange = -1f..1f,
+            valueLabel = formatSigned(clip.adjust.temperature),
+            onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(temperature = it), commit = false) },
+            onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_adjust_tint),
+            value = clip.adjust.tint,
+            valueRange = -1f..1f,
+            valueLabel = formatSigned(clip.adjust.tint),
+            onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(tint = it), commit = false) },
+            onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_adjust_r),
+            value = clip.adjust.rGain,
+            valueRange = -1f..1f,
+            valueLabel = formatSigned(clip.adjust.rGain),
+            onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(rGain = it), commit = false) },
+            onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_adjust_g),
+            value = clip.adjust.gGain,
+            valueRange = -1f..1f,
+            valueLabel = formatSigned(clip.adjust.gGain),
+            onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(gGain = it), commit = false) },
+            onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_adjust_b),
+            value = clip.adjust.bGain,
+            valueRange = -1f..1f,
+            valueLabel = formatSigned(clip.adjust.bGain),
+            onValueChange = { vm.setClipAdjust(clip.id, clip.adjust.copy(bGain = it), commit = false) },
+            onValueChangeFinished = { vm.setClipAdjust(clip.id, clip.adjust) },
+        )
+        TextButton(
+            onClick = { vm.setClipAdjust(clip.id, com.RooMCutNext.core.model.ColorAdjust()) },
+            modifier = Modifier.padding(horizontal = 16.dp),
+        ) {
+            Text(stringResource(R.string.panel_adjust_reset), color = WarnColor)
+        }
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+    )
+}
+
+/** Horizontal scrolling row of LUT chips: "无" + builtin + user + import. */
+@Composable
+private fun LutChipRow(
+    luts: List<com.RooMCutNext.media.LutRegistry.LutSpec>,
+    selectedLutId: String?,
+    onSelect: (String?) -> Unit,
+    onImport: () -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        LutChip(
+            label = stringResource(R.string.panel_filter_none),
+            swatches = null,
+            selected = selectedLutId == null,
+            onClick = { onSelect(null) },
+        )
+        luts.forEach { spec ->
+            LutChip(
+                label = spec.displayName(),
+                swatches = remember(spec.id) { com.RooMCutNext.media.LutRegistry.swatchesFor(spec.id) },
+                selected = selectedLutId == spec.id,
+                onClick = { onSelect(spec.id) },
+                onLongClick = if (spec.isUser) ({ onDelete(spec.id) }) else null,
+            )
+        }
+        ImportChip(
+            label = stringResource(R.string.panel_filter_import),
+            onClick = onImport,
+        )
+    }
+}
+
+@Composable
+private fun LutChip(
+    label: String,
+    swatches: IntArray?,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
+) {
+    Column(
+        Modifier
+            .width(64.dp)
+            .clip(MaterialTheme.shapes.small)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(
+                width = if (selected) 2.dp else 0.dp,
+                color = if (selected) AccentColor else androidx.compose.ui.graphics.Color.Transparent,
+                shape = MaterialTheme.shapes.small,
+            )
+            .let { m ->
+                if (onLongClick != null) {
+                    m.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                } else {
+                    m.clickable(onClick = onClick)
+                }
+            }
+            .padding(4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(22.dp)
+                .clip(MaterialTheme.shapes.extraSmall),
+        ) {
+            if (swatches != null) {
+                swatches.forEach { c ->
+                    Box(Modifier.weight(1f).fillMaxHeight().background(Color(c)))
+                }
+            } else {
+                Box(
+                    Modifier.weight(1f).fillMaxHeight(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "—",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 3.dp),
+        )
+    }
+}
+
+/** The trailing "+ import" chip used by both the LUT and font rows. */
+@Composable
+private fun ImportChip(label: String, onClick: () -> Unit) {
+    Column(
+        Modifier
+            .width(72.dp)
+            .clip(MaterialTheme.shapes.small)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, MaterialTheme.colorScheme.outline, MaterialTheme.shapes.small)
+            .clickable(onClick = onClick)
+            .padding(4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            "+",
+            style = MaterialTheme.typography.titleMedium,
+            color = AccentColor,
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
     }
 }
 
@@ -267,113 +482,199 @@ private val TEXT_COLORS = listOf(
 )
 
 @Composable
-fun TextSheet(vm: EditorViewModel, state: EditorUiState) {
+fun TextSheet(vm: EditorViewModel, state: EditorUiState, onImportFont: () -> Unit = {}) {
     val item = state.selectedText ?: return
     SheetTitle(stringResource(R.string.panel_text_title))
 
-    var text by remember(item.id) { mutableStateOf(item.text) }
-    OutlinedTextField(
-        value = text,
-        onValueChange = {
-            text = it
-            vm.updateText(item.copy(text = it), commit = false)
-        },
-        label = { Text(stringResource(R.string.panel_text_content)) },
-        placeholder = { Text(stringResource(R.string.panel_text_empty_hint)) },
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        minLines = 1,
-        maxLines = 3,
-    )
-
-    LabeledSlider(
-        label = stringResource(R.string.panel_text_size),
-        value = item.style.fontSizeRatio,
-        valueRange = 0.03f..0.25f,
-        valueLabel = "${(item.style.fontSizeRatio * 100).toInt()}",
-        onValueChange = { vm.updateText(item.copy(style = item.style.copy(fontSizeRatio = it)), commit = false) },
-        onValueChangeFinished = { vm.updateText(item) },
-    )
-
-    Text(
-        stringResource(R.string.panel_text_color),
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-    )
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = 8.dp),
     ) {
-        TEXT_COLORS.take(7).forEach { c ->
-            val selected = item.style.color == c
-            Box(
-                Modifier
-                    .size(30.dp)
-                    .background(Color(c.toInt()), CircleShape)
-                    .border(
-                        width = if (selected) 3.dp else 1.dp,
-                        color = if (selected) AccentColor else MaterialTheme.colorScheme.outline,
-                        shape = CircleShape,
-                    )
-                    .clickable { vm.updateText(item.copy(style = item.style.withColor(c))) },
-            )
+        var text by remember(item.id) { mutableStateOf(item.text) }
+        OutlinedTextField(
+            value = text,
+            onValueChange = {
+                text = it
+                vm.updateText(item.copy(text = it), commit = false)
+            },
+            label = { Text(stringResource(R.string.panel_text_content)) },
+            placeholder = { Text(stringResource(R.string.panel_text_empty_hint)) },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            minLines = 1,
+            maxLines = 3,
+        )
+
+        // ---- font selector (v1.1): chips render their name in the font ----
+        Text(
+            stringResource(R.string.panel_text_font),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+        FontChipRow(
+            fonts = state.availableFonts,
+            selectedFontId = item.style.fontId,
+            onSelect = { fontId ->
+                vm.updateText(item.copy(style = item.style.copy(fontId = fontId)))
+            },
+            onImport = onImportFont,
+            onDelete = { vm.deleteUserFont(it) },
+        )
+
+        LabeledSlider(
+            label = stringResource(R.string.panel_text_size),
+            value = item.style.fontSizeRatio,
+            valueRange = 0.03f..0.25f,
+            valueLabel = "${(item.style.fontSizeRatio * 100).toInt()}",
+            onValueChange = { vm.updateText(item.copy(style = item.style.copy(fontSizeRatio = it)), commit = false) },
+            onValueChangeFinished = { vm.updateText(item) },
+        )
+
+        Text(
+            stringResource(R.string.panel_text_color),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            TEXT_COLORS.take(7).forEach { c ->
+                val selected = item.style.color == c
+                Box(
+                    Modifier
+                        .size(30.dp)
+                        .background(Color(c.toInt()), CircleShape)
+                        .border(
+                            width = if (selected) 3.dp else 1.dp,
+                            color = if (selected) AccentColor else MaterialTheme.colorScheme.outline,
+                            shape = CircleShape,
+                        )
+                        .clickable { vm.updateText(item.copy(style = item.style.withColor(c))) },
+                )
+            }
+        }
+
+        LabeledSlider(
+            label = stringResource(R.string.panel_text_stroke),
+            value = item.style.strokeWidthRatio,
+            valueRange = 0f..0.25f,
+            valueLabel = "${(item.style.strokeWidthRatio * 100).toInt()}",
+            onValueChange = { vm.updateText(item.copy(style = item.style.copy(strokeWidthRatio = it)), commit = false) },
+            onValueChangeFinished = { vm.updateText(item) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_text_shadow),
+            value = item.style.shadowRadiusRatio,
+            valueRange = 0f..0.3f,
+            valueLabel = "${(item.style.shadowRadiusRatio * 100).toInt()}",
+            onValueChange = { vm.updateText(item.copy(style = item.style.copy(shadowRadiusRatio = it)), commit = false) },
+            onValueChangeFinished = { vm.updateText(item) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_text_position_x),
+            value = item.xRatio,
+            valueRange = 0.05f..0.95f,
+            valueLabel = "${(item.xRatio * 100).toInt()}%",
+            onValueChange = { vm.updateText(item.copy(xRatio = it), commit = false) },
+            onValueChangeFinished = { vm.updateText(item) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_text_position_y),
+            value = item.yRatio,
+            valueRange = 0.05f..0.95f,
+            valueLabel = "${(item.yRatio * 100).toInt()}%",
+            onValueChange = { vm.updateText(item.copy(yRatio = it), commit = false) },
+            onValueChangeFinished = { vm.updateText(item) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_text_rotation),
+            value = item.rotationDeg,
+            valueRange = -180f..180f,
+            valueLabel = "${item.rotationDeg.toInt()}°",
+            onValueChange = { vm.updateText(item.copy(rotationDeg = it), commit = false) },
+            onValueChangeFinished = { vm.updateText(item) },
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(stringResource(R.string.panel_text_bold), Modifier.weight(1f))
+            Switch(checked = item.style.bold, onCheckedChange = {
+                vm.updateText(item.copy(style = item.style.copy(bold = it)))
+            })
+        }
+        TextButton(
+            onClick = { vm.deleteText(item.id) },
+            modifier = Modifier.padding(horizontal = 16.dp),
+        ) {
+            Text(stringResource(R.string.panel_text_delete), color = DangerColor)
         }
     }
+}
 
-    LabeledSlider(
-        label = stringResource(R.string.panel_text_stroke),
-        value = item.style.strokeWidthRatio,
-        valueRange = 0f..0.25f,
-        valueLabel = "${(item.style.strokeWidthRatio * 100).toInt()}",
-        onValueChange = { vm.updateText(item.copy(style = item.style.copy(strokeWidthRatio = it)), commit = false) },
-        onValueChangeFinished = { vm.updateText(item) },
-    )
-    LabeledSlider(
-        label = stringResource(R.string.panel_text_shadow),
-        value = item.style.shadowRadiusRatio,
-        valueRange = 0f..0.3f,
-        valueLabel = "${(item.style.shadowRadiusRatio * 100).toInt()}",
-        onValueChange = { vm.updateText(item.copy(style = item.style.copy(shadowRadiusRatio = it)), commit = false) },
-        onValueChangeFinished = { vm.updateText(item) },
-    )
-    LabeledSlider(
-        label = stringResource(R.string.panel_text_position_x),
-        value = item.xRatio,
-        valueRange = 0.05f..0.95f,
-        valueLabel = "${(item.xRatio * 100).toInt()}%",
-        onValueChange = { vm.updateText(item.copy(xRatio = it), commit = false) },
-        onValueChangeFinished = { vm.updateText(item) },
-    )
-    LabeledSlider(
-        label = stringResource(R.string.panel_text_position_y),
-        value = item.yRatio,
-        valueRange = 0.05f..0.95f,
-        valueLabel = "${(item.yRatio * 100).toInt()}%",
-        onValueChange = { vm.updateText(item.copy(yRatio = it), commit = false) },
-        onValueChangeFinished = { vm.updateText(item) },
-    )
-    LabeledSlider(
-        label = stringResource(R.string.panel_text_rotation),
-        value = item.rotationDeg,
-        valueRange = -180f..180f,
-        valueLabel = "${item.rotationDeg.toInt()}°",
-        onValueChange = { vm.updateText(item.copy(rotationDeg = it), commit = false) },
-        onValueChangeFinished = { vm.updateText(item) },
-    )
+/** Horizontal font chips: each renders its own name in the actual font. */
+@Composable
+private fun FontChipRow(
+    fonts: List<com.RooMCutNext.media.FontRegistry.FontSpec>,
+    selectedFontId: String,
+    onSelect: (String) -> Unit,
+    onImport: () -> Unit,
+    onDelete: (String) -> Unit,
+) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(stringResource(R.string.panel_text_bold), Modifier.weight(1f))
-        Switch(checked = item.style.bold, onCheckedChange = {
-            vm.updateText(item.copy(style = item.style.copy(bold = it)))
-        })
-    }
-    TextButton(
-        onClick = { vm.deleteText(item.id) },
-        modifier = Modifier.padding(horizontal = 16.dp),
-    ) {
-        Text(stringResource(R.string.panel_text_delete), color = DangerColor)
+        fonts.forEach { spec ->
+            val family = remember(spec.id) {
+                com.RooMCutNext.media.FontRegistry.resolve(spec.id, false)
+                    ?.let { androidx.compose.ui.text.font.FontFamily(it) }
+            } ?: androidx.compose.ui.text.font.FontFamily.Default
+            val selected = selectedFontId == spec.id
+            Box(
+                Modifier
+                    .clip(MaterialTheme.shapes.small)
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    .border(
+                        width = if (selected) 2.dp else 0.dp,
+                        color = if (selected) AccentColor else androidx.compose.ui.graphics.Color.Transparent,
+                        shape = MaterialTheme.shapes.small,
+                    )
+                    .let { m ->
+                        if (spec.isUser) {
+                            m.combinedClickable(
+                                onClick = { onSelect(spec.id) },
+                                onLongClick = { onDelete(spec.id) },
+                            )
+                        } else {
+                            m.clickable(onClick = { onSelect(spec.id) })
+                        }
+                    }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    spec.displayName(),
+                    fontFamily = family,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                )
+            }
+        }
+        ImportChip(
+            label = stringResource(R.string.panel_text_font_import),
+            onClick = onImport,
+        )
     }
 }
 

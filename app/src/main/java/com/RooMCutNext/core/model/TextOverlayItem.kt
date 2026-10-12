@@ -16,8 +16,17 @@ data class TextStyleSpec(
     /** Shadow blur radius as a fraction of the font size (0 = no shadow). */
     val shadowRadiusRatio: Float = 0f,
     val bold: Boolean = true,
+    /**
+     * Font id (FontRegistry). "system" = platform default (pre-v1.1 behavior);
+     * "hei"/"song"/"kai"/"duyi"/"kuaile" = bundled; "user:<fileName>" = imported.
+     */
+    val fontId: String = FONT_SYSTEM,
 ) {
     fun withColor(color: Long) = copy(color = color)
+
+    companion object {
+        const val FONT_SYSTEM = "system"
+    }
 }
 
 /**
