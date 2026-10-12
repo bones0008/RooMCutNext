@@ -86,6 +86,26 @@ import java.io.File
  *                       (export multi-input compositing is a supported
  *                       upstream path and does NOT go through
  *                       CompositionPlayer).
+ *
+ *  v1.2.5 — EXPORT TIMING DRIVER. DefaultVideoCompositor (1.11.1, verified
+ *  against the shipped AAR bytecode) derives EVERY output frame timestamp
+ *  from the PRIMARY input — the first registered sequence — and releases
+ *  (drops) secondary frames that fall between primary timestamps
+ *  (releaseExcessFramesInSecondaryStream). The primary is also drawn ON
+ *  TOP (DefaultCompositorGlProgram draws the frame list back-to-front), so
+ *  the v1.2.2 stacking order [PiP..., heads, body] — chosen so the body
+ *  lands at the BOTTOM — silently made a PiP layer the timing driver:
+ *  the export's frame grid followed the PiP asset's own fps/phase, and the
+ *  MAIN video was nearest-sampled down onto it. Field reports on v1.2.3/
+ *  v1.2.4: "PiP plays smooth, the main video underneath stutters, audio
+ *  fine" — exactly that mechanism (audio never touches the compositor).
+ *  Fix: whenever more than one video sequence would exist, a FULL-LENGTH
+ *  fully transparent pad sequence at a frame rate at least as dense as
+ *  EVERY video source is listed FIRST. It becomes the primary: output runs
+ *  on a fixed CFR grid dense enough that nearest-frame sampling never
+ *  skips a source frame (main video smooth again), and because it is drawn
+ *  last but is entirely invisible (AlphaScale 0), the visual stack is
+ *  byte-for-byte unchanged: body < heads < PiPs.
  */
 object CompositionBuilder {
 
@@ -233,8 +253,12 @@ object CompositionBuilder {
         // verified against the shipped bytecode (custom draw order is still
         // a TODO upstream, b/262694346). The stack we need is (bottom -> top):
         //     main body -> crossfade heads -> PiP layers (later = higher)
-        // so the sequences are listed TOP-FIRST:
-        //     [PiP reversed..., transition heads, main body, ... audio lanes]
+        // so the video sequences are listed TOP-FIRST:
+        //     [timing driver (v1.2.5), PiP reversed..., transition heads,
+        //      main body, ... audio lanes]
+        // The timing driver is a transparent CFR pad that occupies the primary
+        // slot (output timestamps + draw-on-top but invisible) — see the
+        // v1.2.5 section of the class doc.
         // Audio lanes carry no video track and never register a compositor
         // input (audio mixing only), so their position is irrelevant — but
         // sequences[0] must be a full-length VIDEO sequence because
@@ -248,21 +272,40 @@ object CompositionBuilder {
         } else {
             // PiP layers — reversed, so the LAST-added layer sits HIGHEST.
             // (Structural: kept even in degraded mode — see buildPipSequence.)
-            if (!stripEffects || project.pips.isNotEmpty()) {
-                project.pips.asReversed().forEach { pip ->
-                    buildPipSequence(project, mediaDir, pip, totalDurationUs)?.let { sequences += it }
+            val pipSequences = if (!stripEffects || project.pips.isNotEmpty()) {
+                project.pips.asReversed().mapNotNull { pip ->
+                    buildPipSequence(project, mediaDir, pip, totalDurationUs)
                 }
+            } else {
+                emptyList()
             }
 
             // Crossfade overlay sequence: fading heads land ABOVE the bodies.
+            var headSequence: EditedMediaItemSequence? = null
             if (transitionItems.isNotEmpty()) {
                 if (totalDurationUs - transitionCursorUs >= MIN_GAP_US) {
                     transitionItems += buildTransparentPadItem(
                         project, mediaDir, totalDurationUs - transitionCursorUs,
                     )
                 }
-                sequences += EditedMediaItemSequence.Builder(transitionItems).build()
+                headSequence = EditedMediaItemSequence.Builder(transitionItems).build()
             }
+
+            // v1.2.5: TIMING DRIVER (see class doc). More than one video
+            // sequence would put a PiP/head layer into the compositor's
+            // primary slot and retime the whole export to ITS frame grid —
+            // the main-video-judder bug. A transparent CFR pad at least as
+            // dense as every source takes that slot instead. Projects with
+            // a single video sequence (no PiP, no transitions) take the
+            // SingleInputVideoGraph path with no compositor at all and are
+            // deliberately left untouched.
+            if (pipSequences.isNotEmpty() || headSequence != null) {
+                buildTimingDriverSequence(
+                    project, mediaDir, totalDurationUs, timingDriverFps(project),
+                )?.let { sequences += it }
+            }
+            sequences += pipSequences
+            headSequence?.let { sequences += it }
         }
 
         // Main body: the BOTTOM visual layer (or the only sequence when no
@@ -560,16 +603,58 @@ object CompositionBuilder {
     }
 
     /**
+     * The export timing driver's CFR frame rate — at least as dense as every
+     * video source in the project (nearest-frame sampling then never skips a
+     * source frame), floored at 30 and capped at 60 (encoder sanity). Pure
+     * function of the model; unit-tested.
+     */
+    fun timingDriverFps(project: Project): Int {
+        var fps = maxOf(project.fps, 30)
+        fun absorb(asset: MediaAsset?) {
+            if (asset != null && !asset.isImage && asset.fps > 0f) {
+                fps = maxOf(fps, kotlin.math.ceil(asset.fps).toInt().coerceAtLeast(1))
+            }
+        }
+        project.clips.forEach { absorb(project.assetById(it.assetId)) }
+        project.pips.forEach { absorb(project.assetById(it.assetId)) }
+        return fps.coerceAtMost(60)
+    }
+
+    /**
+     * v1.2.5: the transparent CFR sequence that occupies compositor slot 0
+     * so the MAIN BODY is never retimed to an overlay layer's frame grid.
+     * One full-length transparent pad at [fps] (see class doc + the pad item
+     * builder). Export-only; the preview path never builds this.
+     */
+    private fun buildTimingDriverSequence(
+        project: Project,
+        mediaDir: File,
+        totalDurationUs: Long,
+        fps: Int,
+    ): EditedMediaItemSequence? {
+        if (totalDurationUs <= 0L) return null
+        return EditedMediaItemSequence.Builder(
+            listOf(buildTransparentPadItem(project, mediaDir, totalDurationUs, fps))
+        ).build()
+    }
+
+    /**
      * Fully transparent still covering [padUs] — the video analog of the
      * audio silence pad, used by the crossfade overlay sequence so its fading
-     * heads land at the right global positions (v1.2.1). Structural like the
+     * heads land at the right global positions (v1.2.1), and by the export
+     * timing driver (v1.2.5). Structural like the
      * PiP pads: its AlphaScale(0)+Presentation stay on even in degraded
      // compatibility preview, otherwise it would flash black.
+     *
+     * @param fps frame rate the image item generates frames at (the timing
+     *   driver needs this ≥ every source fps; pad/heads callers keep the
+     *   project fps default).
      */
     private fun buildTransparentPadItem(
         project: Project,
         mediaDir: File,
         padUs: Long,
+        fps: Int = project.fps.toInt().coerceAtLeast(1),
     ): EditedMediaItem {
         val pad = GeneratedMedia.blackPng(mediaDir, 2, 2)
         val mediaItem = MediaItem.Builder()
@@ -590,7 +675,7 @@ object CompositionBuilder {
                 )
             )
             .setDurationUs(padUs)
-            .setFrameRate(project.fps.toInt().coerceAtLeast(1))
+            .setFrameRate(fps.coerceAtLeast(1))
             .build()
     }
 

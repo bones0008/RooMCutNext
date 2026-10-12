@@ -207,6 +207,10 @@ class EditorViewModel(
         }
         playback.onError = { msg -> _state.update { it.copy(playbackError = msg) } }
         playback.onDiag = { line -> appendDiag(line) }
+        // v1.2.5: overlay-layer events (PiP / crossfade-head player errors,
+        // first-frame milestones, effects→plain fallback) join the same DIAG
+        // stream — silent overlay failures were undiagnosable in the field.
+        overlays.onDiag = { line -> appendDiag(line) }
         playback.onDegraded = {
             _state.update {
                 it.copy(

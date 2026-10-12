@@ -86,7 +86,11 @@ import java.util.concurrent.ConcurrentHashMap
  *  - crossfade AUDIO ramp (clip fadeIn) plays at constant volume;
  *  - text overlays do not render ON the fading head (they render on the
  *    body, which carries them right after the window);
- *  - "save frame" grabs the PlayerView only (PiPs are separate views).
+ *  - "save frame" grabs the PlayerView only (PiPs are separate views);
+ *  - v1.2.5: if this device's effects-playback path stalls on a head (no
+ *    first frame 250ms into the window), heads fall back to a PLAIN player
+ *    for the rest of the session — the fade renders without the clip's
+ *    grading/mosaic for those ≤2s (geometry stays aspect-correct).
  */
 class OverlayPreviewController(private val context: Context) {
 
@@ -97,6 +101,14 @@ class OverlayPreviewController(private val context: Context) {
     private var canvasW = 0
     private var canvasH = 0
 
+    /** Optional diagnostic sink (overlay player events → DIAG overlay). */
+    var onDiag: ((String) -> Unit)? = null
+
+    private fun diag(line: String) {
+        android.util.Log.i("RooMCutNextOverlay", "DIAG $line")
+        onDiag?.invoke(line)
+    }
+
     /** Re-seek an overlay player only when its drift exceeds this. */
     private val seekDriftThresholdUs = 120_000L
 
@@ -105,6 +117,11 @@ class OverlayPreviewController(private val context: Context) {
 
     /** Mount a head this far BEFORE its window so it is ready to fade in. */
     private val headPrerollUs = 400_000L
+
+    /** v1.2.5: grace before an effects-bearing head that STILL hasn't
+     * rendered falls back to a plain (effect-less) player — see
+     * headEffectsFallback. */
+    private val headEffectsGraceUs = 250_000L
 
     /** One record per PiP layer (video → TextureView+player, image → ImageView). */
     private class PipOverlay {
@@ -134,6 +151,22 @@ class OverlayPreviewController(private val context: Context) {
     private var headEffectsSig = 0
     private var headFirstFrame = false
     private var headContentAspect = 1f
+
+    /** v1.2.5: the mounted head player currently carries clipLookEffects. */
+    private var headEffectsActive = false
+
+    /**
+     * v1.2.5: set when an effects-bearing head fails to render within the
+     * grace window — the DEVICE's effects playback path (ExoPlayer
+     * setVideoEffects → PlaybackVideoGraphWrapper) is then treated as
+     * broken for the session and every head rebuilds as a plain player
+     * (like the proven PiP path). Sticky: one failed attempt costs one
+     * broken transition window, so it is not retried per head.
+     */
+    private var headEffectsFallback = false
+
+    /** Set by driveHead to force reconcileHead to rebuild the head player. */
+    private var headNeedsRebuild = false
 
     /** Alpha to apply when the head's first frame renders (see PipOverlay.targetAlpha). */
     private var headTargetAlpha = 0f
@@ -326,6 +359,13 @@ class OverlayPreviewController(private val context: Context) {
                     overlay.firstFrameRendered = true
                     tv.post { if (tv.isAttachedToWindow) tv.alpha = overlay.targetAlpha }
                 }
+
+                // v1.2.5: overlay players used to fail SILENTLY (no error
+                // listener) — an invisible layer with no hint why. Surface
+                // it in the DIAG overlay so field reports are diagnosable.
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    diag("pip ERR ${error.errorCodeName}: ${(error.message ?: "").take(60)}")
+                }
             })
             overlay.player = player
             preparePipPlayer(player, asset, file, pip)
@@ -413,7 +453,13 @@ class OverlayPreviewController(private val context: Context) {
             return
         }
         overlay.targetAlpha = pip.opacity.coerceIn(0f, 1f)
-        val desired = if (overlay.firstFrameRendered) overlay.targetAlpha else 0f
+        // v1.2.5: alpha follows the layer opacity DIRECTLY — no first-frame
+        // gate. A TextureView with setOpaque(false) composites as fully
+        // transparent until its first buffer arrives, so raising alpha early
+        // is visually identical to staying hidden but can never DEADLOCK on
+        // a late/missing first frame (the old `if (firstFrameRendered)` gate
+        // was one missed callback away from an invisible layer).
+        val desired = overlay.targetAlpha
         if (tv.alpha != desired) tv.alpha = desired
 
         // Drift-corrected follow. STATE_ENDED is deliberately NOT seeked: the
@@ -471,8 +517,9 @@ class OverlayPreviewController(private val context: Context) {
 
         // Mounted and unchanged → nothing to do: no File allocation, no
         // exists() stat syscall on this ~30Hz hot path (v1.2.4).
+        // v1.2.5: headNeedsRebuild forces a rebuild (effects→plain fallback).
         val effectsSig = project.clips.firstOrNull { it.id == active.clipId }?.lookSignature() ?: 0
-        if (headSpec == active && headEffectsSig == effectsSig &&
+        if (!headNeedsRebuild && headSpec == active && headEffectsSig == effectsSig &&
             (headPlayer != null || headImageView != null)
         ) {
             return
@@ -486,6 +533,7 @@ class OverlayPreviewController(private val context: Context) {
         if (headPlayer != null || headImageView != null) {
             releaseHeadPlayer()
         }
+        headNeedsRebuild = false
 
         headSpec = active
         headEffectsSig = effectsSig
@@ -515,13 +563,31 @@ class OverlayPreviewController(private val context: Context) {
             player.addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() {
                     headFirstFrame = true
+                    diag("head firstframe ✓")
                     tv.post { if (tv.isAttachedToWindow) tv.alpha = headTargetAlpha }
+                }
+
+                // v1.2.5: silent failures made transitions invisible with no
+                // trace — surface overlay-player errors in the DIAG overlay.
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    diag("head ERR ${error.errorCodeName}: ${(error.message ?: "").take(60)}")
                 }
             })
             // Look effects (rotate/flip, crop, grading, LUT, mosaic) — the
             // same list the composition's head item carries. Positioning
             // is the TextureView's job (canvas-fit of the content aspect).
-            val effects: List<Effect> = CompositionBuilder.clipLookEffects(clip, stripEffects = false)
+            //
+            // v1.2.5: once the device's effects-playback path (setVideoEffects
+            // → PlaybackVideoGraphWrapper) has proven unable to render a head
+            // in time, heads rebuild PLAIN — byte-for-byte the proven PiP
+            // player path — so a transition never stays invisible for a
+            // cosmetic grading pass. See headEffectsFallback.
+            val effects: List<Effect> = if (headEffectsFallback) {
+                emptyList()
+            } else {
+                CompositionBuilder.clipLookEffects(clip, stripEffects = false)
+            }
+            headEffectsActive = effects.isNotEmpty()
             if (effects.isNotEmpty()) runCatching { player.setVideoEffects(effects) }
             if (active.speed != 1f) player.setPlaybackSpeed(active.speed)
             player.volume = if (active.muted) 0f else active.volume.coerceIn(0f, 1f)
@@ -574,16 +640,34 @@ class OverlayPreviewController(private val context: Context) {
             headFirstFrame = false
             return
         }
+        // v1.2.5: effects-grace fallback. If an effects-bearing head has not
+        // rendered ANY frame a quarter-second into its window, the device's
+        // effects playback path is stalled — mark it broken and rebuild the
+        // player plain (reconcileHead rebuilds on the next sync tick).
+        if (headEffectsActive && !headFirstFrame && !headEffectsFallback &&
+            localUs > headEffectsGraceUs
+        ) {
+            headEffectsFallback = true
+            headNeedsRebuild = true
+            diag("head effects→plain (no first frame ${localUs / 1000}ms in)")
+        }
         headTargetAlpha = ramp
-        val desired = if (headFirstFrame) ramp else 0f
-        if (tv.alpha != desired) tv.alpha = desired
+        // v1.2.5: alpha follows the ramp DIRECTLY — no first-frame gate (same
+        // reasoning as drivePip: an unrendered TextureView is transparent, so
+        // the fade can never deadlock on a missing first-frame callback).
+        if (tv.alpha != ramp) tv.alpha = ramp
 
+        // v1.2.5: position math now SPEED-AWARE. The clipped player advances
+        // at spec.speed × wall time while the playhead advances 1×, so the
+        // expected position at local time [localUs] is localUs × speed. The
+        // old unscaled math made every sped-up head re-seek every 120ms.
         if (player.playbackState != Player.STATE_ENDED) {
+            val expectedPosUs = (localUs * spec.speed).toLong()
             val posUs = player.currentPosition * 1000L
-            val drift = localUs - posUs
+            val drift = expectedPosUs - posUs
             val threshold = if (isPlaying) seekDriftThresholdUs else scrubDriftThresholdUs
             if (kotlin.math.abs(drift) > threshold) {
-                runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
+                runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
             }
         }
         if (isPlaying && !player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
