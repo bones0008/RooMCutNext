@@ -113,8 +113,12 @@ object CompositionBuilder {
 
     data class BuildResult(val composition: Composition, val skippedClipIds: List<String>)
 
-    /** Max overlays per OverlayEffect (shader sampler limit is 15; stay safe). */
-    private const val MAX_OVERLAYS_PER_EFFECT = 12
+    /**
+     * Max overlays per OverlayEffect (shader sampler limit is 15; stay safe).
+     * v1.2.10: public — the preview head player (OverlayPreviewController)
+     * bakes the same texts into its effect chain and must chunk identically.
+     */
+    const val MAX_OVERLAYS_PER_EFFECT = 12
 
     /** Gaps below this are treated as adjacent (no silence padding item). */
     private const val MIN_GAP_US = 20_000L

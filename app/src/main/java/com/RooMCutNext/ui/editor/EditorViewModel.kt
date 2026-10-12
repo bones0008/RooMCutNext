@@ -69,6 +69,13 @@ data class EditorUiState(
     val selectedPipId: String? = null,
     val playheadUs: Long = 0L,
     val isPlaying: Boolean = false,
+    /**
+     * v1.2.10: PLAY INTENT (the player's playWhenReady) — unlike
+     * [isPlaying] it does NOT flicker false while the player buffers across
+     * an item boundary. Drives the overlay engine (crossfade fade-out tail
+     * + overlay play/pause) and the transport icon.
+     */
+    val wantsPlay: Boolean = false,
     val pxPerSecond: Float = 64f,
     val activePanel: PanelKind? = null,
     val importing: ImportingState? = null,
@@ -201,8 +208,13 @@ class EditorViewModel(
         playback.onIsPlaying = { playing ->
             _state.update { it.copy(isPlaying = playing) }
         }
+        // v1.2.10: play INTENT echo — see EditorUiState.wantsPlay. Wired from
+        // onPlayWhenReadyChanged so it only moves on real transport changes.
+        playback.onWantsPlay = { wanted ->
+            _state.update { it.copy(wantsPlay = wanted) }
+        }
         playback.onEnded = {
-            _state.update { it.copy(isPlaying = false, playheadUs = it.project.totalDurationUs) }
+            _state.update { it.copy(isPlaying = false, wantsPlay = false, playheadUs = it.project.totalDurationUs) }
             playback.pause()
         }
         playback.onError = { msg -> _state.update { it.copy(playbackError = msg) } }
@@ -231,7 +243,12 @@ class EditorViewModel(
         // the engine may touch views and players directly.
         viewModelScope.launch {
             state.collect { s ->
-                overlays.sync(s.project, repo.mediaDir(s.project.id), s.playheadUs, s.isPlaying)
+                // v1.2.10: PLAY INTENT, not actual-isPlaying — the body
+                // player's isPlaying flickers false for the BUFFERING blip at
+                // every item boundary, which used to disengage the crossfade
+                // fade-out tail at the exact moment it was needed (the exit
+                // flash) and pause/resume-cycle every overlay player.
+                overlays.sync(s.project, repo.mediaDir(s.project.id), s.playheadUs, s.wantsPlay)
             }
         }
 
@@ -1274,7 +1291,11 @@ class EditorViewModel(
     fun togglePlay() {
         val s = _state.value
         if (!s.project.hasContent) return
-        if (s.isPlaying) {
+        // v1.2.10: decide on PLAY INTENT — actual-isPlaying blips false at
+        // item boundaries, which would have made the button re-issue play()
+        // mid-playback (a no-op, but it also skipped the pause the user
+        // asked for when tapped exactly during a blip).
+        if (s.wantsPlay) {
             playback.pause()
         } else {
             if (s.playheadUs >= s.project.totalDurationUs) {

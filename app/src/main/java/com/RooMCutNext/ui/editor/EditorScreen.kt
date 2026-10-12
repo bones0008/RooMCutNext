@@ -659,8 +659,11 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        stringResource(if (state.isPlaying) R.string.pause else R.string.play),
+                        // v1.2.10: play INTENT, not actual-isPlaying — the
+                        // player's isPlaying blips false at every clip
+                        // boundary (BUFFERING), which blinked the icon.
+                        if (state.wantsPlay) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        stringResource(if (state.wantsPlay) R.string.pause else R.string.play),
                         tint = MaterialTheme.colorScheme.primaryContainer,
                         modifier = Modifier.size(34.dp),
                     )

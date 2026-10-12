@@ -58,6 +58,17 @@ class PlaybackController(
     /** µs position of the preview, polled at ~33Hz. */
     var onPositionUs: ((Long) -> Unit)? = null
     var onIsPlaying: ((Boolean) -> Unit)? = null
+
+    /**
+     * v1.2.10: PLAY INTENT (the player's playWhenReady), echoed from
+     * onPlayWhenReadyChanged. Unlike [onIsPlaying] this does NOT flicker to
+     * false while the player buffers across an item boundary — which is
+     * exactly when the overlay engine's crossfade fade-out tail must stay
+     * engaged (see the v1.2.10 note in OverlayPreviewController). The
+     * transport icon also prefers it so the button does not blink at every
+     * clip boundary during playback.
+     */
+    var onWantsPlay: ((Boolean) -> Unit)? = null
     var onEnded: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
 
@@ -127,6 +138,7 @@ class PlaybackController(
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
             diag("pwr=$playWhenReady")
+            onWantsPlay?.invoke(playWhenReady)
         }
 
         override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {

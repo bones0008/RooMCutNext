@@ -11,12 +11,16 @@ import android.widget.ImageView
 import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.effect.OverlayEffect
+import androidx.media3.effect.Presentation
 import androidx.media3.exoplayer.ExoPlayer
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.Project
+import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.export.CompositionBuilder
+import com.RooMCutNext.export.effects.TimedTextOverlay
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -84,8 +88,9 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Known preview approximations (documented, deliberate):
  *  - crossfade AUDIO ramp (clip fadeIn) plays at constant volume;
- *  - text overlays do not render ON the fading head (they render on the
- *    body, which carries them right after the window);
+ *  - v1.2.10: text overlays DO render on the fading head now (see the
+ *    v1.2.10 note below) — the remaining approximation is IMAGE heads (a
+ *    fading still has no effects pipeline): text still dips there;
  *  - "save frame" grabs the PlayerView only (PiPs are separate views);
  *  - v1.2.5→v1.2.8: if this device's effects-playback path stalls on a head
  *    (no first frame 450ms after MOUNT — typically still preroll, where the
@@ -100,6 +105,38 @@ import java.util.concurrent.ConcurrentHashMap
  *    at the crossing takes longer than that, the outgoing clip's last frame
  *    leaked through full-screen for a few frames after the tail expired —
  *    "the first clip's picture flashes once right after the transition".)
+ *
+ *  v1.2.10 — three preview defects fixed in this controller:
+ *
+ *  1. TEXT FADED WITH THE TRANSITION. Text overlays render as GL effects
+ *     baked into the BODY composition, so the fading head COVERED the text
+ *     during the window — "the transition fades my text away too", while
+ *     the export (which bakes the same texts into the head ITEM as well:
+ *     two identical copies crossfading at the same spot compose to CONSTANT
+ *     visibility, head*alpha + body*(1-alpha) = text) was correct. The head
+ *     PLAYER now bakes the same TimedTextOverlay effects, with windows
+ *     mapped into its LOCAL position space (HeadTextWindows — plain-ExoPlayer
+ *     effect timestamps are player positions, verified against media3 1.11.1
+ *     source) plus the canvas Presentation first when the source aspect
+ *     differs, mirroring CompositionBuilder.buildClipItem's chain order.
+ *
+ *  2. EXIT FLASH SURVIVED THE TAIL. The tail engages on isPlaying — but at
+ *     the item boundary the CompositionPlayer briefly drops to BUFFERING and
+ *     reports isPlaying=false at the EXACT instant the tail is needed: the
+ *     tail disengaged, the head vanished in one tick over the body still
+ *     showing the outgoing clip's last frame — the flash the tail existed to
+ *     prevent (it was dead code for its own target scenario). sync() now
+ *     receives PLAY INTENT (playWhenReady, stable across buffering) instead
+ *     of the flickering actual-isPlaying — and because the position poll
+ *     freezes with the stalled body, the playhead freezes mid-tail and the
+ *     head holds its coverage until the crossing actually completes.
+ *
+ *  3. STILL-CHOPPY HEAD + CHOPPY AUDIO-BEARING PiPs. Both were corrective-seek
+ *     cycles below their thresholds (see the v1.2.10 notes in driveHead and
+ *     drivePip): any (re)start latency the threshold can't absorb re-arms the
+ *     cooldown-gated seek forever — the metronome. Head hard-realign is now
+ *     1.5s (beyond any decoder/effects spin-up), and drivePip got the same
+ *     discipline v1.2.9 gave driveHead (400ms + cooldown while playing).
  */
 class OverlayPreviewController(private val context: Context) {
 
@@ -118,8 +155,15 @@ class OverlayPreviewController(private val context: Context) {
         onDiag?.invoke(line)
     }
 
-    /** Re-seek an overlay player only when its drift exceeds this. */
-    private val seekDriftThresholdUs = 120_000L
+    /**
+     * v1.2.10: drift big enough to hard-realign a PLAYING PiP player
+     * (cooldown-gated). While playing, a constant sub-400ms lag is
+     * deliberately left alone — see the v1.2.10 note in drivePip.
+     */
+    private val pipHardRealignDriftUs = 400_000L
+
+    /** v1.2.10: cooldown between hard-realign seeks of a PLAYING PiP player. */
+    private val pipCorrectiveSeekCooldownMs = 500L
 
     /** Minimum drift to seek a PAUSED overlay (scrubbing) — under a frame. */
     private val scrubDriftThresholdUs = 20_000L
@@ -165,10 +209,22 @@ class OverlayPreviewController(private val context: Context) {
      */
     private val headCorrectiveSeekCooldownMs = 500L
 
-    /** v1.2.9: drift big enough to hard-realign a PLAYING head (cooldown
-     * aside). Below this a constant lag is deliberately left alone — see
-     * the v1.2.9 note in driveHead. */
-    private val headHardRealignDriftUs = 400_000L
+    /**
+     * v1.2.9→v1.2.10: drift big enough to hard-realign a PLAYING head
+     * (cooldown aside). Below this a constant lag is deliberately left
+     * alone — see the v1.2.9 note in driveHead.
+     *
+     * v1.2.10: 400ms → 1.5s. v1.2.9's 400ms was still INSIDE the (re)start
+     * latency range of heavy sources (a 4K clip's decoder + effects-graph
+     * spin-up can exceed 400ms), so on those devices the cooldown-gated
+     * hard-realign re-armed on every cooldown expiry — the 500ms seek
+     * metronome SURVIVED the v1.2.9 fix ("the transition is still choppy").
+     * Every seek re-opens the same start latency, so any threshold a restart
+     * can exceed never settles; 1.5s is beyond any realistic spin-up, while
+     * a genuinely broken alignment (a mid-window USER seek, seconds off)
+     * still realigns — exactly once, and then stays settled.
+     */
+    private val headHardRealignDriftUs = 1_500_000L
 
     /**
      * v1.2.8: wall-clock grace before an effects-bearing head that STILL
@@ -194,6 +250,10 @@ class OverlayPreviewController(private val context: Context) {
         /** v1.2.7: source span the player is clipped to (window-relative) —
          * an ENDED player only stays held while the playhead is past this. */
         var sourceSpanUs = Long.MAX_VALUE
+
+        /** v1.2.10: uptime millis of the last hard-realign seek of this
+         * player (see pipCorrectiveSeekCooldownMs). */
+        var lastCorrectiveSeekMs = 0L
 
         var firstFrameRendered = false
 
@@ -556,9 +616,33 @@ class OverlayPreviewController(private val context: Context) {
             Player.STATE_READY -> {
                 val posUs = player.currentPosition * 1000L
                 val drift = localUs - posUs
-                val threshold = if (isPlaying) seekDriftThresholdUs else scrubDriftThresholdUs
-                if (kotlin.math.abs(drift) > threshold) {
-                    runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
+                // v1.2.10 — WHILE PLAYING, moderate drift is DELIBERATELY LEFT
+                // ALONE (the same discipline driveHead got in v1.2.9). The old
+                // blanket 120ms rule seek-stormed any PiP whose source file
+                // carries an AUDIO track: ExoPlayer paces video on the audio
+                // clock, and the track opens with a ~100-250ms start latency
+                // during which the reported position FREEZES — the drift sat
+                // permanently above 120ms, every corrective seek re-opened the
+                // audio pipeline and re-incurred the lag, and the cycle
+                // repeated every few hundred ms (seek → decoder flush +
+                // keyframe re-decode → visible hiccup): "the PiP's video is
+                // choppy whenever the source has audio". A silent file opens
+                // no audio track, never crossed the threshold and played
+                // smooth — exactly the split field reports showed. A constant
+                // sub-400ms lag of PiP content has no visual reference; only
+                // genuinely broken alignment (> [pipHardRealignDriftUs], e.g.
+                // a seek landing mid-window) hard-realigns now, cooldown-gated.
+                // Paused (scrub) tracking keeps the tight sub-frame behavior.
+                if (!isPlaying) {
+                    if (kotlin.math.abs(drift) > scrubDriftThresholdUs) {
+                        runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
+                    }
+                } else if (kotlin.math.abs(drift) > pipHardRealignDriftUs) {
+                    val nowMs = android.os.SystemClock.uptimeMillis()
+                    if (nowMs - overlay.lastCorrectiveSeekMs >= pipCorrectiveSeekCooldownMs) {
+                        runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
+                        overlay.lastCorrectiveSeekMs = nowMs
+                    }
                 }
             }
             Player.STATE_ENDED -> {
@@ -626,7 +710,10 @@ class OverlayPreviewController(private val context: Context) {
         // Mounted and unchanged → nothing to do: no File allocation, no
         // exists() stat syscall on this ~30Hz hot path (v1.2.4).
         // v1.2.5: headNeedsRebuild forces a rebuild (effects→plain fallback).
-        val effectsSig = project.clips.firstOrNull { it.id == active.clipId }?.lookSignature() ?: 0
+        // v1.2.10: the signature also covers the texts overlapping the
+        // window — editing a text while the head is mounted now rebuilds the
+        // player so the baked text overlay follows (see headTextEffectsFor).
+        val effectsSig = headEffectsSignature(project, active)
         if (!headNeedsRebuild && headSpec == active && headEffectsSig == effectsSig &&
             (headPlayer != null || headImageView != null)
         ) {
@@ -647,7 +734,23 @@ class OverlayPreviewController(private val context: Context) {
         headEffectsSig = effectsSig
         headFirstFrame = false
         headTargetAlpha = 0f
-        headContentAspect = contentAspectOf(clip, asset)
+        // v1.2.10: TEXT ON THE HEAD + canvas Presentation — see the class doc.
+        // The same texts the export bakes into the head ITEM are baked into
+        // the head PLAYER here (local windows, HeadTextWindows), preceded by
+        // the canvas-fit Presentation when the source aspect differs so the
+        // overlay canvas maps to the project canvas — the exact effect-chain
+        // order CompositionBuilder.buildClipItem uses for head/body items.
+        // With the Presentation in the chain the head's OUTPUT frame is
+        // canvas-sized, so the view must fill the whole canvas rect instead
+        // of the content-aspect fit rect.
+        val textEffects: List<Effect> = headTextEffectsFor(project, active, asset)
+        val canvasPresentationInChain = textEffects.isNotEmpty() &&
+            headNeedsCanvasPresentation(project, clip, asset)
+        headContentAspect = if (canvasPresentationInChain) {
+            project.width.toFloat() / project.height
+        } else {
+            contentAspectOf(clip, asset)
+        }
         // v1.2.8: anchor the effects-fallback grace to MOUNT time (wall
         // clock) — see headEffectsGraceWallMs.
         headMountedAtMs = android.os.SystemClock.uptimeMillis()
@@ -694,10 +797,25 @@ class OverlayPreviewController(private val context: Context) {
             // in time, heads rebuild PLAIN — byte-for-byte the proven PiP
             // player path — so a transition never stays invisible for a
             // cosmetic grading pass. See headEffectsFallback.
-            val effects: List<Effect> = if (headEffectsFallback) {
+            //
+            // v1.2.10: + the overlapping texts (local windows) and, when
+            // needed, the canvas Presentation ahead of them — chain order
+            // mirrors buildClipItem: look → canvas fit → text.
+            val lookEffects: List<Effect> = if (headEffectsFallback) {
                 emptyList()
             } else {
                 CompositionBuilder.clipLookEffects(clip, stripEffects = false)
+            }
+            val effects: List<Effect> = buildList {
+                addAll(lookEffects)
+                if (canvasPresentationInChain) {
+                    add(
+                        Presentation.createForWidthAndHeight(
+                            project.width, project.height, Presentation.LAYOUT_SCALE_TO_FIT,
+                        )
+                    )
+                }
+                addAll(textEffects)
             }
             headEffectsActive = effects.isNotEmpty()
             if (effects.isNotEmpty()) runCatching { player.setVideoEffects(effects) }
@@ -720,6 +838,89 @@ class OverlayPreviewController(private val context: Context) {
             headIsImage = false
             host.addView(tv, 0)
         }
+    }
+
+    // ------------------------------------------------------------------
+    // v1.2.10: head text baking (pure helpers)
+    // ------------------------------------------------------------------
+
+    /**
+     * The TimedTextOverlay effects for a head window — the preview half of
+     * the export's "bake the text into the head item too" behavior (see the
+     * class doc). Windows are mapped into the head player's LOCAL position
+     * space via [HeadTextWindows]: a plain ExoPlayer's GL effects receive
+     * PLAYER-POSITION timestamps (media3 1.11.1, source-verified), while the
+     * composition path the body uses receives GLOBAL timestamps — the mapping
+     * bridges the two.
+     *
+     * Empty when the device's effects path already fell back to plain
+     * players ([headEffectsFallback]) or the head is an image (a fading
+     * still has no effects pipeline — text dips on image-head transitions,
+     * documented approximation).
+     */
+    private fun headTextEffectsFor(
+        project: Project,
+        active: CompositionBuilder.HeadOverlaySpec,
+        asset: MediaAsset,
+    ): List<Effect> {
+        if (headEffectsFallback || asset.isImage) return emptyList()
+        val spanUs = (active.sourceOutUs - active.sourceInUs).coerceAtLeast(1L)
+        val overlays = overlappingHeadTexts(project, active).mapNotNull { text ->
+            HeadTextWindows.localWindowUs(
+                textStartUs = text.startUs,
+                textEndUs = text.endUs,
+                windowStartUs = active.startUs,
+                windowDurationUs = active.durationUs,
+                speed = active.speed,
+                sourceSpanUs = spanUs,
+            )?.let { local ->
+                TimedTextOverlay(
+                    item = text,
+                    windowStartUs = local.startUs,
+                    windowEndUs = local.endUs,
+                )
+            }
+        }
+        // Same shader-sampler cap the composition path uses.
+        return overlays.chunked(CompositionBuilder.MAX_OVERLAYS_PER_EFFECT)
+            .map { chunk -> OverlayEffect(chunk) }
+    }
+
+    /** Texts whose global windows intersect a head's window, start-ordered. */
+    private fun overlappingHeadTexts(
+        project: Project,
+        active: CompositionBuilder.HeadOverlaySpec,
+    ): List<TextOverlayItem> =
+        project.texts
+            .filter { it.startUs < active.startUs + active.durationUs && it.endUs > active.startUs }
+            .sortedBy { it.startUs }
+
+    /**
+     * Whether the head's effect chain needs the canvas-fit Presentation in
+     * front of its text overlays — the same aspect-delta condition
+     * CompositionBuilder.buildClipItem applies (look effects run in SOURCE
+     * space; text is positioned in CANVAS space, so a differing aspect needs
+     * the Presentation to bridge them).
+     */
+    private fun headNeedsCanvasPresentation(project: Project, clip: Clip, asset: MediaAsset): Boolean {
+        if (asset.width <= 0 || asset.height <= 0) return false
+        val rotatedQuarter = clip.rotationDeg == 90 || clip.rotationDeg == 270
+        val srcW = if (rotatedQuarter) asset.height else asset.width
+        val srcH = if (rotatedQuarter) asset.width else asset.height
+        val aspectDelta = kotlin.math.abs(
+            srcW.toDouble() / srcH - project.width.toDouble() / project.height,
+        )
+        return aspectDelta > 1e-4
+    }
+
+    /**
+     * Mount signature of the head's effect chain: the clip's look effects
+     * (as before) plus the texts overlapping the window, so editing either
+     * while mounted triggers a rebuild.
+     */
+    private fun headEffectsSignature(project: Project, active: CompositionBuilder.HeadOverlaySpec): Int {
+        val lookSig = project.clips.firstOrNull { it.id == active.clipId }?.lookSignature() ?: 0
+        return 31 * lookSig + overlappingHeadTexts(project, active).hashCode()
     }
 
     private fun driveHead(playheadUs: Long, isPlaying: Boolean) {
