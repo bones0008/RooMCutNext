@@ -377,7 +377,7 @@ class PlaybackController(
     /**
      * Enter Media3 scrubbing mode for interactive playhead dragging: video
      * frames are released immediately (no vsync alignment), audio is parked,
-     * and playWhenReady is automatically restored on [endScrub].
+     * and playWhenReady is retained (playback merely SUPPRESSED).
      */
     fun beginScrub() {
         if (scrubbing) return
@@ -389,6 +389,19 @@ class PlaybackController(
         }
     }
 
+    /**
+     * Exit Media3 scrubbing mode.
+     *
+     * v1.2.6: releasing a playhead drag now PAUSES instead of resuming.
+     * ExoPlayerImpl.setScrubbingModeEnabled(false) only lifts the playback
+     * suppression (reason 4) while playWhenReady is still true — i.e. audio
+     * instantly came back after the finger lifted, which is why "dragging
+     * the timeline during playback kept playing on release". Editing-app
+     * expectation is "drag = park the playhead here"; pressing play again
+     * is the explicit intent to resume. The pause AFTER disabling scrub
+     * mode is the order that wins: playWhenReady=false is already set when
+     * the suppression lifts.
+     */
     fun endScrub() {
         if (!scrubbing) return
         scrubbing = false
@@ -400,6 +413,7 @@ class PlaybackController(
         } catch (e: Exception) {
             Log.w(TAG, "setScrubbingModeEnabled(false) failed", e)
         }
+        player?.pause()
     }
 
     /** Immediate (non-throttled) seek: frame-step, go-to-start/end, taps. */

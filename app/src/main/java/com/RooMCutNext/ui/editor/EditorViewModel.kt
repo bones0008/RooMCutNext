@@ -1305,7 +1305,10 @@ class EditorViewModel(
         playback.beginScrub()
     }
 
-    /** Scrubbing off; restores the pre-drag play/pause state. */
+    /**
+     * Scrubbing off. v1.2.6: playback stays PAUSED after a timeline drag
+     * (user request) — see PlaybackController.endScrub.
+     */
     fun endScrub() {
         scrubbingByTouch = false
         playback.endScrub()
@@ -1412,6 +1415,25 @@ class EditorViewModel(
     }
 
     override fun onCleared() {
+        // v1.2.6: the editor's ViewModel store is now scoped to the editor
+        // screen (AppRoot.EditorStoreOwner), so onCleared() actually runs
+        // when the user returns to the project list — that is what stops
+        // the background playback. An in-progress voiceover take must not
+        // leave the MIC open in the background either: discard it
+        // synchronously (the async save path in stopVoiceover() cannot run
+        // from here — viewModelScope is already cancelled by the time
+        // onCleared() executes).
+        voiceRecorder?.let { rec ->
+            voiceRecorder = null
+            voiceoverJob?.cancel()
+            voiceoverJob = null
+            runCatching { rec.stop() } // releases the mic; deletes invalid partials
+            // A "valid" take cannot be inserted as an AudioClip without the
+            // cancelled scope, so drop its file too instead of orphaning it
+            // in the project media dir.
+            voiceoverFile?.let { f -> runCatching { f.delete() } }
+            voiceoverFile = null
+        }
         saveNow()
         overlays.release()
         playback.release()

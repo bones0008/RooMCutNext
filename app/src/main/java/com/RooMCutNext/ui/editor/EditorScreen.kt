@@ -225,6 +225,12 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            // v1.2.6: the editor UI going away must never leave audio running
+            // in the background. AppRoot clears the editor-scoped ViewModel
+            // store right after this (which releases the player entirely);
+            // pausing here first also covers any future host that embeds this
+            // screen without that store teardown.
+            vm.playback.pause()
             vm.saveNow()
         }
     }
