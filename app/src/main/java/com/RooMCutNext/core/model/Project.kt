@@ -12,6 +12,7 @@ import kotlinx.serialization.Serializable
  *  - [clips]: video/image clips with optional leading gaps ([Clip.gapBeforeUs]).
  *  - [texts]: text overlays, independent layer anchored to the timeline.
  *  - [audios]: audio clips, independent layer anchored to the timeline.
+ *  - [pips]: picture-in-picture layers (v1.2), independent overlay layer.
  */
 @Serializable
 data class Project(
@@ -26,6 +27,7 @@ data class Project(
     val clips: List<Clip> = emptyList(),
     val texts: List<TextOverlayItem> = emptyList(),
     val audios: List<AudioClip> = emptyList(),
+    val pips: List<PipLayer> = emptyList(),
     val createdAtMs: Long = 0L,
     val updatedAtMs: Long = 0L,
     val schemaVersion: Int = 2,
@@ -33,19 +35,22 @@ data class Project(
     /** Video track duration (gaps + clips). */
     val clipsDurationUs: Long get() = clips.fold(0L) { acc, c -> acc + c.gapBeforeUs + c.durationUs }
 
-    /** Total timeline duration: the longest of video, texts and audio. */
+    /** Total timeline duration: the longest of video, texts, audio and PiP. */
     val totalDurationUs: Long get() = maxOf(
         clipsDurationUs,
         texts.maxOfOrNull { it.endUs } ?: 0L,
         audios.maxOfOrNull { it.endUs } ?: 0L,
+        pips.maxOfOrNull { it.endUs } ?: 0L,
     )
 
-    val hasContent: Boolean get() = clips.isNotEmpty() || texts.isNotEmpty() || audios.isNotEmpty()
+    val hasContent: Boolean get() =
+        clips.isNotEmpty() || texts.isNotEmpty() || audios.isNotEmpty() || pips.isNotEmpty()
 
     fun assetById(id: String): MediaAsset? = assets.firstOrNull { it.id == id }
     fun clipById(id: String): Clip? = clips.firstOrNull { it.id == id }
     fun textById(id: String): TextOverlayItem? = texts.firstOrNull { it.id == id }
     fun audioById(id: String): AudioClip? = audios.firstOrNull { it.id == id }
+    fun pipById(id: String): PipLayer? = pips.firstOrNull { it.id == id }
 
     /** Frame duration of the project timeline grid. */
     val frameDurationUs: Long get() = 1_000_000L / fps

@@ -484,6 +484,9 @@ private fun ImportChip(label: String, onClick: () -> Unit) {
 private fun formatSigned(v: Float): String =
     if (kotlin.math.abs(v) < 0.005f) "0" else "%+.2f".format(v)
 
+/** PiP / sticker accent (matches the timeline lane color). */
+private val PipColor = androidx.compose.ui.graphics.Color(0xFF64B5F6)
+
 /** mm:ss for the live voiceover clock (rolls over to h:mm:ss past an hour). */
 private fun formatElapsedMs(ms: Long): String {
     val total = ms / 1000
@@ -697,6 +700,136 @@ private fun FontChipRow(
             onClick = onImport,
         )
     }
+}
+
+// ===========================================================================
+// Picture-in-picture / sticker (v1.2)
+// ===========================================================================
+
+@Composable
+fun PipSheet(vm: EditorViewModel, state: EditorUiState) {
+    SheetTitle(stringResource(R.string.panel_pip_title))
+    val pip = state.selectedPip
+    if (pip == null) {
+        // No layer selected: pick a project asset to insert at the playhead.
+        // Transparent PNGs inserted here ARE stickers.
+        Text(
+            stringResource(R.string.panel_pip_pick_hint),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+        )
+        val candidates = state.project.assets.filter { !it.isAudio }
+        if (candidates.isEmpty()) {
+            Text(
+                stringResource(R.string.panel_pip_no_assets),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            )
+        } else {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                candidates.forEach { asset ->
+                    Column(
+                        Modifier
+                            .width(84.dp)
+                            .clip(MaterialTheme.shapes.small)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable { vm.addPipAtPlayhead(asset.id) }
+                            .padding(6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        val thumbs = remember(asset.id) {
+                            vm.thumbnails.peek(asset.id)
+                        }
+                        val thumb = thumbs?.firstOrNull()
+                        if (thumb != null) {
+                            androidx.compose.foundation.Image(
+                                bitmap = thumb,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(40.dp)
+                                    .clip(MaterialTheme.shapes.extraSmall),
+                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            )
+                        } else {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(40.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    if (asset.isImage) "图" else "视频",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = PipColor,
+                                )
+                            }
+                        }
+                        Text(
+                            asset.displayName,
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 3.dp),
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        return
+    }
+
+    // Selected layer: geometry + opacity + delete.
+    LabeledSlider(
+        label = stringResource(R.string.panel_pip_position_x),
+        value = pip.xRatio,
+        valueRange = 0.05f..0.95f,
+        valueLabel = "${(pip.xRatio * 100).toInt()}%",
+        onValueChange = { vm.updatePip(pip.copy(xRatio = it), commit = false) },
+        onValueChangeFinished = { vm.updatePip(pip) },
+    )
+    LabeledSlider(
+        label = stringResource(R.string.panel_pip_position_y),
+        value = pip.yRatio,
+        valueRange = 0.05f..0.95f,
+        valueLabel = "${(pip.yRatio * 100).toInt()}%",
+        onValueChange = { vm.updatePip(pip.copy(yRatio = it), commit = false) },
+        onValueChangeFinished = { vm.updatePip(pip) },
+    )
+    LabeledSlider(
+        label = stringResource(R.string.panel_pip_size),
+        value = pip.scale,
+        valueRange = 0.1f..1f,
+        valueLabel = "${(pip.scale * 100).toInt()}%",
+        onValueChange = { vm.updatePip(pip.copy(scale = it), commit = false) },
+        onValueChangeFinished = { vm.updatePip(pip) },
+    )
+    LabeledSlider(
+        label = stringResource(R.string.panel_pip_opacity),
+        value = pip.opacity,
+        valueRange = 0.1f..1f,
+        valueLabel = "${(pip.opacity * 100).toInt()}%",
+        onValueChange = { vm.updatePip(pip.copy(opacity = it), commit = false) },
+        onValueChangeFinished = { vm.updatePip(pip) },
+    )
+    Spacer(Modifier.height(4.dp))
+    TextButton(
+        onClick = { vm.deletePip(pip.id) },
+        modifier = Modifier.padding(horizontal = 16.dp),
+    ) {
+        Text(stringResource(R.string.panel_pip_delete), color = DangerColor)
+    }
+    Spacer(Modifier.height(8.dp))
 }
 
 // ===========================================================================

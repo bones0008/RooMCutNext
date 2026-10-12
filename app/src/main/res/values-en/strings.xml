@@ -147,6 +147,17 @@
     <string name="panel_audio_clip_hint">Independent audio track · drag to move, drag edges to trim, Split cuts at the playhead</string>
     <string name="panel_audio_delete">Delete audio</string>
 
+    <!-- PiP / sticker panel (v1.2) -->
+    <string name="action_pip">PiP</string>
+    <string name="panel_pip_title">PiP / Sticker</string>
+    <string name="panel_pip_pick_hint">Pick an asset to insert as a picture-in-picture layer at the playhead (transparent PNGs become stickers)</string>
+    <string name="panel_pip_no_assets">No video/image assets in this project yet — import some via Add media first</string>
+    <string name="panel_pip_position_x">Position X</string>
+    <string name="panel_pip_position_y">Position Y</string>
+    <string name="panel_pip_size">Size</string>
+    <string name="panel_pip_opacity">Opacity</string>
+    <string name="panel_pip_delete">Delete this layer</string>
+
     <!-- Voiceover recording (v1.1.4) -->
     <string name="panel_audio_record">Record voiceover</string>
     <string name="panel_audio_record_stop">Stop recording</string>

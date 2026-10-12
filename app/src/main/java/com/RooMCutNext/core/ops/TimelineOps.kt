@@ -1,6 +1,7 @@
 package com.RooMCutNext.core.ops
 
 import com.RooMCutNext.core.model.AUDIO_MIN_DURATION_US
+import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.ColorAdjust
@@ -31,6 +32,9 @@ object TimelineOps {
 
     /** Minimum span of source media a clip may use (100ms). */
     const val MIN_SOURCE_SPAN_US: Long = 100_000L
+
+    /** Shortest PiP layer on the timeline (0.1s). */
+    const val PIP_MIN_DURATION_US: Long = 100_000L
 
     // ------------------------------------------------------------------
     // Position mapping (prefix sums, gap-aware)
@@ -475,6 +479,55 @@ object TimelineOps {
 
     fun deleteAudio(audios: List<AudioClip>, id: String): List<AudioClip> =
         audios.filter { it.id != id }
+
+    // ------------------------------------------------------------------
+    // PiP layers (independent overlay layer, v1.2)
+    // ------------------------------------------------------------------
+
+    /** Insert a PiP layer keeping the list sorted by start time. */
+    fun insertPip(pips: List<PipLayer>, item: PipLayer): List<PipLayer> =
+        (pips + item).sortedBy { it.startUs }
+
+    fun updatePip(pips: List<PipLayer>, id: String, transform: (PipLayer) -> PipLayer): List<PipLayer> =
+        pips.map { if (it.id == id) transform(it) else it }
+
+    /** Move a layer's start; the duration follows (whole block slides). */
+    fun movePip(pips: List<PipLayer>, id: String, newStartUs: Long): List<PipLayer> =
+        pips.map { if (it.id == id) it.copy(startUs = newStartUs.coerceAtLeast(0L)) else it }
+
+    /**
+     * Trim one edge of a PiP layer in TIMELINE coordinates (opposite edge
+     * fixed). Video layers are limited by the source duration on BOTH edges
+     * (the layer plays the source from 0); image layers have no source limit.
+     */
+    fun trimPipEdge(
+        pips: List<PipLayer>,
+        id: String,
+        asset: MediaAsset?,
+        isLeft: Boolean,
+        timelineTargetUs: Long,
+    ): List<PipLayer> {
+        return pips.map { pip ->
+            if (pip.id != id) pip
+            else {
+                val sourceLimit = if (asset != null && !asset.isImage) asset.durationUs else Long.MAX_VALUE
+                val endUs = pip.endUs
+                if (isLeft) {
+                    val newStart = timelineTargetUs.coerceIn(0L, (endUs - PIP_MIN_DURATION_US).coerceAtLeast(0L))
+                    pip.copy(startUs = newStart, durationUs = (endUs - newStart).coerceAtLeast(PIP_MIN_DURATION_US))
+                } else {
+                    val minEnd = pip.startUs + PIP_MIN_DURATION_US
+                    val maxEnd = if (sourceLimit == Long.MAX_VALUE) Long.MAX_VALUE
+                    else pip.startUs + sourceLimit
+                    val newEnd = timelineTargetUs.coerceIn(minEnd, maxEnd)
+                    pip.copy(durationUs = newEnd - pip.startUs)
+                }
+            }
+        }
+    }
+
+    fun deletePip(pips: List<PipLayer>, id: String): List<PipLayer> =
+        pips.filter { it.id != id }
 
     /**
      * Split the audio clip under [timelineUs] at that timeline position

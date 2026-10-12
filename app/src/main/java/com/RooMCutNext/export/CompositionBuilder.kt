@@ -21,9 +21,12 @@ import androidx.media3.common.audio.SpeedProvider
 import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.MediaAsset
+import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.ops.TimelineOps
+import androidx.media3.effect.AlphaScale
 import com.RooMCutNext.export.effects.GainAudioProcessor
+import com.RooMCutNext.export.effects.PipPresentation
 import com.RooMCutNext.export.effects.TimedTextOverlay
 import com.RooMCutNext.media.LutRegistry
 import java.io.File
@@ -129,6 +132,18 @@ object CompositionBuilder {
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
         sequences += EditedMediaItemSequence.Builder(items).build()
+
+        // ---- picture-in-picture sequences (v1.2), one per layer ----
+        // Each layer is its own parallel video sequence stacked over the
+        // primary one: a transparent leading pad (so the layer only shows
+        // during its window) followed by the layer's media with a
+        // PipPresentation matrix (position + scale) and AlphaScale
+        // (opacity). Stickers are PiP layers over transparent PNG assets.
+        if (!stripEffects || project.pips.isNotEmpty()) {
+            project.pips.forEach { pip ->
+                buildPipSequence(project, mediaDir, pip)?.let { sequences += it }
+            }
+        }
 
         // ---- audio sequences (one per non-overlapping lane) ----
         if (!stripEffects || project.audios.isNotEmpty()) {
@@ -340,6 +355,103 @@ object CompositionBuilder {
             // (see buildItem): without it export fails with "AssetLoader error".
             .setFrameRate(project.fps.toInt().coerceAtLeast(1))
             .build()
+    }
+
+    // ------------------------------------------------------------------
+    // Picture-in-picture sequences
+    // ------------------------------------------------------------------
+
+    /** Alias import so the effect reads as what it does; see buildPipSequence. */
+    private fun alphaScale(value: Float): Effect = AlphaScale(value)
+
+    /**
+     * One sequence per PiP layer:
+     *   [optional transparent pad 0 -> startUs] + [layer media, clipped]
+     *
+     * The pad reuses the black-PNG generator at a tiny 2×2 size and is fully
+     * transparent (AlphaScale 0), stretched to the canvas — the video analog
+     * of the silence pad used by audio lanes. The layer item carries the
+     * PipPresentation matrix for position/scale; its own audio (if any) is
+     * kept and mixed automatically by the Composition.
+     */
+    private fun buildPipSequence(
+        project: Project,
+        mediaDir: File,
+        pip: PipLayer,
+    ): EditedMediaItemSequence? {
+        val asset = project.assetById(pip.assetId) ?: return null
+        val file = File(mediaDir, asset.fileName)
+        if (!file.exists()) return null
+
+        val items = mutableListOf<EditedMediaItem>()
+
+        if (pip.startUs >= MIN_GAP_US) {
+            val pad = GeneratedMedia.blackPng(mediaDir, 2, 2)
+            val padItem = MediaItem.Builder()
+                .setUri(Uri.fromFile(pad))
+                .setImageDurationMs((pip.startUs / 1000L).coerceAtLeast(1L))
+                .build()
+            items += EditedMediaItem.Builder(padItem)
+                .setEffects(
+                    Effects(
+                        emptyList<androidx.media3.common.audio.AudioProcessor>(),
+                        listOf(
+                            alphaScale(0f),
+                            androidx.media3.effect.Presentation.createForWidthAndHeight(
+                                project.width, project.height,
+                                androidx.media3.effect.Presentation.LAYOUT_STRETCH_TO_FIT,
+                            ),
+                        ),
+                    )
+                )
+                .setDurationUs(pip.startUs)
+                .setFrameRate(project.fps.toInt().coerceAtLeast(1))
+                .build()
+        }
+
+        val clippedDurationUs = pip.durationUs.coerceAtMost(
+            if (asset.isImage) pip.durationUs else asset.durationUs
+        )
+        val mediaItem = if (asset.isImage) {
+            MediaItem.Builder()
+                .setUri(Uri.fromFile(file))
+                .setImageDurationMs((pip.durationUs / 1000L).coerceAtLeast(1L))
+                .build()
+        } else {
+            MediaItem.Builder()
+                .setUri(Uri.fromFile(file))
+                .setClippingConfiguration(
+                    MediaItem.ClippingConfiguration.Builder()
+                        .setStartPositionUs(0L)
+                        .setEndPositionUs(pip.durationUs.coerceAtMost(asset.durationUs))
+                        .build()
+                )
+                .build()
+        }
+
+        val pipEffects = mutableListOf<Effect>()
+        pipEffects += PipPresentation(
+            canvasWidth = project.width,
+            canvasHeight = project.height,
+            centerX = pip.xRatio,
+            centerY = pip.yRatio,
+            displayWidthRatio = pip.scale,
+        )
+        if (pip.opacity < 1f) {
+            pipEffects += alphaScale(pip.opacity.coerceIn(0f, 1f))
+        }
+
+        val builder = EditedMediaItem.Builder(mediaItem)
+            .setEffects(Effects(emptyList<androidx.media3.common.audio.AudioProcessor>(), pipEffects))
+        if (asset.isImage) {
+            builder.setDurationUs(pip.durationUs)
+            builder.setFrameRate(project.fps.toInt().coerceAtLeast(1))
+        } else {
+            builder.setDurationUs(maxOf(asset.durationUs, pip.durationUs).coerceAtLeast(1L))
+        }
+        items += builder.build()
+
+        return EditedMediaItemSequence.Builder(items).build().takeIf { clippedDurationUs > 0L }
     }
 
     // ------------------------------------------------------------------

@@ -12,6 +12,7 @@ import com.RooMCutNext.core.model.ColorAdjust
 import com.RooMCutNext.core.model.CropSpec
 import com.RooMCutNext.core.model.IMAGE_DEFAULT_DURATION_US
 import com.RooMCutNext.core.model.MediaAsset
+import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.core.model.snapProjectFps
@@ -37,7 +38,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO }
+enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP }
 
 data class ImportingState(val done: Int, val total: Int, val current: String)
 
@@ -64,6 +65,7 @@ data class EditorUiState(
     val selectedClipId: String? = null,
     val selectedTextId: String? = null,
     val selectedAudioId: String? = null,
+    val selectedPipId: String? = null,
     val playheadUs: Long = 0L,
     val isPlaying: Boolean = false,
     val pxPerSecond: Float = 64f,
@@ -94,7 +96,8 @@ data class EditorUiState(
     val selectedClip: Clip? get() = selectedClipId?.let { project.clipById(it) }
     val selectedText: TextOverlayItem? get() = selectedTextId?.let { project.textById(it) }
     val selectedAudio: AudioClip? get() = selectedAudioId?.let { project.audioById(it) }
-    val hasSelection: Boolean get() = selectedClipId != null || selectedTextId != null || selectedAudioId != null
+    val selectedPip: PipLayer? get() = selectedPipId?.let { project.pipById(it) }
+    val hasSelection: Boolean get() = selectedClipId != null || selectedTextId != null || selectedAudioId != null || selectedPipId != null
 }
 
 /**
@@ -130,6 +133,7 @@ class EditorViewModel(
         val selectedClipId: String?,
         val selectedTextId: String?,
         val selectedAudioId: String?,
+        val selectedPipId: String?,
         val trimPreview: TrimPreview?,
         val audioTrimPreview: AudioTrimPreview?,
         val missingAssetIds: Set<String>,
@@ -138,7 +142,7 @@ class EditorViewModel(
     val timelineFlow: kotlinx.coroutines.flow.StateFlow<TimelineSnapshot?> =
         _state.map {
             TimelineSnapshot(
-                it.project, it.selectedClipId, it.selectedTextId, it.selectedAudioId,
+                it.project, it.selectedClipId, it.selectedTextId, it.selectedAudioId, it.selectedPipId,
                 it.trimPreview, it.audioTrimPreview, it.missingAssetIds,
             )
         }.distinctUntilChanged()
@@ -440,21 +444,25 @@ class EditorViewModel(
     // ------------------------------------------------------------------
 
     fun selectClip(id: String?) {
-        _state.update { it.copy(selectedClipId = id, selectedTextId = null, selectedAudioId = null) }
+        _state.update { it.copy(selectedClipId = id, selectedTextId = null, selectedAudioId = null, selectedPipId = null) }
     }
 
     fun selectText(id: String?) {
-        _state.update { it.copy(selectedTextId = id, selectedClipId = null, selectedAudioId = null) }
+        _state.update { it.copy(selectedTextId = id, selectedClipId = null, selectedAudioId = null, selectedPipId = null) }
     }
 
     fun selectAudio(id: String?) {
-        _state.update { it.copy(selectedAudioId = id, selectedClipId = null, selectedTextId = null) }
+        _state.update { it.copy(selectedAudioId = id, selectedClipId = null, selectedTextId = null, selectedPipId = null) }
+    }
+
+    fun selectPip(id: String?) {
+        _state.update { it.copy(selectedPipId = id, selectedClipId = null, selectedTextId = null, selectedAudioId = null) }
     }
 
     /** Tap on empty timeline space: drop every selection. */
     fun clearSelection() {
         if (_state.value.hasSelection) {
-            _state.update { it.copy(selectedClipId = null, selectedTextId = null, selectedAudioId = null) }
+            _state.update { it.copy(selectedClipId = null, selectedTextId = null, selectedAudioId = null, selectedPipId = null) }
         }
     }
 
@@ -542,6 +550,12 @@ class EditorViewModel(
         if (audioId != null) {
             mutate("删除音频") { p -> p.copy(audios = TimelineOps.deleteAudio(p.audios, audioId)) }
             _state.update { it.copy(selectedAudioId = null, activePanel = null) }
+            return
+        }
+        val pipId = s.selectedPipId
+        if (pipId != null) {
+            mutate("删除画中画") { p -> p.copy(pips = TimelineOps.deletePip(p.pips, pipId)) }
+            _state.update { it.copy(selectedPipId = null, activePanel = null) }
             return
         }
         val clipId = s.selectedClipId ?: return
@@ -863,6 +877,63 @@ class EditorViewModel(
     fun deleteText(id: String) {
         mutate("删除文字") { p -> p.copy(texts = p.texts.filter { it.id != id }) }
         _state.update { it.copy(selectedTextId = null, activePanel = null) }
+    }
+
+    // ------------------------------------------------------------------
+    // PiP layers (v1.2)
+    // ------------------------------------------------------------------
+
+    /**
+     * Insert a picture-in-picture layer from an EXISTING project asset
+     * (video or image — transparent PNGs become stickers) at the playhead.
+     * Images default to 3s like text; videos take their full duration.
+     */
+    fun addPipAtPlayhead(assetId: String) {
+        val s = _state.value
+        val asset = s.project.assetById(assetId) ?: return
+        val startUs = s.playheadUs.coerceAtLeast(0L)
+        val durationUs = if (asset.isImage) IMAGE_DEFAULT_DURATION_US else asset.durationUs
+        val layer = PipLayer(
+            id = IdGen.new("pip"),
+            assetId = asset.id,
+            startUs = startUs,
+            durationUs = durationUs.coerceAtLeast(TimelineOps.PIP_MIN_DURATION_US),
+        )
+        mutate("添加画中画") { p -> p.copy(pips = TimelineOps.insertPip(p.pips, layer)) }
+        _state.update {
+            it.copy(selectedPipId = layer.id, selectedClipId = null, selectedTextId = null, selectedAudioId = null)
+        }
+    }
+
+    fun updatePip(item: PipLayer, commit: Boolean = true) {
+        val apply: (Project) -> Project = { p ->
+            p.copy(pips = TimelineOps.updatePip(p.pips, item.id) { item })
+        }
+        if (commit) commitOrMutate("编辑画中画") { apply(it) } else previewTransform { apply(it) }
+    }
+
+    /** Timeline drag: move the whole block (start slides, duration fixed). */
+    fun movePip(id: String, newStartUs: Long, commit: Boolean = true) {
+        val apply: (Project) -> Project = { p ->
+            p.copy(pips = TimelineOps.movePip(p.pips, id, newStartUs))
+        }
+        if (commit) commitOrMutate("移动画中画") { apply(it) } else previewTransform { apply(it) }
+    }
+
+    /** Timeline drag on an edge: trim, opposite edge fixed. */
+    fun trimPipEdge(id: String, isLeft: Boolean, timelineTargetUs: Long, commit: Boolean = true) {
+        val s = _state.value
+        val pip = s.project.pipById(id) ?: return
+        val asset = s.project.assetById(pip.assetId)
+        val apply: (Project) -> Project = { p ->
+            p.copy(pips = TimelineOps.trimPipEdge(p.pips, id, asset, isLeft, timelineTargetUs))
+        }
+        if (commit) commitOrMutate("修剪画中画") { apply(it) } else previewTransform { apply(it) }
+    }
+
+    fun deletePip(id: String) {
+        mutate("删除画中画") { p -> p.copy(pips = TimelineOps.deletePip(p.pips, id)) }
+        _state.update { it.copy(selectedPipId = null) }
     }
 
     // ------------------------------------------------------------------

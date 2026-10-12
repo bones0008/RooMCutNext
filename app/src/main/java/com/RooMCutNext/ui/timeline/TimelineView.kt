@@ -72,6 +72,7 @@ private const val RULER_HEIGHT_DP = 26f
 private const val TRACK_HEIGHT_DP = 56f
 private const val TEXT_LANE_HEIGHT_DP = 24f
 private const val AUDIO_LANE_HEIGHT_DP = 30f
+private const val PIP_LANE_HEIGHT_DP = 30f
 private const val TRACK_GAP_DP = 6f
 private const val TRIM_HIT_PX = 26f
 private const val BADGE_TEXT_DP = 8.5f
@@ -115,6 +116,13 @@ private data class AudioLayout(
     val width: Float,
 )
 
+private data class PipLayout(
+    val pip: com.RooMCutNext.core.model.PipLayer,
+    val lane: Int,
+    val left: Float,
+    val width: Float,
+)
+
 private class GeometryHolder {
     var viewportW: Float = 0f
     var viewportH: Float = 0f
@@ -125,13 +133,17 @@ private class GeometryHolder {
     var trackBottom: Float = 0f
     var textRegionTop: Float = 0f
     var textRegionBottom: Float = 0f
+    var pipRegionTop: Float = 0f
+    var pipRegionBottom: Float = 0f
     var audioRegionTop: Float = 0f
     var audioRegionBottom: Float = 0f
     var playheadBottom: Float = 0f
     var textLaneStride: Float = 0f
+    var pipLaneStride: Float = 0f
     var audioLaneStride: Float = 0f
     var clips: List<ClipLayout> = emptyList()
     var texts: List<TextLayout> = emptyList()
+    var pips: List<PipLayout> = emptyList()
     var audios: List<AudioLayout> = emptyList()
     var hasClips: Boolean = false
     var hasAnyContent: Boolean = false
@@ -142,6 +154,10 @@ private class GeometryHolder {
     /** Y span of the given text lane. */
     fun textLaneRect(lane: Int): Rect =
         Rect(0f, textRegionTop + lane * textLaneStride, viewportW, textRegionTop + (lane + 1) * textLaneStride)
+
+    /** Y span of the given PiP lane. */
+    fun pipLaneRect(lane: Int): Rect =
+        Rect(0f, pipRegionTop + lane * pipLaneStride, viewportW, pipRegionTop + (lane + 1) * pipLaneStride)
 
     /** Y span of the given audio lane. */
     fun audioLaneRect(lane: Int): Rect =
@@ -158,6 +174,8 @@ private sealed class DragMode {
     data class TextTrim(val textId: String, val isLeft: Boolean) : DragMode()
     data class AudioMove(val audioId: String) : DragMode()
     data class AudioTrim(val audioId: String, val isLeft: Boolean) : DragMode()
+    data class PipMove(val pipId: String) : DragMode()
+    data class PipTrim(val pipId: String, val isLeft: Boolean) : DragMode()
     data object TapGallery : DragMode()
     data object TapFiles : DragMode()
 }
@@ -297,6 +315,22 @@ fun TimelineView(
             return DragMode.TapGallery
         }
         if (y <= g.rulerBottom) return DragMode.Scrub
+        if (g.pipRegionBottom > g.pipRegionTop && y in g.pipRegionTop..g.pipRegionBottom) {
+            val selectedPip = snapshot?.selectedPipId
+            if (selectedPip != null) {
+                val sel = g.pips.firstOrNull { it.pip.id == selectedPip }
+                if (sel != null && sel.width > 24f * dp) {
+                    if (abs(x - sel.left) <= TRIM_HIT_PX) return DragMode.PipTrim(selectedPip, true)
+                    if (abs(x - (sel.left + sel.width)) <= TRIM_HIT_PX) return DragMode.PipTrim(selectedPip, false)
+                }
+            }
+            val laneIdx = ((y - g.pipRegionTop) / g.pipLaneStride).toInt()
+            val hit = g.pips.firstOrNull {
+                x >= it.left && x <= it.left + it.width && it.lane == laneIdx
+            }
+            if (hit != null) return DragMode.PipMove(hit.pip.id)
+            return DragMode.Scrub
+        }
         if (y in g.trackTop..g.trackBottom) {
             // Empty video track (text/audio-only project) behaves like blank
             // space: tap deselects, press-and-drag scrubs.
@@ -368,6 +402,7 @@ fun TimelineView(
             }
             is DragMode.TextTrim -> v.selectText(mode.textId)
             is DragMode.AudioTrim -> v.selectAudio(mode.audioId)
+            is DragMode.PipTrim -> v.selectPip(mode.pipId)
             else -> Unit
         }
         if (mode is DragMode.ClipMove) fingerX.floatValue = x
@@ -418,6 +453,12 @@ fun TimelineView(
             is DragMode.AudioTrim -> {
                 v.previewAudioTrimEdge(mode.audioId, mode.isLeft, xToTimeUs(x))
             }
+            is DragMode.PipMove -> {
+                v.movePip(mode.pipId, xToTimeUs(x - 20f * dp), commit = false)
+            }
+            is DragMode.PipTrim -> {
+                v.trimPipEdge(mode.pipId, mode.isLeft, xToTimeUs(x), commit = false)
+            }
             else -> Unit
         }
     }
@@ -462,6 +503,14 @@ fun TimelineView(
                 v.moveAudio(mode.audioId, audio.startUs, commit = true)
             }
             is DragMode.AudioTrim -> v.commitAudioTrim()
+            is DragMode.PipMove -> {
+                val pip = snapshot?.project?.pips?.firstOrNull { it.id == mode.pipId } ?: return
+                v.movePip(mode.pipId, pip.startUs, commit = true)
+            }
+            is DragMode.PipTrim -> {
+                val pip = snapshot?.project?.pips?.firstOrNull { it.id == mode.pipId } ?: return
+                v.trimPipEdge(mode.pipId, mode.isLeft, if (mode.isLeft) pip.startUs else pip.endUs, commit = true)
+            }
             else -> Unit
         }
     }
@@ -508,6 +557,14 @@ fun TimelineView(
             is DragMode.AudioTrim -> {
                 lastTextTap.value = null
                 v.selectAudio(mode.audioId)
+            }
+            is DragMode.PipMove -> {
+                lastTextTap.value = null
+                v.selectPip(mode.pipId)
+            }
+            is DragMode.PipTrim -> {
+                lastTextTap.value = null
+                v.selectPip(mode.pipId)
             }
             is DragMode.Pinch -> Unit
         }
@@ -643,13 +700,18 @@ fun TimelineView(
             // ---- region geometry (depends on lane counts) ----
             val textLanes = TimelineOps.laneIndexes(snap.project.texts.map { it.startUs to it.endUs })
             val textLaneCount = (textLanes.maxOrNull() ?: -1) + 1
+            val pipLanes = TimelineOps.laneIndexes(snap.project.pips.map { it.startUs to it.endUs })
+            val pipLaneCount = (pipLanes.maxOrNull() ?: -1) + 1
             val audioLanes = TimelineOps.laneIndexes(snap.project.audios.map { it.startUs to it.endUs })
             val audioLaneCount = (audioLanes.maxOrNull() ?: -1) + 1
 
-            // LibreCut-style stack: text lanes ABOVE the video track, audio
-            // lanes below it. Regions are disjoint; zero-height when unused.
+            // LibreCut-style stack: text lanes ABOVE the video track, PiP
+            // lanes between text and video (closer to the picture they
+            // overlay), audio lanes below it. Regions are disjoint;
+            // zero-height when unused.
             g.rulerBottom = RULER_HEIGHT_DP * dp
             g.textLaneStride = TEXT_LANE_HEIGHT_DP * dp
+            g.pipLaneStride = PIP_LANE_HEIGHT_DP * dp
             g.audioLaneStride = AUDIO_LANE_HEIGHT_DP * dp
             var yCursor = g.rulerBottom
             if (textLaneCount > 0) {
@@ -659,6 +721,14 @@ fun TimelineView(
             } else {
                 g.textRegionTop = 0f
                 g.textRegionBottom = 0f
+            }
+            if (pipLaneCount > 0) {
+                g.pipRegionTop = yCursor + TRACK_GAP_DP * dp
+                g.pipRegionBottom = g.pipRegionTop + pipLaneCount * g.pipLaneStride
+                yCursor = g.pipRegionBottom
+            } else {
+                g.pipRegionTop = 0f
+                g.pipRegionBottom = 0f
             }
             g.trackTop = yCursor + TRACK_GAP_DP * dp
             g.trackBottom = g.trackTop + TRACK_HEIGHT_DP * dp
@@ -712,6 +782,14 @@ fun TimelineView(
                 else TextLayout(item, lane, left, width)
             }
             drawTextLanes(snap, g, badgePaint, dp)
+
+            g.pips = snap.project.pips.mapIndexedNotNull { i, pip ->
+                val left = pip.startUs / 1_000_000f * pps - g.scrollX
+                val width = (pip.durationUs / 1_000_000f * pps).coerceAtLeast(6f * dp)
+                if (left + width < -20f || left > g.viewportW + 20f) null
+                else PipLayout(pip, pipLanes[i], left, width)
+            }
+            drawPipLanes(snap, g, badgePaint, dp)
 
             g.audios = snap.project.audios.mapIndexedNotNull { i, audio ->
                 val preview = snap.audioTrimPreview?.takeIf { it.audioId == audio.id }
@@ -1327,6 +1405,102 @@ private fun DrawScope.drawTextLanes(
     }
 }
 
+private fun DrawScope.drawPipLanes(
+    snap: EditorViewModel.TimelineSnapshot,
+    g: GeometryHolder,
+    paint: Paint,
+    dp: Float,
+) {
+    if (snap.project.pips.isEmpty()) return
+    val canvas = drawContext.canvas.nativeCanvas
+    snap.project.pips.forEach { pip ->
+        val layout = g.pips.firstOrNull { it.pip.id == pip.id } ?: return@forEach
+        val laneRect = g.pipLaneRect(layout.lane)
+        val top = laneRect.top + 2f * dp
+        val height = laneRect.height - 4f * dp
+        if (height <= 2f) return@forEach
+        val selected = snap.selectedPipId == pip.id
+        val missing = pip.assetId in snap.missingAssetIds
+        val asset = snap.project.assetById(pip.assetId)
+
+        val borderColor = when {
+            missing -> DangerColor
+            selected -> AccentColor
+            else -> PipColor.copy(alpha = 0.7f)
+        }
+
+        drawRoundRect(
+            color = PipColor.copy(alpha = 0.22f),
+            topLeft = Offset(layout.left, top),
+            size = Size(layout.width, height),
+            cornerRadius = CornerRadius(4f * dp),
+        )
+
+        // The layer's little preview rectangle: a scaled-down frame hinting
+        // the picture-in-picture geometry (position + size on the canvas).
+        if (layout.width > 24f * dp) {
+            val canvasAspect = (snap.project.width.toFloat() / snap.project.height).coerceIn(0.35f, 3f)
+            val pipW = (layout.width - 8f * dp) * pip.scale.coerceIn(0.1f, 1f)
+            val pipH = (pipW / canvasAspect).coerceAtMost(height - 8f * dp)
+            if (pipW > 3f * dp && pipH > 2f * dp) {
+                val cx = layout.left + 4f * dp + (layout.width - 8f * dp) * pip.xRatio
+                val cy = top + height / 2f + (height / 2f - 2f * dp) * (pip.yRatio - 0.5f) * 1.4f
+                drawRoundRect(
+                    color = PipColor.copy(alpha = 0.5f),
+                    topLeft = Offset(cx - pipW / 2f, cy - pipH / 2f),
+                    size = Size(pipW, pipH),
+                    cornerRadius = CornerRadius(2f * dp),
+                )
+                if (pip.opacity < 0.99f) {
+                    drawRoundRect(
+                        color = PipColor.copy(alpha = 0.2f + 0.3f * pip.opacity),
+                        topLeft = Offset(cx - pipW / 2f, cy - pipH / 2f),
+                        size = Size(pipW, pipH),
+                        cornerRadius = CornerRadius(2f * dp),
+                    )
+                }
+            }
+        }
+
+        drawRoundRect(
+            color = borderColor,
+            topLeft = Offset(layout.left, top),
+            size = Size(layout.width, height),
+            cornerRadius = CornerRadius(4f * dp),
+            style = Stroke(width = if (selected) 2.dp.toPx() else 1.dp.toPx()),
+        )
+
+        paint.textAlign = android.graphics.Paint.Align.LEFT
+        paint.textSize = 9f * dp
+        paint.color = android.graphics.Color.argb(0xE0, 0x64, 0xB5, 0xF6)
+        val prefix = when {
+            asset == null -> "PiP ?"
+            asset.isImage -> "贴纸"
+            else -> "PiP"
+        }
+        val label = "$prefix ${asset?.displayName ?: ""}"
+        val charW = max(1f, paint.measureText("PiP ") * 0.55f)
+        val maxChars = max(1, ((layout.width - 8f * dp) / charW).toInt())
+        canvas.drawText(label.take(maxChars), layout.left + 4f * dp, top + height - 4.5f * dp, paint)
+
+        if (selected) {
+            val handleH = height - 6f * dp
+            drawRoundRect(
+                color = AccentColor,
+                topLeft = Offset(layout.left + 1f * dp, top + 3f * dp),
+                size = Size(4f * dp, handleH),
+                cornerRadius = CornerRadius(2f * dp),
+            )
+            drawRoundRect(
+                color = AccentColor,
+                topLeft = Offset(layout.left + layout.width - 5f * dp, top + 3f * dp),
+                size = Size(4f * dp, handleH),
+                cornerRadius = CornerRadius(2f * dp),
+            )
+        }
+    }
+}
+
 private fun DrawScope.drawAudioLanes(
     snap: EditorViewModel.TimelineSnapshot,
     g: GeometryHolder,
@@ -1450,6 +1624,9 @@ private fun DrawScope.drawAudioLanes(
 
 /** Teal accent used for the audio track. */
 private val AudioColor = Color(0xFF2FB8A6)
+
+/** PiP / sticker lane accent (soft blue, distinct from audio teal). */
+private val PipColor = Color(0xFF64B5F6)
 
 private inline fun DrawScope.withClippedRoundRect(
     left: Float,

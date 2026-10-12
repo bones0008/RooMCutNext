@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Delete
@@ -552,6 +553,10 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onRotate = { vm.openPanel(PanelKind.ROTATE) },
             onCrop = { vm.openPanel(PanelKind.CROP) },
             onAdjust = { vm.openPanel(PanelKind.ADJUST) },
+            // v1.2: picture-in-picture / sticker tool — always available;
+            // the sheet itself offers the asset picker when nothing is
+            // selected yet.
+            onPip = { vm.openPanel(PanelKind.PIP) },
             // Toggle: tapping 文字 while the text panel is already open
             // closes it instead of stacking another empty overlay.
             onText = {
@@ -717,6 +722,7 @@ private fun ActionToolbar(
     onCrop: () -> Unit,
     onAdjust: () -> Unit,
     onText: () -> Unit,
+    onPip: () -> Unit,
     onAudio: () -> Unit,
     onInfo: () -> Unit,
     onGoto: () -> Unit,
@@ -739,6 +745,7 @@ private fun ActionToolbar(
         Spacer(Modifier.width(8.dp))
         ToolbarButton(Icons.Filled.Add, stringResource(R.string.timeline_add_media), enabled = true, active = false, onClick = onAddMedia)
         ToolbarButton(Icons.Filled.TextFields, stringResource(R.string.action_text), enabled = true, active = active == PanelKind.TEXT, onClick = onText)
+        ToolbarButton(Icons.Filled.PictureInPictureAlt, stringResource(R.string.action_pip), enabled = true, active = active == PanelKind.PIP, onClick = onPip)
         ToolbarButton(Icons.Filled.MusicNote, stringResource(R.string.action_audio), enabled = true, active = active == PanelKind.AUDIO, onClick = onAudio)
         ToolbarButton(Icons.Filled.Speed, stringResource(R.string.action_speed), enabled = hasClip, active = active == PanelKind.SPEED, onClick = onSpeed)
         ToolbarButton(Icons.Filled.RotateRight, stringResource(R.string.action_rotate), enabled = hasClip, active = active == PanelKind.ROTATE, onClick = onRotate)
@@ -823,6 +830,7 @@ private fun ToolPanelHost(
         PanelKind.CROP -> R.string.panel_crop_title
         PanelKind.ADJUST -> R.string.panel_adjust_title
         PanelKind.TEXT -> R.string.panel_text_title
+        PanelKind.PIP -> R.string.panel_pip_title
         PanelKind.AUDIO -> R.string.panel_audio_title
         PanelKind.INFO -> R.string.panel_info_title
         PanelKind.EXPORT -> R.string.panel_export_title
@@ -907,6 +915,7 @@ private fun ToolPanelHost(
                     PanelKind.CROP -> CropSheet(vm, state)
                     PanelKind.ADJUST -> AdjustSheet(vm, state, onImportLut = onImportLut)
                     PanelKind.TEXT -> TextSheet(vm, state, onImportFont = onImportFont)
+                    PanelKind.PIP -> PipSheet(vm, state)
                     PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = onAddMusic, onRecord = onRecord)
                     PanelKind.INFO -> InfoSheet(vm, state, onReplace = onReplace)
                     PanelKind.GOTO -> GotoSheet(vm, state)

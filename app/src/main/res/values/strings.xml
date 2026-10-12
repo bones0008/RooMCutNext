@@ -147,6 +147,17 @@
     <string name="panel_audio_clip_hint">独立音频轨 · 拖动移动，拖两端修剪，播放头处点“分割”切开</string>
     <string name="panel_audio_delete">删除音频</string>
 
+    <!-- PiP / sticker panel (v1.2) -->
+    <string name="action_pip">画中画</string>
+    <string name="panel_pip_title">画中画 / 贴纸</string>
+    <string name="panel_pip_pick_hint">选择一个素材，在播放头位置插入为画中画层（透明背景 PNG 图片即贴纸）</string>
+    <string name="panel_pip_no_assets">项目里还没有可用的视频/图片素材，先用「添加素材」导入</string>
+    <string name="panel_pip_position_x">水平位置</string>
+    <string name="panel_pip_position_y">垂直位置</string>
+    <string name="panel_pip_size">大小</string>
+    <string name="panel_pip_opacity">不透明度</string>
+    <string name="panel_pip_delete">删除这一层</string>
+
     <!-- Voiceover recording (v1.1.4) -->
     <string name="panel_audio_record">旁白录音</string>
     <string name="panel_audio_record_stop">停止录音</string>
