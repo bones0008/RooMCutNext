@@ -87,10 +87,16 @@ import java.util.concurrent.ConcurrentHashMap
  *  - text overlays do not render ON the fading head (they render on the
  *    body, which carries them right after the window);
  *  - "save frame" grabs the PlayerView only (PiPs are separate views);
- *  - v1.2.5: if this device's effects-playback path stalls on a head (no
- *    first frame 250ms into the window), heads fall back to a PLAIN player
- *    for the rest of the session — the fade renders without the clip's
- *    grading/mosaic for those ≤2s (geometry stays aspect-correct).
+ *  - v1.2.5→v1.2.8: if this device's effects-playback path stalls on a head
+ *    (no first frame 450ms after MOUNT — typically still preroll, where the
+ *    swap is invisible), heads fall back to a PLAIN player for the rest of
+ *    the session — the fade renders without the clip's grading/mosaic for
+ *    those ≤2s (geometry stays aspect-correct);
+ *  - v1.2.8: a playing forward window exit fades out over a 200ms TAIL
+ *    (HeadWindowMath) that covers the body player's item-boundary crossing;
+ *    the composite during the tail is the incoming clip over itself at a
+ *    ≤200ms offset — imperceptible, and the price of never flashing the
+ *    outgoing clip.
  */
 class OverlayPreviewController(private val context: Context) {
 
@@ -123,10 +129,56 @@ class OverlayPreviewController(private val context: Context) {
      * further back it rewinds and plays again (scrub-back / replay). */
     private val endedHoldMarginUs = 100_000L
 
-    /** v1.2.5: grace before an effects-bearing head that STILL hasn't
-     * rendered falls back to a plain (effect-less) player — see
-     * headEffectsFallback. */
-    private val headEffectsGraceUs = 250_000L
+    /**
+     * v1.2.8: fade-out tail after a FORWARD window exit (playing only).
+     *
+     * The flash bug this fixes: at the window end the head's alpha used to
+     * drop 1 → 0 in one tick, handing the picture to the body player at the
+     * exact instant it crosses its "previous clip tail → second clip body"
+     * item boundary. That crossing is not free — the next period's decoder
+     * may re-initialize, the GL effects chain re-configures, and the
+     * player's REPORTED position leads its DISPLAYED frame by 1-2 vsyncs —
+     * so for a handful of frames the body still showed the OUTGOING clip's
+     * last frame, full screen, head gone: "the first clip's picture
+     * suddenly flashes once". Fading the head (its held frame is the second
+     * clip's own content at the window end) across this tail covers the
+     * crossing; a paused playhead skips the tail so frame-stepping stays
+     * sample-accurate. See HeadWindowMath.
+     */
+    private val headHoldTailUs = 200_000L
+
+    /**
+     * v1.2.8: cooldown between CORRECTIVE seeks of a playing head player.
+     *
+     * The lag bug this fixes: drift-correction used to re-seek whenever the
+     * player fell >120ms behind. A seek flushes the decoder and re-decodes
+     * from the previous keyframe — the player emerges from the seek FARTHER
+     * behind, the next tick seeks again: a seek-storm cycle that read as
+     * "the second clip is choppy during the transition". Now: at most one
+     * corrective seek per cooldown, landing [headSeekHysteresisUs] BEHIND
+     * the playhead so the player is not instantly re-eligible, and hard
+     * realignment (no cooldown) only for big jumps (> [headHardRealignDriftUs],
+     * e.g. a seek that landed mid-window).
+     */
+    private val headCorrectiveSeekCooldownMs = 500L
+
+    /** v1.2.8: land corrective seeks this far BEHIND the playhead. */
+    private val headSeekHysteresisUs = 60_000L
+
+    /** v1.2.8: drift big enough to hard-realign immediately, cooldown aside. */
+    private val headHardRealignDriftUs = 400_000L
+
+    /**
+     * v1.2.8: wall-clock grace before an effects-bearing head that STILL
+     * hasn't rendered falls back to a plain player — measured from MOUNT,
+     * not from window entry (the old localUs > 250ms trigger fired the
+     * rebuild a quarter-second INTO the fade: the player release + fresh
+     * alpha-0 view visibly flashed the underlying first clip and then had
+     * to catch up = both halves of the user-visible bug). 450ms from mount
+     * lands the rebuild in the PREROLL for normal mounts, where alpha is 0
+     * anyway and the swap is invisible.
+     */
+    private val headEffectsGraceWallMs = 450L
 
     /** One record per PiP layer (video → TextureView+player, image → ImageView). */
     private class PipOverlay {
@@ -164,6 +216,15 @@ class OverlayPreviewController(private val context: Context) {
 
     /** v1.2.5: the mounted head player currently carries clipLookEffects. */
     private var headEffectsActive = false
+
+    /** v1.2.8: uptime millis when the current head player was mounted —
+     * anchors the effects-fallback grace in WALL time so the (invisible)
+     * rebuild can happen during preroll instead of mid-fade. */
+    private var headMountedAtMs = 0L
+
+    /** v1.2.8: uptime millis of the last CORRECTIVE seek on the head player
+     * (see headCorrectiveSeekCooldownMs). */
+    private var headLastCorrectiveSeekMs = 0L
 
     /**
      * v1.2.5: set when an effects-bearing head fails to render within the
@@ -538,6 +599,20 @@ class OverlayPreviewController(private val context: Context) {
                 .minByOrNull { it.startUs }
 
         if (active == null) {
+            // v1.2.8: HOLD-TAIL — the playhead just left this window forward
+            // (while playing). Keep the mounted head alive through its
+            // fade-out tail: driveHead is still fading it over the body
+            // player's item-boundary crossing, and yanking the view here
+            // (the old unconditional hide) would re-create exactly the
+            // outgoing-clip flash the tail exists to mask. Position-only
+            // check — a paused playhead skips the tail in driveHead and
+            // hides via the path below.
+            val mounted = headSpec
+            if (mounted != null && playheadUs >= mounted.startUs + mounted.durationUs &&
+                playheadUs < mounted.startUs + mounted.durationUs + headHoldTailUs
+            ) {
+                return
+            }
             // Keep the last head mounted but hidden (cheap scrub back/forth).
             // v1.2.4: alpha, not visibility — same TextureView rule as PiPs.
             headView?.let { if (it.alpha != 0f) it.alpha = 0f }
@@ -571,6 +646,10 @@ class OverlayPreviewController(private val context: Context) {
         headFirstFrame = false
         headTargetAlpha = 0f
         headContentAspect = contentAspectOf(clip, asset)
+        // v1.2.8: anchor the effects-fallback grace to MOUNT time (wall
+        // clock) — see headEffectsGraceWallMs.
+        headMountedAtMs = android.os.SystemClock.uptimeMillis()
+        headLastCorrectiveSeekMs = 0L
 
         if (asset.isImage) {
             // Image head: a fading still, canvas-fitted.
@@ -649,14 +728,18 @@ class OverlayPreviewController(private val context: Context) {
         }
         val localUs = playheadUs - spec.startUs
         val inWindow = localUs in 0 until spec.durationUs
+        // v1.2.8: forward fade-out tail (playing only) — see HeadWindowMath.
+        val inTail = HeadWindowMath.inTail(localUs, spec.durationUs, headHoldTailUs, isPlaying)
         // Alpha ramp 0→1 across the window — the crossfade itself.
         val ramp = if (spec.durationUs <= 0L) 1f
         else (localUs.toFloat() / spec.durationUs).coerceIn(0f, 1f)
 
         if (headIsImage) {
             headImageView?.let { iv ->
-                iv.visibility = if (inWindow) View.VISIBLE else View.INVISIBLE
-                iv.alpha = ramp
+                iv.visibility = if (inWindow || inTail) View.VISIBLE else View.INVISIBLE
+                iv.alpha = if (inTail) {
+                    HeadWindowMath.alphaAt(localUs, spec.durationUs, headHoldTailUs, isPlaying)
+                } else ramp
             }
             return
         }
@@ -664,23 +747,38 @@ class OverlayPreviewController(private val context: Context) {
         val player = headPlayer ?: return
         val tv = headView ?: return
         // v1.2.4: alpha gating (VISIBLE view, never toggled) — same fix as PiP.
-        if (!inWindow) {
+        if (!inWindow && !inTail) {
             if (player.playWhenReady) player.playWhenReady = false
             headTargetAlpha = 0f
             if (tv.alpha != 0f) tv.alpha = 0f
             headFirstFrame = false
             return
         }
-        // v1.2.5: effects-grace fallback. If an effects-bearing head has not
-        // rendered ANY frame a quarter-second into its window, the device's
-        // effects playback path is stalled — mark it broken and rebuild the
-        // player plain (reconcileHead rebuilds on the next sync tick).
-        if (headEffectsActive && !headFirstFrame && !headEffectsFallback &&
-            localUs > headEffectsGraceUs
-        ) {
-            headEffectsFallback = true
-            headNeedsRebuild = true
-            diag("head effects→plain (no first frame ${localUs / 1000}ms in)")
+        if (inTail) {
+            // v1.2.8: coasting out. Fade the head's (held or still-playing)
+            // frame across the tail — its content IS the incoming clip at the
+            // window end, so it seamlessly covers the body player's item
+            // boundary crossing underneath. No pauses, no drift correction,
+            // no ENDED rewind: alignment is over, only the alpha matters
+            // here. A corrective seek in the tail would clamp to the item end
+            // and cause a visible hiccup at mid-alpha.
+            val tailAlpha = HeadWindowMath.alphaAt(localUs, spec.durationUs, headHoldTailUs, isPlaying)
+            headTargetAlpha = tailAlpha
+            if (tv.alpha != tailAlpha) tv.alpha = tailAlpha
+            return
+        }
+        // v1.2.5: effects-grace fallback — v1.2.8 measures the grace in WALL
+        // time from MOUNT (not localUs): a stalled effects path is detected
+        // during preroll, where the plain-player rebuild is INVISIBLE, instead
+        // of a quarter-second into the fade where the release + fresh alpha-0
+        // view flashed the underlying first clip and then had to catch up.
+        if (headEffectsActive && !headFirstFrame && !headEffectsFallback) {
+            val sinceMountMs = android.os.SystemClock.uptimeMillis() - headMountedAtMs
+            if (sinceMountMs > headEffectsGraceWallMs) {
+                headEffectsFallback = true
+                headNeedsRebuild = true
+                diag("head effects→plain (no first frame ${sinceMountMs}ms after mount)")
+            }
         }
         headTargetAlpha = ramp
         // v1.2.5: alpha follows the ramp DIRECTLY — no first-frame gate (same
@@ -700,6 +798,15 @@ class OverlayPreviewController(private val context: Context) {
         //    its source span (scrub back / replay after one pass) — the old
         //    blanket ENDED skip showed the held last frame under the ramping
         //    alpha forever, which read as "the second clip never plays".
+        //
+        // v1.2.8: WHILE PLAYING, corrective seeks are additionally rate-
+        // limited (cooldown + hysteresis landing) — the old "seek whenever
+        // drift > 120ms" looped: every seek flushes the decoder and re-decodes
+        // from the previous keyframe, so the player emerged from each seek
+        // FARTHER behind and was instantly re-eligible → a seek-storm that
+        // read as "the second clip is choppy during the transition". Paused
+        // (scrub) tracking keeps the old tight behavior: seeks are cheap and
+        // frame-accurate when nothing is rendering.
         val expectedPosUs = (localUs * spec.speed).toLong()
         when (player.playbackState) {
             Player.STATE_READY -> {
@@ -707,7 +814,21 @@ class OverlayPreviewController(private val context: Context) {
                 val drift = expectedPosUs - posUs
                 val threshold = if (isPlaying) seekDriftThresholdUs else scrubDriftThresholdUs
                 if (kotlin.math.abs(drift) > threshold) {
-                    runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
+                    val nowMs = android.os.SystemClock.uptimeMillis()
+                    val hardRealign = !isPlaying ||
+                        kotlin.math.abs(drift) > headHardRealignDriftUs
+                    if (hardRealign || nowMs - headLastCorrectiveSeekMs >= headCorrectiveSeekCooldownMs) {
+                        val targetUs = if (isPlaying) {
+                            // Land slightly BEHIND the playhead: below the
+                            // drift threshold, so the player is not instantly
+                            // re-eligible for another seek.
+                            (expectedPosUs - headSeekHysteresisUs).coerceAtLeast(0L)
+                        } else {
+                            expectedPosUs
+                        }
+                        runCatching { player.seekTo((targetUs / 1000L).coerceAtLeast(0L)) }
+                        if (isPlaying) headLastCorrectiveSeekMs = nowMs
+                    }
                 }
             }
             Player.STATE_ENDED -> {
