@@ -43,17 +43,42 @@ import com.RooMCutNext.core.util.TransitionMath
  *
  * Outside the transition window the shader is fully opaque (progress = 1),
  * never invisible — the v1.2.1 contract that keeps tail/preroll frames safe.
+ *
+ * v1.5.1 — OUTPUT ALPHA CONVENTION (the preview-looked-like-dissolve bug):
+ * the two consumers composite this shader's output with DIFFERENT alpha
+ * conventions, so the effect carries an explicit [premultipliedAlpha] flag:
+ *
+ *  - EXPORT (Transformer): each sequence's frames land in the compositor,
+ *    whose DefaultCompositorGlProgram blends inputs with
+ *    glBlendFuncSeparate(srcRGB = GL_SRC_ALPHA, dstRGB =
+ *    GL_ONE_MINUS_SRC_ALPHA, ...) — STRAIGHT source alpha (source-verified,
+ *    media3 1.11.1). Correct output: vec4(rgb, alpha) → rgb·alpha + (1−alpha)·body.
+ *    → premultipliedAlpha = false.
+ *
+ *  - PREVIEW head player (plain ExoPlayer → PlaybackVideoGraphWrapper →
+ *    DefaultVideoFrameProcessor → TextureView's SurfaceTexture): there is NO
+ *    compositor — the last effect's output IS the buffer content, and Android
+ *    HWUI composites SurfaceTexture buffers PREMULTIPLIED. A straight-alpha
+ *    buffer is then read as rgb + (1−alpha)·body: the incoming clip shows at
+ *    FULL brightness wherever alpha > 0 — every position-stable style
+ *    (dissolve / fade / flash / wipe / iris / clock / zoom / blur / mosaic)
+ *    collapses into the same ghosted crossfade; only slide/spin betrayed any
+ *    motion. Correct output: vec4(rgb·alpha, alpha). → premultipliedAlpha =
+ *    true, set by OverlayPreviewController's mount.
  */
 class TransitionEffect(
     styleId: String,
     private val fadeUs: Long,
     private val globalStartUs: Long,
+    /** Emit premultiplied alpha for TextureView-style consumers; see the
+     * class doc's v1.5.1 section. Export = false (compositor blends straight). */
+    private val premultipliedAlpha: Boolean = false,
 ) : GlEffect {
 
     private val styleOrdinal: Int = TransitionStyle.fromId(styleId).ordinal
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram =
-        TransitionShaderProgram(useHdr, styleOrdinal, fadeUs, globalStartUs)
+        TransitionShaderProgram(useHdr, styleOrdinal, fadeUs, globalStartUs, premultipliedAlpha)
 
     override fun isNoOp(inputWidth: Int, inputHeight: Int): Boolean = fadeUs <= 0L
 }
@@ -64,14 +89,19 @@ class TransitionEffect(
  * (identity matrices -> vTexSamplingCoord is the frame in [0,1]^2 with
  * v = 1 at the TOP of the picture); the fragment stage picks the branch for
  * [TransitionStyle.ordinal] and applies the TransitionMath formula pair
- * (sample-UV transform + alpha/color) for that style.
+ * (sample-UV transform + alpha/color) for that style. The final write honors
+ * the consumer's alpha convention: straight (compositor blending) or
+ * premultiplied (TextureView) — see [TransitionEffect]'s v1.5.1 section.
  */
 internal class TransitionShaderProgram(
     useHdr: Boolean,
     private val styleOrdinal: Int,
     private val fadeUs: Long,
     private val globalStartUs: Long,
+    premultipliedAlpha: Boolean,
 ) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity = */ 1) {
+
+    private val premultInt = if (premultipliedAlpha) 1 else 0
 
     private val glProgram: GlProgram = try {
         GlProgram(VERTEX_SHADER, FRAGMENT_SHADER).apply {
@@ -82,6 +112,7 @@ internal class TransitionShaderProgram(
             setIntUniform("uStyle", styleOrdinal)
             setFloatUniform("uProgress", 1f)
             setFloatUniform("uAspect", 1f)
+            setIntUniform("uPremult", premultInt)
         }
     } catch (e: GlUtil.GlException) {
         throw VideoFrameProcessingException.from(e)
@@ -105,6 +136,7 @@ internal class TransitionShaderProgram(
             )
             glProgram.setFloatUniform("uAspect", aspect)
             glProgram.setIntUniform("uStyle", styleOrdinal)
+            glProgram.setIntUniform("uPremult", premultInt)
             glProgram.bindAttributesAndUniforms()
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, /* first = */ 0, /* count = */ 4)
         } catch (e: GlUtil.GlException) {
@@ -149,6 +181,7 @@ uniform sampler2D uTexSampler;
 uniform float uProgress;
 uniform int uStyle;
 uniform float uAspect;
+uniform int uPremult;
 varying vec2 vTexSamplingCoord;
 
 // TransitionMath.softLe / softGe — soft edges (EDGE_UV = 0.008).
@@ -313,7 +346,16 @@ void main() {
     rgb = texture2D(uTexSampler, uv).rgb;
   }
 
-  gl_FragColor = vec4(rgb, alpha);
+  // v1.5.1 — consumer alpha convention (see TransitionEffect's class doc):
+  // uPremult=1 emits rgb*alpha for TextureView-style PREMULTIPLIED
+  // compositing (preview head); uPremult=0 keeps straight alpha for the
+  // export compositor's GL_SRC_ALPHA blending. TransitionMath.premultiply
+  // is the reviewed Kotlin source of this line.
+  if (uPremult == 1) {
+    gl_FragColor = vec4(rgb * alpha, alpha);
+  } else {
+    gl_FragColor = vec4(rgb, alpha);
+  }
 }
 """
     }

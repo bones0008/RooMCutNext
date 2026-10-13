@@ -1,6 +1,7 @@
 package com.RooMCutNext.core.util
 
 import com.RooMCutNext.core.model.TransitionStyle
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -291,5 +292,61 @@ class TransitionMathTest {
         assertEquals(0f, TransitionMath.throughColorTexMix(0.25f), 1e-4f)
         assertEquals(0.5f, TransitionMath.throughColorTexMix(0.75f), 1e-4f)
         assertEquals(1f, TransitionMath.throughColorTexMix(1f), 1e-4f)
+    }
+
+    // ------------------------------------------------------------------
+    // premultiply — the v1.5.1 consumer alpha-convention fix. The shader's
+    // final write is premultiplied ONLY for the TextureView preview path;
+    // the export compositor blends GL_SRC_ALPHA and needs straight alpha.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `premultiplied output scales rgb by alpha and keeps the alpha channel`() {
+        // (0.8, 0.4, 0.2) at a=0.5 -> (0.4, 0.2, 0.1, 0.5) — hand-calculated.
+        val out = TransitionMath.premultiply(0.8f, 0.4f, 0.2f, 0.5f, premultiplied = true)
+        assertEquals(0.4f, out[0], 1e-5f)
+        assertEquals(0.2f, out[1], 1e-5f)
+        assertEquals(0.1f, out[2], 1e-5f)
+        assertEquals(0.5f, out[3], 1e-5f)
+    }
+
+    @Test
+    fun `straight output leaves rgb unscaled for the export compositor`() {
+        val out = TransitionMath.premultiply(0.8f, 0.4f, 0.2f, 0.5f, premultiplied = false)
+        assertEquals(0.8f, out[0], 1e-5f)
+        assertEquals(0.4f, out[1], 1e-5f)
+        assertEquals(0.2f, out[2], 1e-5f)
+        assertEquals(0.5f, out[3], 1e-5f)
+    }
+
+    @Test
+    fun `premultiply endpoints are convention-independent`() {
+        // a=0 -> fully transparent; a=1 -> opaque identity in BOTH modes:
+        // premultiplying by 1 is the identity, so the window endpoints
+        // (preroll pin / tail pin) render identically on either path.
+        val zero = TransitionMath.premultiply(0.9f, 0.9f, 0.9f, 0f, premultiplied = true)
+        assertArrayEquals(floatArrayOf(0f, 0f, 0f, 0f), zero, 1e-6f)
+        val one = TransitionMath.premultiply(0.9f, 0.9f, 0.9f, 1f, premultiplied = true)
+        assertArrayEquals(floatArrayOf(0.9f, 0.9f, 0.9f, 1f), one, 1e-6f)
+        val oneStraight = TransitionMath.premultiply(0.9f, 0.9f, 0.9f, 1f, premultiplied = false)
+        assertArrayEquals(one, oneStraight, 1e-6f)
+    }
+
+    @Test
+    fun `a straight-alpha buffer composited as premultiplied ghosts`() {
+        // The regression, pinned as math: with the WRONG convention the
+        // displayed color is rgb + (1-a)*body instead of rgb*a + (1-a)*body.
+        // B=(0.8,0.8,0.8), A=(0.2,0.2,0.2), a=0.5:
+        //  - correct premultiplied composite:  0.8*0.5 + 0.2*0.5 = 0.5
+        //  - ghosted (v1.5.0 preview)       :  0.8     + 0.2*0.5 = 0.9
+        // The 0.9 ghost is B at near-full strength — every position-stable
+        // style collapses into this same look.
+        val b = 0.8f
+        val a = 0.5f
+        val body = 0.2f
+        val correct = TransitionMath.premultiply(b, b, b, a, premultiplied = true)[0] + (1f - a) * body
+        val ghosted = b + (1f - a) * body
+        assertEquals(0.5f, correct, 1e-5f)
+        assertEquals(0.9f, ghosted, 1e-5f)
     }
 }

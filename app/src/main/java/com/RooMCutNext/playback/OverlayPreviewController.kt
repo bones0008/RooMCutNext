@@ -178,6 +178,15 @@ import java.util.concurrent.ConcurrentHashMap
  * style degrades to the classic dissolve ramp. The post-window tail
  * (HeadWindowMath) still uses the view alpha on every path: at tail time
  * the shader is at progress 1 (opaque) and the fade-out is the view's job.
+ *
+ * v1.5.1 — the transition shader is mounted with premultipliedAlpha = true
+ * (see reconcileHead): this view's SurfaceTexture composites premultiplied,
+ * and the straight-alpha output v1.5.0 shipped made every style preview as
+ * the same ghosted crossfade while exports stayed correct (field report:
+ * "选不同的转场并没有变化，导出以后都正常"). Known remaining approximation:
+ * IMAGE heads still use the view-layer ramp (an ImageView cannot run the
+ * shader); slide/zoom/spin could be view-animated later if image-clip
+ * transitions ever need WYSIWYG.
  */
 class OverlayPreviewController(private val context: Context) {
 
@@ -884,12 +893,22 @@ class OverlayPreviewController(private val context: Context) {
                 // session (headEffectsFallback) — a device whose effects
                 // path is broken gets the plain player + the view-layer
                 // dissolve ramp instead (driveHead's shaderOwnsAlpha=false).
+                //
+                // v1.5.1: premultipliedAlpha = TRUE — this player's output
+                // goes straight into the TextureView's SurfaceTexture, which
+                // Android HWUI composites PREMULTIPLIED; a straight-alpha
+                // buffer made every position-stable style read as a ghosted
+                // dissolve (B at full brightness wherever alpha > 0, A
+                // bleeding through). The EXPORT head item keeps straight
+                // alpha because DefaultVideoCompositor blends GL_SRC_ALPHA
+                // — see TransitionEffect's v1.5.1 section.
                 if (!headEffectsFallback) {
                     add(
                         TransitionEffect(
                             active.type,
                             (active.sourceOutUs - active.sourceInUs).coerceAtLeast(1L),
                             -1L,
+                            premultipliedAlpha = true,
                         )
                     )
                 }

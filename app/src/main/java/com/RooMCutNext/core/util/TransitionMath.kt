@@ -205,6 +205,23 @@ object TransitionMath {
 
     fun throughColorTexMix(p: Float): Float = (2f * p - 1f).coerceIn(0f, 1f)
 
+    /**
+     * v1.5.1 — the shader's FINAL WRITE under each consumer's alpha
+     * convention (see TransitionEffect's v1.5.1 section):
+     *  - [premultiplied] = true: (r·a, g·a, b·a, a) — the preview head's
+     *    output goes into a TextureView SurfaceTexture, which Android HWUI
+     *    composites premultiplied;
+     *  - false: (r, g, b, a) straight — the export compositor blends inputs
+     *    with GL_SRC_ALPHA / GL_ONE_MINUS_SRC_ALPHA (DefaultCompositorGlProgram,
+     *    media3 1.11.1), so the shader must NOT pre-scale rgb.
+     * Getting this backwards is the "every style previews as the same
+     * ghosted dissolve" bug: a straight-alpha buffer under premultiplied
+     * compositing displays rgb + (1−a)·body — B at full brightness wherever
+     * a > 0 with A bleeding through, position-stable styles indistinguishable.
+     */
+    fun premultiply(r: Float, g: Float, b: Float, a: Float, premultiplied: Boolean): FloatArray =
+        if (premultiplied) floatArrayOf(r * a, g * a, b * a, a) else floatArrayOf(r, g, b, a)
+
     // ------------------------------------------------------------------
     // shared soft-edge helpers (the GLSL smoothstep equivalents)
     // ------------------------------------------------------------------
