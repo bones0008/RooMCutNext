@@ -825,6 +825,37 @@ class EditorViewModel(
         }
     }
 
+    // ------------------------------------------------------------------
+    // Track-level mutes (v1.3.1)
+    // ------------------------------------------------------------------
+
+    /**
+     * Mute the WHOLE video track (all clips) — the audio lanes (background
+     * music / voice-overs) are NOT covered by this switch, only the video
+     * track's own audio. Non-destructive: per-clip mute flags are untouched;
+     * the pipelines OR the track flag in (Project.clipAudioMuted — the same
+     * helper preview and export consume, so they can never disagree).
+     *
+     * The video-track flag goes through mutate → refreshPlayback: clip audio
+     * is baked into the body composition (setRemoveAudio / GainAudioProcessor),
+     * so toggling must rebuild it. PlaybackController gates the rebuild on
+     * the clips hash — which does NOT move when only this flag flips — so
+     * the flag is folded into the refresh signature there.
+     */
+    fun toggleVideoTrackMute() {
+        mutate("静音视频轨道") { p -> p.copy(videoTrackMuted = !p.videoTrackMuted) }
+    }
+
+    /**
+     * Mute the whole PiP track (all layers' audio). Preview applies this
+     * live — drivePip sets each overlay player's volume from the flag on
+     * every sync — so no composition churn is needed; export strips the
+     * audio in buildPipSequence.
+     */
+    fun togglePipTrackMute() {
+        mutate("静音画中画轨道") { p -> p.copy(pipTrackMuted = !p.pipTrackMuted) }
+    }
+
     fun setClipFades(clipId: String, fadeInMs: Int, fadeOutMs: Int, commit: Boolean = true) {
         val fi = fadeInMs.coerceIn(0, 2000)
         val fo = fadeOutMs.coerceIn(0, 2000)

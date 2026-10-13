@@ -405,11 +405,12 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 modifier = Modifier.fillMaxSize(),
             )
 
-            // v1.3.0: direct manipulation of text overlays — tap to select,
-            // drag to move, pinch to scale, twist to rotate. Sits BETWEEN the
-            // stage and the grab-frame button, so the button's corner always
-            // wins over the gesture layer.
-            TextGestureLayer(vm = vm, state = state)
+            // v1.3.0/v1.3.1: direct manipulation of text overlays AND PiP
+            // layers — tap to select, drag to move, pinch to scale (texts
+            // also twist-rotate). Sits BETWEEN the stage and the grab-frame
+            // button, so the button's corner always wins over the gesture
+            // layer.
+            PreviewGestureLayer(vm = vm, state = state)
 
             // v1.1.4: save the current frame (WYSIWYG — includes grading,
             // crops and text overlays exactly as previewed) into the gallery.
@@ -817,7 +818,12 @@ private fun ActionToolbar(
         ToolbarButton(Icons.Filled.RotateRight, stringResource(R.string.action_rotate), enabled = hasClip, active = active == PanelKind.ROTATE, onClick = onRotate)
         ToolbarButton(Icons.Filled.Crop, stringResource(R.string.action_crop), enabled = hasClip, active = active == PanelKind.CROP, onClick = onCrop)
         ToolbarButton(Icons.Filled.Tune, stringResource(R.string.action_adjust), enabled = hasClip, active = active == PanelKind.ADJUST, onClick = onAdjust)
-        ToolbarButton(Icons.Filled.CompareArrows, stringResource(R.string.action_transition), enabled = hasClip, active = active == PanelKind.TRANSITION, onClick = onTransition)
+        // v1.3.1: crossfade transitions are HIDDEN pending a redesign — the
+        // feature has known preview defects and the owner wants it out of
+        // the UI until the new approach lands. Existing projects keep their
+        // transition data and still export correctly; only the entry points
+        // (this button + the timeline overlap marker) are concealed.
+        // ToolbarButton(Icons.Filled.CompareArrows, stringResource(R.string.action_transition), enabled = hasClip, active = active == PanelKind.TRANSITION, onClick = onTransition)
         ToolbarButton(Icons.Filled.BlurOn, stringResource(R.string.action_mosaic), enabled = hasClip, active = active == PanelKind.MOSAIC, onClick = onMosaic)
         ToolbarButton(Icons.Filled.Info, stringResource(R.string.action_info), enabled = hasClip, active = active == PanelKind.INFO, onClick = onInfo)
         ToolbarButton(Icons.Filled.GpsFixed, stringResource(R.string.action_goto), enabled = true, active = active == PanelKind.GOTO, onClick = onGoto)

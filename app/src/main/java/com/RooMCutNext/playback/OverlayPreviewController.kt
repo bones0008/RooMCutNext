@@ -668,6 +668,11 @@ class OverlayPreviewController(private val context: Context) {
         } else if (!isPlaying && player.playWhenReady) {
             player.playWhenReady = false
         }
+        // v1.3.1: PiP-track mute — applied live on every sync (the toggle
+        // never rebuilds anything). preparePipPlayer keeps volume at 1 so
+        // this is the single owner of the value once the layer exists.
+        val pipVolume = if (currentProject?.pipTrackMuted == true) 0f else 1f
+        if (player.volume != pipVolume) player.volume = pipVolume
     }
 
     // ------------------------------------------------------------------
@@ -1071,6 +1076,13 @@ class OverlayPreviewController(private val context: Context) {
         } else if (!isPlaying && player.playWhenReady) {
             player.playWhenReady = false
         }
+        // v1.3.1: live per-sync volume — a video-track mute toggle must
+        // silence an already-mounted head immediately (the reconcile path
+        // also rebuilds it because the spec's muted field changed, but the
+        // volume catch-up guarantees silence even before that lands).
+        val headVol = if (spec.muted || currentProject?.videoTrackMuted == true) 0f
+        else spec.volume.coerceIn(0f, 1f)
+        if (player.volume != headVol) player.volume = headVol
     }
 
     private fun releaseHeadPlayer() {

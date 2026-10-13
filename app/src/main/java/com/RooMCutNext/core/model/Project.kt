@@ -13,6 +13,12 @@ import kotlinx.serialization.Serializable
  *  - [texts]: text overlays, independent layer anchored to the timeline.
  *  - [audios]: audio clips, independent layer anchored to the timeline.
  *  - [pips]: picture-in-picture layers (v1.2), independent overlay layer.
+ *  - [videoTrackMuted]/[pipTrackMuted] (v1.3.1): TRACK-level audio mutes.
+ *    Non-destructive — per-clip/per-layer mute flags are untouched, the
+ *    effective mute is their OR (see [clipAudioMuted]). The audio lanes
+ *    (background music / voice-overs) are deliberately NOT covered: the
+ *    user-facing contract is "mute the video track / the PiP track, leave
+ *    the music alone".
  */
 @Serializable
 data class Project(
@@ -28,6 +34,11 @@ data class Project(
     val texts: List<TextOverlayItem> = emptyList(),
     val audios: List<AudioClip> = emptyList(),
     val pips: List<PipLayer> = emptyList(),
+    /** v1.3.1: mute the WHOLE video track's audio (clips only, never the
+     *  audio lanes). ORs with each clip's own [Clip.muted]. */
+    val videoTrackMuted: Boolean = false,
+    /** v1.3.1: mute the whole PiP track's audio (all layers). */
+    val pipTrackMuted: Boolean = false,
     val createdAtMs: Long = 0L,
     val updatedAtMs: Long = 0L,
     val schemaVersion: Int = 2,
@@ -66,6 +77,11 @@ data class Project(
     fun textById(id: String): TextOverlayItem? = texts.firstOrNull { it.id == id }
     fun audioById(id: String): AudioClip? = audios.firstOrNull { it.id == id }
     fun pipById(id: String): PipLayer? = pips.firstOrNull { it.id == id }
+
+    /** Effective mute of a video clip's audio: the track switch ORs with the
+     *  clip's own mute. Single source of truth for preview AND export so the
+     *  two can never disagree (WYSIWYG). */
+    fun clipAudioMuted(clip: Clip): Boolean = videoTrackMuted || clip.muted
 
     /** Frame duration of the project timeline grid. */
     val frameDurationUs: Long get() = 1_000_000L / fps

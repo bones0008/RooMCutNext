@@ -262,6 +262,7 @@
     <string name="preview_degraded_chip">兼容预览 · 画面效果暂不显示，导出不受影响</string>
     <!-- v1.3.0: direct text manipulation on the preview -->
     <string name="preview_text_gesture_hint">拖动 · 双指缩放/旋转</string>
+    <string name="preview_pip_gesture_hint">拖动移动 · 双指缩放</string>
     <string name="preview_degraded_toast">已切换到兼容预览：画面效果暂不显示，导出不受影响</string>
     <string name="grant">允许</string>
     <string name="ok">好的</string>

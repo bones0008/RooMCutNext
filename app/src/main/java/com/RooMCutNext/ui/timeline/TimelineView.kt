@@ -150,6 +150,12 @@ private class GeometryHolder {
     var hasClips: Boolean = false
     var hasAnyContent: Boolean = false
 
+    // v1.3.1: track-mute toggle buttons in the pre-origin zone (left of the
+    // 00:00 mark), vertically centered on their track. Null when the track
+    // does not exist. Written by the draw pass, read by hitTest.
+    var videoMuteRect: Rect? = null
+    var pipMuteRect: Rect? = null
+
     fun timeToX(us: Long): Float = us / 1_000_000f * pps - scrollX
     fun xToTimeUs(x: Float): Long = ((x + scrollX) / pps * 1_000_000f).toLong().coerceAtLeast(0)
 
@@ -180,6 +186,9 @@ private sealed class DragMode {
     data class PipTrim(val pipId: String, val isLeft: Boolean) : DragMode()
     data object TapGallery : DragMode()
     data object TapFiles : DragMode()
+    /** v1.3.1: track-level mute toggles (tap-only chips left of 00:00). */
+    data object TapVideoMute : DragMode()
+    data object TapPipMute : DragMode()
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +326,10 @@ fun TimelineView(
             return DragMode.TapGallery
         }
         if (y <= g.rulerBottom) return DragMode.Scrub
+        // v1.3.1: track mute chips win over everything in their rect
+        // (they sit over blank pre-origin space anyway).
+        g.videoMuteRect?.let { if (it.contains(Offset(x, y))) return DragMode.TapVideoMute }
+        g.pipMuteRect?.let { if (it.contains(Offset(x, y))) return DragMode.TapPipMute }
         if (g.pipRegionBottom > g.pipRegionTop && y in g.pipRegionTop..g.pipRegionBottom) {
             val selectedPip = snapshot?.selectedPipId
             if (selectedPip != null) {
@@ -534,6 +547,10 @@ fun TimelineView(
         when (mode) {
             is DragMode.TapGallery -> currentOnAddMedia()
             is DragMode.TapFiles -> currentOnFiles()
+            // v1.3.1: track-level mute toggles — audio lanes (BGM) are
+            // deliberately NOT covered by these switches.
+            is DragMode.TapVideoMute -> v.toggleVideoTrackMute()
+            is DragMode.TapPipMute -> v.togglePipTrackMute()
             // Blank space (ruler, empty track areas): drop the selection.
             // Scrolling/scrubbing only happens via press-and-drag.
             is DragMode.Scrub -> {
@@ -755,11 +772,29 @@ fun TimelineView(
             }
             g.playheadBottom = yCursor
 
+            // v1.3.1: track-mute chips live in the PRE-ORIGIN zone — the empty
+            // space left of the 00:00 ruler origin (x = timeToX(0)), one chip
+            // vertically centered on the video track, one on the PiP region.
+            // They scroll with the timeline content (they are "at 00:00's
+            // left", not pinned to the viewport) and come back whenever the
+            // user returns to the start.
+            val originX = -g.scrollX
+            val muteSize = 28f * dp
+            val muteGap = 8f * dp
+            fun muteRectFor(top: Float, bottom: Float): Rect {
+                val cy = (top + bottom) / 2f
+                val right = originX - muteGap
+                return Rect(right - muteSize, cy - muteSize / 2f, right, cy + muteSize / 2f)
+            }
+            g.videoMuteRect = if (g.hasClips) muteRectFor(g.trackTop, g.trackBottom) else null
+            g.pipMuteRect = if (pipLaneCount > 0) muteRectFor(g.pipRegionTop, g.pipRegionBottom) else null
+
             val clips = displayClips(snap)
             g.clips = clips
 
             drawRuler(snap.project, g, textPaint, dp)
             drawTrackBackground(g, textLaneCount > 0, audioLaneCount > 0, dp)
+            drawMuteButtons(snap.project, g, dp)
 
             val moved = dragState.value as? DragMode.ClipMove
             for (layout in clips) {
@@ -785,7 +820,10 @@ fun TimelineView(
                     dp = dp,
                 )
                 // v1.2.1: crossfade marker over the overlap region.
-                if (layout.transitionUs > 0L) {
+                // v1.3.1: HIDDEN — the transition feature is concealed pending
+                // a redesign (the toolbar entry is commented out too). Existing
+                // projects keep their transition data and still export correctly.
+                if (false && layout.transitionUs > 0L) {
                     drawTransitionMarker(
                         layout = layout,
                         ppsValue = pps,
@@ -1090,6 +1128,79 @@ private fun DrawScope.drawTrackBackground(g: GeometryHolder, hasTextLanes: Boole
             size = Size(g.viewportW, g.audioRegionBottom - g.audioRegionTop),
         )
     }
+}
+
+/**
+ * v1.3.1: the track-level MUTE toggles — rounded chips with a speaker glyph,
+ * sitting in the pre-origin zone to the LEFT of the 00:00 ruler mark, one
+ * vertically centered on the video track and one on the PiP region. The
+ * audio (BGM) lanes deliberately get NO chip: these switches must never
+ * touch the music below. Muted state = red border + slash over the glyph.
+ */
+private fun DrawScope.drawMuteButtons(
+    project: Project,
+    g: GeometryHolder,
+    dp: Float,
+) {
+    fun drawChip(rect: Rect, muted: Boolean) {
+        val corner = CornerRadius(9f * dp)
+        drawRoundRect(
+            color = if (muted) DangerColor.copy(alpha = 0.30f) else Color(0xE60E1218),
+            topLeft = Offset(rect.left, rect.top),
+            size = Size(rect.width, rect.height),
+            cornerRadius = corner,
+        )
+        drawRoundRect(
+            color = if (muted) DangerColor else Color(0xFF546E7A),
+            topLeft = Offset(rect.left, rect.top),
+            size = Size(rect.width, rect.height),
+            cornerRadius = corner,
+            style = Stroke(width = 1.5.dp.toPx()),
+        )
+        val cx = rect.center.x
+        val cy = rect.center.y
+        // Speaker glyph: box + cone, drawn as one closed path.
+        val speaker = Path().apply {
+            moveTo(cx - 6f * dp, cy - 3.5f * dp)
+            lineTo(cx - 2.5f * dp, cy - 3.5f * dp)
+            lineTo(cx + 1.5f * dp, cy - 7f * dp)
+            lineTo(cx + 1.5f * dp, cy + 7f * dp)
+            lineTo(cx - 2.5f * dp, cy + 3.5f * dp)
+            lineTo(cx - 6f * dp, cy + 3.5f * dp)
+            close()
+        }
+        drawPath(speaker, color = Color.White)
+        if (muted) {
+            drawLine(
+                color = DangerColor,
+                start = Offset(cx - 7f * dp, cy - 7f * dp),
+                end = Offset(cx + 7f * dp, cy + 7f * dp),
+                strokeWidth = 2.5.dp.toPx(),
+            )
+        } else {
+            // Sound waves (two arcs opening right).
+            drawArc(
+                color = Color.White,
+                startAngle = -50f,
+                sweepAngle = 100f,
+                useCenter = false,
+                topLeft = Offset(cx + 3f * dp - 3.5f * dp, cy - 3.5f * dp),
+                size = Size(7f * dp, 7f * dp),
+                style = Stroke(width = 1.6.dp.toPx()),
+            )
+            drawArc(
+                color = Color.White.copy(alpha = 0.65f),
+                startAngle = -50f,
+                sweepAngle = 100f,
+                useCenter = false,
+                topLeft = Offset(cx + 3f * dp - 6f * dp, cy - 6f * dp),
+                size = Size(12f * dp, 12f * dp),
+                style = Stroke(width = 1.6.dp.toPx()),
+            )
+        }
+    }
+    g.videoMuteRect?.let { drawChip(it, project.videoTrackMuted) }
+    g.pipMuteRect?.let { drawChip(it, project.pipTrackMuted) }
 }
 
 /**

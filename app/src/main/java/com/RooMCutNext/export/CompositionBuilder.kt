@@ -223,7 +223,7 @@ object CompositionBuilder {
                 // experimentalSetForceAudioTrack() needs to be set to true".
                 // Track whether any head outputs audio so the flag is set
                 // exactly when needed (see the builder call below).
-                if (!asset.isImage && !clip.muted) headsHaveAudio = true
+                if (!asset.isImage && !project.clipAudioMuted(clip)) headsHaveAudio = true
                 transitionItems += buildClipItem(
                     project = project, clip = clip, asset = asset, file = file,
                     sourceInUs = clip.sourceInUs,
@@ -356,9 +356,10 @@ object CompositionBuilder {
         // fix). Force the audio consumer whenever any clip CAN output audio.
         // The preview player does not use SequenceAssetLoader at all, so the
         // flag is deliberately export-only to keep preview behavior identical.
+        // v1.3.1: clipAudioMuted folds in the video-track mute switch.
         val bodyHasAudio = project.clips.any { c ->
             val a = project.assetById(c.assetId)
-            a != null && !a.isImage && !c.muted
+            a != null && !a.isImage && !project.clipAudioMuted(c)
         }
         @Suppress("DEPRECATION") // the only API for this in 1.11.1
         val bodySequence = EditedMediaItemSequence.Builder(items)
@@ -444,7 +445,9 @@ object CompositionBuilder {
                 sourceInUs = clip.sourceInUs,
                 sourceOutUs = (clip.sourceInUs + headSpanUs).coerceAtMost(clip.sourceOutUs),
                 speed = clip.speed,
-                muted = clip.muted,
+                // v1.3.1: OR in the video-track mute — the preview head
+                // player reads this for its volume.
+                muted = project.clipAudioMuted(clip),
                 volume = clip.volume,
             )
         }
@@ -615,8 +618,10 @@ object CompositionBuilder {
         }
 
         // ---- audio ----
+        // v1.3.1: clipAudioMuted — per-clip OR video-track mute (WYSIWYG:
+        // preview and export both derive from Project.clipAudioMuted).
         val audioEffects = mutableListOf<AudioProcessor>()
-        if (!stripEffects && !asset.isImage && !clip.muted &&
+        if (!stripEffects && !asset.isImage && !project.clipAudioMuted(clip) &&
             (clip.volume != 1f || audioFadeInUs > 0 || audioFadeOutUs > 0)
         ) {
             audioEffects += GainAudioProcessor(
@@ -655,7 +660,7 @@ object CompositionBuilder {
             if (clip.speed != 1f) {
                 builder.setSpeed(SpeedParameters(ConstantSpeedProvider(clip.speed), /* shouldMaintainPitch = */ true))
             }
-            if (clip.muted) builder.setRemoveAudio(true)
+            if (project.clipAudioMuted(clip)) builder.setRemoveAudio(true)
         }
         return builder.build()
     }
@@ -865,6 +870,9 @@ object CompositionBuilder {
             builder.setFrameRate(project.fps.toInt().coerceAtLeast(1))
         } else {
             builder.setDurationUs(maxOf(asset.durationUs, pip.durationUs).coerceAtLeast(1L))
+            // v1.3.1: PiP-track mute — strip the layer's audio. (Images have
+            // no audio anywhere, so the flag is video-layer only.)
+            if (project.pipTrackMuted) builder.setRemoveAudio(true)
         }
         items += builder.build()
 

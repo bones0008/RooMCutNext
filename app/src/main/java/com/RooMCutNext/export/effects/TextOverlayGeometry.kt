@@ -13,7 +13,7 @@ import com.RooMCutNext.media.FontRegistry
  * Shared text-block geometry (v1.3.0).
  *
  * The DIRECT-MANIPULATION layer (tap-to-select hit-test + the rotated
- * selection frame in PreviewTextGestures) must agree with what
+ * selection frame in PreviewGestures) must agree with what
  * [TimedTextOverlay] actually paints, pixel for pixel — or the user would
  * grab a box that does not match the text. This object is the single
  * source of truth for both: every layout constant and every builder step

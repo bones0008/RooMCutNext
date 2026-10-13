@@ -10,7 +10,7 @@ import kotlin.math.sin
  * Pure math for direct-manipulation text gestures on the preview (v1.3.0).
  *
  * NO Android imports — every rule here is unit-tested (TextGestureMathTest)
- * and mirrored by the Compose gesture layer (PreviewTextGestures.kt), which
+ * and mirrored by the Compose gesture layer (PreviewGestures.kt), which
  * owns the pointer bookkeeping and calls into these functions.
  *
  * Units & conventions (shared with the renderer — TimedTextOverlay):

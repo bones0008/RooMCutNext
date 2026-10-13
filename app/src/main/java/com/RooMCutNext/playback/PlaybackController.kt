@@ -112,6 +112,9 @@ class PlaybackController(
     // structure; GEOMETRY (x/y/scale/opacity) is NOT — it renders in the
     // view layer now, so dragging a PiP slider never rebuilds the player.
     private var lastSyncedPipsHash: Int = 0
+    // v1.3.1: video-track mute flag — see refresh() for why it gates a
+    // rebuild even though the clips list is unchanged.
+    private var lastSyncedTrackMuteHash: Int = 0
 
     /** Invalidate the synced hashes so the NEXT refresh rebuilds (v1.3.0). */
     private fun forceRebuildNextRefresh() {
@@ -119,6 +122,7 @@ class PlaybackController(
         lastSyncedTextsHash = 0
         lastSyncedAudiosHash = 0
         lastSyncedPipsHash = 0
+        lastSyncedTrackMuteHash = 0
     }
 
     // v1.2.2: structure snapshot at the time of the last degrade; a change
@@ -262,7 +266,14 @@ class PlaybackController(
         val pipsHash = project.pips.fold(1) { acc, p ->
             31 * acc + listOf(p.id, p.assetId, p.startUs, p.durationUs).hashCode()
         }
-        val structureHash = listOf(clipsHash, textsHash, audiosHash, pipsHash).hashCode()
+        // v1.3.1: the video-track mute flag changes clip AUDIO inside the
+        // baked body composition (setRemoveAudio / GainAudioProcessor) but
+        // NOT the clips list — clipsHash alone would early-return and keep
+        // the old audio. Fold the flag into the gate so a track-mute toggle
+        // rebuilds exactly once. (pipTrackMuted is NOT here: the PiP audio
+        // is applied live per overlay player in OverlayPreviewController.)
+        val trackMuteHash = if (project.videoTrackMuted) 1 else 0
+        val structureHash = listOf(clipsHash, textsHash, audiosHash, pipsHash, trackMuteHash).hashCode()
 
         // v1.2.2: recover from degraded mode as soon as the user changes
         // ANYTHING structural — the offending layer may be gone, so retry
@@ -274,7 +285,8 @@ class PlaybackController(
         }
 
         if (!force && clipsHash == lastSyncedClipsHash && textsHash == lastSyncedTextsHash &&
-            audiosHash == lastSyncedAudiosHash && pipsHash == lastSyncedPipsHash
+            audiosHash == lastSyncedAudiosHash && pipsHash == lastSyncedPipsHash &&
+            trackMuteHash == lastSyncedTrackMuteHash
         ) {
             return
         }
@@ -282,6 +294,7 @@ class PlaybackController(
         lastSyncedTextsHash = textsHash
         lastSyncedAudiosHash = audiosHash
         lastSyncedPipsHash = pipsHash
+        lastSyncedTrackMuteHash = trackMuteHash
 
         val p = ensurePlayer()
 
@@ -336,6 +349,7 @@ class PlaybackController(
         lastSyncedTextsHash = 0
         lastSyncedAudiosHash = 0
         lastSyncedPipsHash = 0
+        lastSyncedTrackMuteHash = 0
         lastProject = null
         lastMediaDir = null
     }
