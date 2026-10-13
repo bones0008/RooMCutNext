@@ -187,6 +187,35 @@ import java.util.concurrent.ConcurrentHashMap
  * IMAGE heads still use the view-layer ramp (an ImageView cannot run the
  * shader); slide/zoom/spin could be view-animated later if image-clip
  * transitions ever need WYSIWYG.
+ *
+ * v1.5.2 — TWO preview bugs, both in this controller's state machine (the
+ * v1.5.1 alpha-convention fix was correct but never got to run on the
+ * affected device, see bug 1):
+ *
+ *  1. "EVERY style previews as dissolve while playing" (v1.5.0 + v1.5.1
+ *     field report). The effects-fallback grace was broken twice over:
+ *     driveHead's out-of-window early-out RESET headFirstFrame on every
+ *     preroll sync tick, so a first frame rendered during preroll was
+ *     erased before the in-window grace check could see it; and the 450ms
+ *     budget exceeded the 400ms preroll, so the latch fired ~50ms INTO the
+ *     fade. Playing through a transition therefore latched the
+ *     session-wide plain-player fallback almost deterministically, and
+ *     every style then degraded to the view-layer dissolve ramp. The
+ *     flag is now never reset mid-mount, and the grace is COLD/WARM split
+ *     in HeadEffectsPolicy (first effects mount of the session pays EGL
+ *     context + shader compilation + codec init). Paused scrubbing INTO a
+ *     window happened to survive (mount with the playhead already
+ *     in-window, no preroll reset), which is why the bug looked
+ *     position-dependent.
+ *
+ *  2. "A deleted transition keeps playing until the project is re-entered"
+ *     (v1.5.1 field report). reconcileHead kept a mounted head hidden but
+ *     alive when the playhead sat in no window; driveHead runs AFTER
+ *     reconcileHead in the same sync tick and drove the view from the
+ *     STALE spec, resurrecting the deleted transition every tick. A
+ *     mounted spec that vanished from the current spec list is now
+ *     RELEASED outright (HeadEffectsPolicy.staleSpec); only a
+ *     byte-equal spec keeps the cheap scrub-back-and-forth mount alive.
  */
 class OverlayPreviewController(private val context: Context) {
 
@@ -223,8 +252,13 @@ class OverlayPreviewController(private val context: Context) {
     /** Minimum drift to seek a PAUSED overlay (scrubbing) — under a frame. */
     private val scrubDriftThresholdUs = PipSyncPolicy.SCRUB_DRIFT_US
 
-    /** Mount a head this far BEFORE its window so it is ready to fade in. */
-    private val headPrerollUs = 400_000L
+    /** Mount a head this far BEFORE its window so it is ready to fade in.
+     *
+     * v1.5.2: delegates to HeadEffectsPolicy (pure, unit-tested). 400ms →
+     * 600ms: an effects-bearing mount also pays PlaybackVideoGraphWrapper
+     * initialization, and 400ms let the window entry collide with the tail
+     * of a normal warm first render. */
+    private val headPrerollUs = HeadEffectsPolicy.PREROLL_US
 
     /** v1.2.7: an ENDED overlay player is only "held" (last frame kept)
      * while the playhead is this close to, or past, its source span end —
@@ -282,16 +316,23 @@ class OverlayPreviewController(private val context: Context) {
     private val headHardRealignDriftUs = 1_500_000L
 
     /**
-     * v1.2.8: wall-clock grace before an effects-bearing head that STILL
-     * hasn't rendered falls back to a plain player — measured from MOUNT,
-     * not from window entry (the old localUs > 250ms trigger fired the
-     * rebuild a quarter-second INTO the fade: the player release + fresh
-     * alpha-0 view visibly flashed the underlying first clip and then had
-     * to catch up = both halves of the user-visible bug). 450ms from mount
-     * lands the rebuild in the PREROLL for normal mounts, where alpha is 0
-     * anyway and the swap is invisible.
+     * v1.5.2: wall-clock grace before an effects-bearing head that STILL
+     * hasn't rendered falls back to a plain player, measured from MOUNT.
+     * Now COLD/WARM split in HeadEffectsPolicy (pure, unit-tested):
+     *  - COLD (the session's first effects mount) pays EGL context +
+     *    program compilation + codec init on top of everything else, and
+     *    commonly needs 0.8-2s on mid-range devices: 2500ms.
+     *  - WARM (later mounts, after any effects head has rendered) gets
+     *    1200ms, comfortably above the 600ms preroll so a merely-slow
+     *    warm render is never mistaken for a broken one.
+     * The v1.2.8 single 450ms budget was broken BOTH ways at once: it
+     * exceeded the then-400ms preroll (so the latch fired ~50ms INTO the
+     * fade, the mid-fade pop its own comment described as the bug), and
+     * driveHead reset the first-frame flag on every preroll tick so even
+     * an ON-TIME first frame was erased before the check could see it.
      */
-    private val headEffectsGraceWallMs = 450L
+    private fun headEffectsGraceWallMs(): Long =
+        HeadEffectsPolicy.graceWallMs(headEffectsEverRendered)
 
     /** One record per PiP layer (video → TextureView+player, image → ImageView). */
     private class PipOverlay {
@@ -352,6 +393,16 @@ class OverlayPreviewController(private val context: Context) {
      * broken transition window, so it is not retried per head.
      */
     private var headEffectsFallback = false
+
+    /**
+     * v1.5.2: has ANY effects-bearing head rendered a frame this session?
+     * Selects the COLD vs WARM grace budget (HeadEffectsPolicy) and is the
+     * evidence that the device's effects path WORKS, so a later slow mount
+     * is treated as slow, not broken. Set in onRenderedFirstFrame while the
+     * effects mount is still current; never reset (re-entering the project
+     * rebuilds the controller anyway).
+     */
+    private var headEffectsEverRendered = false
 
     /** Set by driveHead to force reconcileHead to rebuild the head player. */
     private var headNeedsRebuild = false
@@ -766,6 +817,20 @@ class OverlayPreviewController(private val context: Context) {
             }
             // Keep the last head mounted but hidden (cheap scrub back/forth).
             // v1.2.4: alpha, not visibility — same TextureView rule as PiPs.
+            //
+            // v1.5.2: STALE-SPEC RELEASE (bug 2: "a deleted transition keeps
+            // playing until the project is re-entered"). The mounted spec may
+            // no longer exist in the CURRENT spec list (transition deleted,
+            // or its style/length/mute/volume edited while parked outside
+            // the window). driveHead runs AFTER this function in the same
+            // sync tick and drives the view from the STALE spec, which
+            // resurrected the deleted transition every tick; hiding it here
+            // was undone 33ms later. A spec that vanished must be RELEASED.
+            // Only a byte-equal spec keeps the scrub optimization alive.
+            if (HeadEffectsPolicy.staleSpec(mounted, specs)) {
+                releaseHeadPlayer()
+                return
+            }
             headView?.let { if (it.alpha != 0f) it.alpha = 0f }
             headImageView?.let { if (it.visibility != View.INVISIBLE) it.visibility = View.INVISIBLE }
             headPlayer?.let { if (it.playWhenReady) it.playWhenReady = false }
@@ -843,6 +908,12 @@ class OverlayPreviewController(private val context: Context) {
             player.addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() {
                     headFirstFrame = true
+                    // v1.5.2: this is the evidence the device's effects path
+                    // WORKS: later mounts get the WARM grace budget instead of
+                    // the COLD one (HeadEffectsPolicy). Guarded by
+                    // headEffectsActive so a plain (fallback) mount never
+                    // fakes the proof.
+                    if (headEffectsActive) headEffectsEverRendered = true
                     diag("head firstframe ✓")
                     tv.post { if (tv.isAttachedToWindow) tv.alpha = headTargetAlpha }
                 }
@@ -914,7 +985,17 @@ class OverlayPreviewController(private val context: Context) {
                 }
             }
             headEffectsActive = effects.isNotEmpty()
-            if (effects.isNotEmpty()) runCatching { player.setVideoEffects(effects) }
+            // v1.5.2: a THROWN setVideoEffects used to leave headEffectsActive
+            // true with no shader mounted (hard-cut instead of the intended
+            // graceful ramp). On failure, drop to plain explicitly so the
+            // view-layer dissolve ramp covers the window and the DIAG overlay
+            // records why.
+            if (effects.isNotEmpty()) {
+                if (runCatching { player.setVideoEffects(effects) }.isFailure) {
+                    headEffectsActive = false
+                    diag("head setVideoEffects FAILED, plain ramp")
+                }
+            }
             if (active.speed != 1f) player.setPlaybackSpeed(active.speed)
             player.volume = if (active.muted) 0f else active.volume.coerceIn(0f, 1f)
             val item = MediaItem.Builder()
@@ -1083,11 +1164,21 @@ class OverlayPreviewController(private val context: Context) {
         val player = headPlayer ?: return
         val tv = headView ?: return
         // v1.2.4: alpha gating (VISIBLE view, never toggled) — same fix as PiP.
+        // v1.5.2: headFirstFrame is deliberately NOT reset here anymore.
+        // The v1.2.4-era reset made every PREROLL tick erase a first frame
+        // that had already rendered, so the in-window effects-grace check
+        // (below) always saw "no first frame" and latched the session-wide
+        // plain-player fallback ~50ms into the fade: every transition style
+        // then degraded to the view-layer dissolve ramp while playing (the
+        // v1.5.0/v1.5.1 "all styles preview as dissolve" field report; scrub
+        // jumps straight into a window survived, which is why it looked
+        // position-dependent). The flag's lifecycle is now exactly the
+        // mount: false at reconcile, true on the first rendered frame, and
+        // nothing in between touches it.
         if (!inWindow && !inTail) {
             if (player.playWhenReady) player.playWhenReady = false
             headTargetAlpha = 0f
             if (tv.alpha != 0f) tv.alpha = 0f
-            headFirstFrame = false
             return
         }
         if (inTail) {
@@ -1103,17 +1194,22 @@ class OverlayPreviewController(private val context: Context) {
             if (tv.alpha != tailAlpha) tv.alpha = tailAlpha
             return
         }
-        // v1.2.5: effects-grace fallback — v1.2.8 measures the grace in WALL
-        // time from MOUNT (not localUs): a stalled effects path is detected
-        // during preroll, where the plain-player rebuild is INVISIBLE, instead
-        // of a quarter-second into the fade where the release + fresh alpha-0
-        // view flashed the underlying first clip and then had to catch up.
+        // v1.2.5: effects-grace fallback, measured in WALL time from MOUNT.
+        // v1.5.2: COLD/WARM budget from HeadEffectsPolicy (see the grace
+        // function's doc for the two ways the old single 450ms figure was
+        // broken). The latch stays session-sticky by design: a genuinely
+        // broken effects path costs one degraded window, not one per
+        // transition.
         if (headEffectsActive && !headFirstFrame && !headEffectsFallback) {
             val sinceMountMs = android.os.SystemClock.uptimeMillis() - headMountedAtMs
-            if (sinceMountMs > headEffectsGraceWallMs) {
+            val graceMs = headEffectsGraceWallMs()
+            if (sinceMountMs > graceMs) {
                 headEffectsFallback = true
                 headNeedsRebuild = true
-                diag("head effects→plain (no first frame ${sinceMountMs}ms after mount)")
+                diag(
+                    "head effects→plain (${if (headEffectsEverRendered) "warm" else "cold"}, " +
+                        "no first frame ${sinceMountMs}ms > ${graceMs}ms)",
+                )
             }
         }
         headTargetAlpha = viewAlphaFor(ramp)
