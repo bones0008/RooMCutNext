@@ -23,6 +23,7 @@ import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.Project
+import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.core.ops.TimelineOps
 import com.RooMCutNext.core.model.effectiveTransitions
 import androidx.media3.effect.AlphaScale
@@ -136,6 +137,12 @@ object CompositionBuilder {
         exportHeight: Int? = null,
         stripEffects: Boolean = false,
         forPreview: Boolean = false,
+        // v1.3.0: PREVIEW-ONLY live text source (see TimedTextOverlay's
+        // liveTransform). PlaybackController passes a reader over the
+        // editor's current project state so text edits render per frame
+        // with NO composition rebuild. Export callers leave it null and
+        // bake the frozen snapshot.
+        liveTextLookup: ((id: String) -> TextOverlayItem?)? = null,
     ): BuildResult {
         val starts = TimelineOps.starts(project.clips)
         // Effective (clamped) crossfade-in per clip — see effectiveTransitions.
@@ -167,6 +174,7 @@ object CompositionBuilder {
             if (clip.gapBeforeUs >= MIN_GAP_US) {
                 items += buildBlackPadItem(
                     project, mediaDir, clipStartUs - clip.gapBeforeUs, clip.gapBeforeUs, stripEffects,
+                    liveTextLookup,
                 )
                 emittedEndUs = clipStartUs
             }
@@ -193,6 +201,7 @@ object CompositionBuilder {
                     audioFadeInUs = 0L,
                     audioFadeOutUs = if (tUs > 0L) 0L else clip.fadeOutMs * 1000L,
                     stripEffects = stripEffects,
+                    liveTextLookup = liveTextLookup,
                 )
             }
 
@@ -225,6 +234,7 @@ object CompositionBuilder {
                     audioFadeInUs = clip.fadeInMs * 1000L,
                     audioFadeOutUs = 0L,
                     stripEffects = stripEffects,
+                    liveTextLookup = liveTextLookup,
                 )
                 transitionCursorUs = clipStartUs + tUs
             }
@@ -238,6 +248,7 @@ object CompositionBuilder {
         if (totalDurationUs > emittedEndUs + MIN_GAP_US) {
             items += buildBlackPadItem(
                 project, mediaDir, emittedEndUs, totalDurationUs - emittedEndUs, stripEffects,
+                liveTextLookup,
             )
         }
 
@@ -250,7 +261,7 @@ object CompositionBuilder {
             if (totalDurationUs <= 0L) {
                 throw BuildException("No playable clips (media files missing?)")
             }
-            items += buildBlackPadItem(project, mediaDir, 0L, totalDurationUs, stripEffects)
+            items += buildBlackPadItem(project, mediaDir, 0L, totalDurationUs, stripEffects, liveTextLookup)
         }
 
         // ---- sequence STACKING ----
@@ -518,6 +529,7 @@ object CompositionBuilder {
         audioFadeInUs: Long,
         audioFadeOutUs: Long,
         stripEffects: Boolean,
+        liveTextLookup: ((id: String) -> TextOverlayItem?)? = null,
     ): EditedMediaItem {
         val uri = Uri.fromFile(file)
 
@@ -586,6 +598,9 @@ object CompositionBuilder {
                             item = text,
                             windowStartUs = text.startUs,
                             windowEndUs = text.endUs,
+                            liveTransform = liveTextLookup?.let { lookup ->
+                                { lookup(text.id) }
+                            },
                         )
                     }
                 )
@@ -734,6 +749,7 @@ object CompositionBuilder {
         padStartUs: Long,
         padUs: Long,
         stripEffects: Boolean,
+        liveTextLookup: ((id: String) -> TextOverlayItem?)? = null,
     ): EditedMediaItem {
         val black = GeneratedMedia.blackPng(mediaDir, project.width, project.height)
         val mediaItem = MediaItem.Builder()
@@ -754,6 +770,9 @@ object CompositionBuilder {
                             item = text,
                             windowStartUs = text.startUs,
                             windowEndUs = text.endUs,
+                            liveTransform = liveTextLookup?.let { lookup ->
+                                { lookup(text.id) }
+                            },
                         )
                     }
                 )

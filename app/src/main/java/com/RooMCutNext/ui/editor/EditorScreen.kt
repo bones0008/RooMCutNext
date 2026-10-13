@@ -405,6 +405,12 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                 modifier = Modifier.fillMaxSize(),
             )
 
+            // v1.3.0: direct manipulation of text overlays — tap to select,
+            // drag to move, pinch to scale, twist to rotate. Sits BETWEEN the
+            // stage and the grab-frame button, so the button's corner always
+            // wins over the gesture layer.
+            TextGestureLayer(vm = vm, state = state)
+
             // v1.1.4: save the current frame (WYSIWYG — includes grading,
             // crops and text overlays exactly as previewed) into the gallery.
             IconButton(

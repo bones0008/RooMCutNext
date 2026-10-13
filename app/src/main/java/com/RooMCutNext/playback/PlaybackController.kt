@@ -7,7 +7,9 @@ import androidx.media3.common.Player
 import androidx.media3.transformer.CompositionPlayer
 import androidx.media3.ui.PlayerView
 import com.RooMCutNext.core.model.Project
+import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.core.ops.TimelineOps
+import com.RooMCutNext.core.util.TextSignatures
 import com.RooMCutNext.export.CompositionBuilder
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -55,6 +57,24 @@ class PlaybackController(
     var player: CompositionPlayer? = null
         private set
 
+    /**
+     * v1.3.0: PREVIEW-ONLY live text source. When set, every TimedTextOverlay
+     * baked into the preview composition reads the CURRENT item state on
+     * every output frame (see TimedTextOverlay.liveTransform), so visual text
+     * edits — gesture drags, slider moves, color/font/content changes — render
+     * instantly with ZERO composition rebuilds. Export never sees this hook.
+     * Set by EditorViewModel to a reader over its StateFlow (thread-safe:
+     * StateFlow.value is a volatile read of immutable data).
+     */
+    var liveTextLookup: ((id: String) -> TextOverlayItem?)? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            // The running composition's overlays hold the OLD lambda: rebind
+            // them by forcing one rebuild (cheap and rare — set once at VM init).
+            if (player != null) forceRebuildNextRefresh()
+        }
+
     /** µs position of the preview, polled at ~33Hz. */
     var onPositionUs: ((Long) -> Unit)? = null
     var onIsPlaying: ((Boolean) -> Unit)? = null
@@ -92,6 +112,14 @@ class PlaybackController(
     // structure; GEOMETRY (x/y/scale/opacity) is NOT — it renders in the
     // view layer now, so dragging a PiP slider never rebuilds the player.
     private var lastSyncedPipsHash: Int = 0
+
+    /** Invalidate the synced hashes so the NEXT refresh rebuilds (v1.3.0). */
+    private fun forceRebuildNextRefresh() {
+        lastSyncedClipsHash = 0
+        lastSyncedTextsHash = 0
+        lastSyncedAudiosHash = 0
+        lastSyncedPipsHash = 0
+    }
 
     // v1.2.2: structure snapshot at the time of the last degrade; a change
     // here means "the user touched the timeline, retry full effects".
@@ -219,7 +247,13 @@ class PlaybackController(
         lastMediaDir = mediaDir
         lastPositionUs = preservePositionUs
         val clipsHash = project.clips.hashCode()
-        val textsHash = project.texts.hashCode()
+        // v1.3.0: text signature covers WINDOWS ONLY (id/start/end + count).
+        // Visual fields (position / size / rotation / color / font / content)
+        // are read LIVE by TimedTextOverlay every frame (liveTextLookup) and
+        // must NOT rebuild the composition — that churn was why every slider
+        // tick re-prepared the whole pipeline. Same treatment PiP geometry
+        // already gets below. See TextSignatures.
+        val textsHash = TextSignatures.windows(project.texts)
         val audiosHash = project.audios.hashCode()
         // PiP signature = windows only (id/asset/start/duration). Geometry
         // (xRatio/yRatio/scale/opacity) is deliberately excluded: it lives in
@@ -254,7 +288,12 @@ class PlaybackController(
         val buildResult = try {
             // forPreview=true: GL effects receive GLOBAL timeline timestamps in
             // CompositionPlayer (see CompositionBuilder class doc).
-            CompositionBuilder.build(project, mediaDir, stripEffects = degraded, forPreview = true)
+            // v1.3.0: liveTextLookup rides along so the baked text overlays
+            // track live edits frame-by-frame.
+            CompositionBuilder.build(
+                project, mediaDir, stripEffects = degraded, forPreview = true,
+                liveTextLookup = liveTextLookup,
+            )
         } catch (e: Exception) {
             diag("build FAIL: ${e.message?.take(80) ?: e.javaClass.simpleName}")
             onError?.invoke(e.message ?: "composition build failed")

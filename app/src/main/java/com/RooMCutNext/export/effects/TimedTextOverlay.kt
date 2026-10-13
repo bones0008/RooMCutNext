@@ -3,13 +3,9 @@ package com.RooMCutNext.export.effects
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
-import android.text.Layout
-import android.text.StaticLayout
 import android.text.TextPaint
-import androidx.media3.common.util.Size
 import androidx.media3.effect.CanvasOverlay
 import com.RooMCutNext.core.model.TextOverlayItem
-import com.RooMCutNext.media.FontRegistry
 
 /**
  * A [CanvasOverlay] rendering one timeline text overlay inside a time window
@@ -20,28 +16,50 @@ import com.RooMCutNext.media.FontRegistry
  * stroke outline and shadow, which Spannable-based overlays cannot do.
  *
  * Outside the visibility window nothing is drawn (fully transparent overlay).
+ *
+ * v1.3.0 LIVE PREVIEW HOOK: [liveTransform] is an optional per-frame source
+ * of the item's CURRENT state. onDraw runs for every output frame, so when
+ * the preview passes a lookup that reads the editor's live project state,
+ * position / size / rotation / color / font / content edits render
+ * IMMEDIATELY — no composition rebuild, no seek, no player churn. This is
+ * what makes direct-manipulation gestures (drag / pinch / rotate) track the
+ * fingers at frame rate, and what lets the TEXT panel sliders go live too.
+ *
+ * The hook is deliberately PREVIEW-ONLY:
+ *  - EXPORT builds with liveTransform == null and paints the frozen snapshot
+ *    captured at build time — deterministic, replayable, undo-safe;
+ *  - the visibility WINDOW always stays the frozen constructor value on both
+ *    paths (windows are structural: they choose which item carries which
+ *    overlay, and rebuilding them is PlaybackController's job — see
+ *    TextSignatures).
  */
 class TimedTextOverlay(
     private val item: TextOverlayItem,
     private val windowStartUs: Long,
     private val windowEndUs: Long,
+    private val liveTransform: (() -> TextOverlayItem?)? = null,
 ) : CanvasOverlay(/* useInputFrameSize = */ true) {
 
     private var lastCanvasWidth = -1
-    private var fillLayout: StaticLayout? = null
-    private var strokeLayout: StaticLayout? = null
+    /** Item the cached layouts were built for (frozen snapshot or live read). */
+    private var layoutItem: TextOverlayItem? = null
+    private var fillLayout: android.text.StaticLayout? = null
+    private var strokeLayout: android.text.StaticLayout? = null
     private var paintTextSize = 0f
 
     // v1.1: user-selectable font (bundled subset fonts + imports). Resolves
     // to the platform default for "system"/unknown ids, so old projects and
-    // deleted user fonts degrade gracefully. Same resolution on the preview
-    // and export paths — both construct this overlay.
-    private val typeface: Typeface = FontRegistry.resolve(item.style.fontId, item.style.bold)
+    // deleted user fonts degrade gracefully. Re-resolved on every layout
+    // rebuild so live font switches (v1.3.0) take effect without a rebuild.
+    private var typeface: Typeface = TextOverlayGeometry.typeface(item)
 
     private val fillPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = this@TimedTextOverlay.typeface
     }
-    private val strokePaint: TextPaint? = if (item.style.strokeWidthRatio > 0f) {
+
+    // v1.3.0: var — a live edit can turn the outline on/off after
+    // construction, so the paint is (re)created inside rebuildLayouts.
+    private var strokePaint: TextPaint? = if (item.style.strokeWidthRatio > 0f) {
         TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             typeface = this@TimedTextOverlay.typeface
             style = Paint.Style.STROKE
@@ -54,29 +72,39 @@ class TimedTextOverlay(
         // text would linger outside the visibility window.
         canvas.drawColor(android.graphics.Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
         if (presentationTimeUs < windowStartUs || presentationTimeUs >= windowEndUs) return
-        if (item.text.isBlank()) return
+
+        // v1.3.0: the live read. A null live result means "deleted from the
+        // project" (or plain export mode) — the frozen item still renders in
+        // export; in preview a deletion briefly draws nothing until the
+        // structural rebuild swaps this overlay out, which is the correct
+        // fade-free behavior.
+        val eff = liveTransform?.invoke() ?: item
+        if (eff.text.isBlank()) return
 
         val frameW = canvas.width
         val frameH = canvas.height
         if (frameW <= 0 || frameH <= 0) return
 
-        if (frameW != lastCanvasWidth || fillLayout == null) {
-            rebuildLayouts(frameW, frameH)
+        if (frameW != lastCanvasWidth || fillLayout == null || eff != layoutItem) {
+            rebuildLayouts(eff, frameW, frameH)
             lastCanvasWidth = frameW
+            layoutItem = eff
         }
 
-        val cx = item.xRatio * frameW
-        val cy = item.yRatio * frameH
+        val cx = eff.xRatio * frameW
+        val cy = eff.yRatio * frameH
         val layout = fillLayout ?: return
 
         canvas.save()
-        canvas.rotate(item.rotationDeg, cx, cy)
-        if (item.style.shadowRadiusRatio > 0f) {
+        canvas.rotate(eff.rotationDeg, cx, cy)
+        if (eff.style.shadowRadiusRatio > 0f) {
             fillPaint.setShadowLayer(
-                paintTextSize * item.style.shadowRadiusRatio,
+                paintTextSize * eff.style.shadowRadiusRatio,
                 0f, 0f,
-                (item.style.strokeColor and 0xFF000000L).toInt(),
+                (eff.style.strokeColor and 0xFF000000L).toInt(),
             )
+        } else {
+            fillPaint.clearShadowLayer()
         }
         canvas.translate(cx - layout.width / 2f, cy - layout.height / 2f)
         strokeLayout?.draw(canvas)
@@ -84,31 +112,31 @@ class TimedTextOverlay(
         canvas.restore()
     }
 
-    private fun rebuildLayouts(frameW: Int, frameH: Int) {
-        paintTextSize = (item.style.fontSizeRatio * frameH).coerceIn(8f, frameH * 0.5f)
-        fillPaint.textSize = paintTextSize
-        fillPaint.color = item.style.color.toInt()
-        strokePaint?.let {
-            it.textSize = paintTextSize
-            it.color = item.style.strokeColor.toInt()
-            it.strokeWidth = paintTextSize * item.style.strokeWidthRatio
-        }
-        val textWidth = (frameW * 0.92f).toInt().coerceAtLeast(16)
-        fillLayout = staticLayout(item.text, fillPaint, textWidth)
-        strokeLayout = strokePaint?.let { staticLayout(item.text, it, textWidth) }
-    }
+    private fun rebuildLayouts(eff: TextOverlayItem, frameW: Int, frameH: Int) {
+        paintTextSize = TextOverlayGeometry.paintTextSize(eff, frameH)
+        typeface = TextOverlayGeometry.typeface(eff)
 
-    private fun staticLayout(text: String, paint: TextPaint, width: Int): StaticLayout =
-        if (android.os.Build.VERSION.SDK_INT >= 23) {
-            StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
-                .setAlignment(Layout.Alignment.ALIGN_CENTER)
-                .setLineSpacing(0f, 1.12f)
-                .setIncludePad(true)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            StaticLayout(text, paint, width, Layout.Alignment.ALIGN_CENTER, 1.12f, 0f, true)
-        }
+        fillPaint.textSize = paintTextSize
+        fillPaint.color = eff.style.color.toInt()
+        fillPaint.typeface = typeface
+
+        val widthLimit = TextOverlayGeometry.textWidthLimit(frameW)
+        fillLayout = TextOverlayGeometry.staticLayout(eff.text, fillPaint, widthLimit)
+
+        // The stroke paint exists iff the CURRENT style wants one — a live
+        // edit can turn the outline on/off, so (re)create it here.
+        strokeLayout = if (eff.style.strokeWidthRatio > 0f) {
+            val sp = strokePaint ?: TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeJoin = Paint.Join.ROUND
+            }.also { strokePaint = it }
+            sp.textSize = paintTextSize
+            sp.color = eff.style.strokeColor.toInt()
+            sp.strokeWidth = paintTextSize * eff.style.strokeWidthRatio
+            sp.typeface = typeface
+            TextOverlayGeometry.staticLayout(eff.text, sp, widthLimit)
+        } else null
+    }
 
     override fun release() {
         super.release()

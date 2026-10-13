@@ -177,6 +177,20 @@ class EditorViewModel(
      */
     val overlays = OverlayPreviewController(application)
 
+    init {
+        // v1.3.0: LIVE TEXT SOURCE — both preview engines' baked text overlays
+        // read the CURRENT project state on every output frame (thread-safe:
+        // StateFlow.value is a volatile read of an immutable tree), so text
+        // visual edits (gesture drags / sliders / color / font / content)
+        // render instantly with zero composition rebuilds. Export is
+        // unaffected: it always bakes the frozen snapshot.
+        val liveTexts: (String) -> com.RooMCutNext.core.model.TextOverlayItem? = { id ->
+            _state.value.project.textById(id)
+        }
+        playback.liveTextLookup = liveTexts
+        overlays.liveTextLookup = liveTexts
+    }
+
     /** Localized notice shown when preview falls back to compatibility mode. */
     private val degradedNotice: String =
         application.getString(com.RooMCutNext.R.string.preview_degraded_toast)
@@ -304,6 +318,11 @@ class EditorViewModel(
                 _structureVersion.value += 1
                 scheduleAutosave()
             }
+            // v1.3.0: kill the debounce a live drag left pending — the commit
+            // refresh below already syncs everything; without this, a stale
+            // job could fire a SECOND refresh shortly after and churn the
+            // pipeline for nothing.
+            playbackRefreshJob?.cancel()
             refreshPlayback()
         } else {
             mutate(label, transform)

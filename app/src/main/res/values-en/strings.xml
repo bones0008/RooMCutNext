@@ -260,6 +260,8 @@
 
     <!-- Compatibility preview fallback -->
     <string name="preview_degraded_chip">Compatibility preview · effects hidden, export unaffected</string>
+    <!-- v1.3.0: direct text manipulation on the preview -->
+    <string name="preview_text_gesture_hint">Drag · pinch to scale / rotate</string>
     <string name="preview_degraded_toast">Compatibility preview enabled: effects hidden in preview, export unaffected</string>
     <string name="grant">Allow</string>
     <string name="ok">OK</string>

@@ -19,6 +19,7 @@ import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.model.TextOverlayItem
+import com.RooMCutNext.core.util.TextSignatures
 import com.RooMCutNext.export.CompositionBuilder
 import com.RooMCutNext.export.effects.TimedTextOverlay
 import java.io.File
@@ -139,6 +140,15 @@ import java.util.concurrent.ConcurrentHashMap
  *     discipline v1.2.9 gave driveHead (400ms + cooldown while playing).
  */
 class OverlayPreviewController(private val context: Context) {
+
+    /**
+     * v1.3.0: PREVIEW-ONLY live text source — same contract as
+     * PlaybackController.liveTextLookup. The head player's baked
+     * TimedTextOverlays read the CURRENT item state every frame, so text
+     * visual edits follow live while a crossfade head is mounted, WITHOUT
+     * the head rebuild v1.2.10 needed for the same effect.
+     */
+    var liveTextLookup: ((id: String) -> TextOverlayItem?)? = null
 
     /** Overlay host (a FrameLayout layer on top of the PlayerView). */
     private var layer: FrameLayout? = null
@@ -878,6 +888,9 @@ class OverlayPreviewController(private val context: Context) {
                     item = text,
                     windowStartUs = local.startUs,
                     windowEndUs = local.endUs,
+                    liveTransform = liveTextLookup?.let { lookup ->
+                        { lookup(text.id) }
+                    },
                 )
             }
         }
@@ -920,7 +933,9 @@ class OverlayPreviewController(private val context: Context) {
      */
     private fun headEffectsSignature(project: Project, active: CompositionBuilder.HeadOverlaySpec): Int {
         val lookSig = project.clips.firstOrNull { it.id == active.clipId }?.lookSignature() ?: 0
-        return 31 * lookSig + overlappingHeadTexts(project, active).hashCode()
+        // v1.3.0: WINDOWS ONLY (TextSignatures) — visual text edits render
+        // live via liveTextLookup and must not churn the head player anymore.
+        return 31 * lookSig + TextSignatures.windows(overlappingHeadTexts(project, active))
     }
 
     private fun driveHead(playheadUs: Long, isPlaying: Boolean) {
