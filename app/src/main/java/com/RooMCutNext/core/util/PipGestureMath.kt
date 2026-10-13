@@ -57,6 +57,28 @@ object PipGestureMath {
         return start.copy(scale = s)
     }
 
+    /**
+     * v1.3.3 CORNER-HANDLE drag: scale-only variant for PiP layers (they
+     * carry no rotation). (v0x, v0y) is the grabbed corner's vector from the
+     * display-rect center at gesture start; (v1x, v1y) is the finger's
+     * vector now. The display rect is CENTERED on (xRatio, yRatio), so the
+     * layer grows/shrinks in place — same affordance as the text frame's
+     * corner handles, minus the twist.
+     */
+    fun cornerZoom(
+        start: PipLayer,
+        v0x: Float,
+        v0y: Float,
+        v1x: Float,
+        v1y: Float,
+    ): PipLayer {
+        if (!v0x.isFinite() || !v0y.isFinite() || !v1x.isFinite() || !v1y.isFinite()) return start
+        val d0 = kotlin.math.hypot(v0x, v0y)
+        val d1 = kotlin.math.hypot(v1x, v1y)
+        if (d0 < 1e-3f) return start
+        return zoom(start, d1 / d0)
+    }
+
     // ------------------------------------------------------------------
     // Hit testing (axis-aligned display rect in VIEW coordinates)
     // ------------------------------------------------------------------

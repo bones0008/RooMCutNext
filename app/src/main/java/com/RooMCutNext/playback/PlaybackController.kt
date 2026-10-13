@@ -209,7 +209,20 @@ class PlaybackController(
         // and the player is NEVER rebuilt mid-session: a stable surface and
         // player instance across every timeline edit (the v1.2.2 rebuild
         // dance existed only to switch video graph factories).
-        val p = CompositionPlayer.Builder(context).build()
+        //
+        // v1.3.3: experimentalSetEnableReplayableCache(true) — the player's
+        // video graph keeps a 2-frame texture cache so
+        // experimentalRedrawLastFrame() can push the LAST frame back through
+        // the effects pipeline on demand. This is media3's own mechanism for
+        // "accurate effect update" (their words) and what finally makes
+        // live text edits visible while PAUSED: the v1.3.2 same-position
+        // seek nudge turned out not to render on real devices — the
+        // re-decoded frame parks in the release control until playback
+        // resumes, exactly the "must press play to see it" symptom. Export
+        // is unaffected (Transformer builds its own pipeline).
+        val p = CompositionPlayer.Builder(context)
+            .experimentalSetEnableReplayableCache(true)
+            .build()
         p.addListener(listener)
         p.volume = 1f
         player = p
@@ -440,15 +453,25 @@ class PlaybackController(
     fun pause() { player?.pause() }
 
     /**
-     * v1.3.2: re-render the CURRENT frame while paused.
+     * v1.3.3: re-render the CURRENT frame while paused.
      *
      * The preview's baked TimedTextOverlays read the live project state on
      * every OUTPUT frame — but a paused player renders nothing, so live text
      * edits (gesture drags / pinch / panel sliders) stayed invisible until
-     * playback resumed ("scaling only shows after you press play"). A
-     * same-position seek is the cheapest way to push one fresh frame through
-     * the effects pipeline — the same mechanics the frame-step path relies
-     * on. No-ops while playing (frames flow on their own), while nothing is
+     * playback resumed ("scaling only shows after you press play").
+     *
+     * The v1.3.2 attempt seeked to the current position, betting the decoder
+     * would push a fresh frame through the effects graph. It does decode —
+     * but on real devices the frame parks in the sink's release control
+     * until playback resumes, so NOTHING redraws while paused. media3's
+     * purpose-built path is [CompositionPlayer.experimentalRedrawLastFrame]
+     * (requires the player built with replayable cache, see ensurePlayer):
+     * it replays the last CACHED frame through the effects — the overlay's
+     * onDraw re-reads the live state and the frame lands on the surface
+     * immediately. The old same-position seek stays as a fallback for the
+     * unlikely device where the redraw call itself throws.
+     *
+     * No-ops while playing (frames flow on their own), while nothing is
      * prepared (IDLE/BUFFERING — a seek there would restart preparation, the
      * seek-storm livelock driveHead already documents) and on throttling
      * (motion events arrive at 60-120Hz; ~66ms between nudges is plenty for
@@ -465,7 +488,13 @@ class PlaybackController(
         val now = android.os.SystemClock.uptimeMillis()
         if (!force && now - lastNudgeMs < 66L) return
         lastNudgeMs = now
-        runCatching { p.seekTo(p.currentPosition) }
+        try {
+            p.experimentalRedrawLastFrame()
+        } catch (e: IllegalStateException) {
+            // Replayable cache unavailable (unexpected — the builder enables
+            // it): keep the v1.3.2 behavior rather than losing live edits.
+            runCatching { p.seekTo(p.currentPosition) }
+        }
     }
 
     /**

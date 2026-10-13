@@ -85,6 +85,47 @@ class PipGestureMathTest {
         assertEquals(start, PipGestureMath.zoom(start, -1f))
     }
 
+    // ---------------- v1.3.3 cornerZoom (corner-handle scale) ----------------
+
+    @Test
+    fun `cornerZoom pulls the corner outward to double the layer`() {
+        val base = layer(x = 0.3f, y = 0.6f, scale = 0.4f)
+        // Corner vector (100, 50) pulled to (200, 100): 2x.
+        val out = PipGestureMath.cornerZoom(base, 100f, 50f, 200f, 100f)
+        assertEquals(0.8f, out.scale, 1e-4f)
+        // The display rect is centered on (xRatio, yRatio): pinned.
+        assertEquals(0.3f, out.xRatio, 1e-6f)
+        assertEquals(0.6f, out.yRatio, 1e-6f)
+    }
+
+    @Test
+    fun `cornerZoom pulls inward to shrink the layer`() {
+        val out = PipGestureMath.cornerZoom(layer(scale = 0.8f), 200f, 0f, 50f, 0f)
+        assertEquals(0.2f, out.scale, 1e-4f)
+    }
+
+    @Test
+    fun `cornerZoom clamps to the slider range`() {
+        assertEquals(
+            PipGestureMath.SCALE_MAX,
+            PipGestureMath.cornerZoom(layer(scale = 0.9f), 10f, 0f, 1000f, 0f).scale,
+            1e-6f,
+        )
+        assertEquals(
+            PipGestureMath.SCALE_MIN,
+            PipGestureMath.cornerZoom(layer(scale = 0.15f), 100f, 0f, 1f, 0f).scale,
+            1e-6f,
+        )
+    }
+
+    @Test
+    fun `cornerZoom degenerate and non-finite inputs are no-ops`() {
+        val start = layer()
+        assertEquals(start, PipGestureMath.cornerZoom(start, 0f, 0f, 100f, 0f))
+        assertEquals(start, PipGestureMath.cornerZoom(start, Float.NaN, 0f, 100f, 0f))
+        assertEquals(start, PipGestureMath.cornerZoom(start, 100f, 0f, Float.POSITIVE_INFINITY, 0f))
+    }
+
     // ---------------- displayRect / hitTest (WYSIWYG geometry) ----------------
 
     @Test

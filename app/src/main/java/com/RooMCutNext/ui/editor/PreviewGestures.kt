@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -65,11 +66,25 @@ import kotlin.math.hypot
  *   mid-gesture (the v1.3.1 bug: during a pinch, a stray finger landing on
  *   another text/PiP instantly stole the selection). The only ways out:
  *     - tap the CONFIRM CHIP (checkmark at the frame's bottom-right corner):
- *       keep the placed position and drop the selection — the next tap may
- *       then select another element;
+ *       keep the placed position, drop the selection AND close the tool
+ *       panel (v1.3.3 — the editor returns to the standard timeline view);
  *     - a still tap that began OUTSIDE the frame (empty space or another
  *       element): drops the selection without ever switching to whatever
- *       else was under the finger.
+ *       else was under the finger (also closes the panel, v1.3.3).
+ *
+ * v1.3.3 CORNER-HANDLE DRAG + LIVE REDRAW:
+ *   The three corner handles of a selection frame are now DRAGGABLE: for a
+ *   TEXT they scale AND rotate the block about its center (sticker gesture
+ *   — the frame's size and angle follow the finger, and so does the baked
+ *   text); for a PiP they scale the layer about its center. Only the finger
+ *   that grabbed the handle drives it — extra fingers are claimed but
+ *   ignored, so a stray thumb can neither re-anchor nor steal it. This rides
+ *   the same live-preview path as pinch: updateText/updatePip(commit=false)
+ *   plus the nudge, which now replays the last frame through the effects
+ *   graph via CompositionPlayer.experimentalRedrawLastFrame (see
+ *   PlaybackController) — the v1.3.2 same-position seek never actually
+ *   rendered on devices, which is why text edits while paused used to stay
+ *   invisible until the user pressed play.
  *
  * Z-order parity with the renderers: PiP layers draw ABOVE the baked text
  * overlays (preview: overlay TextureViews sit on top of the PlayerView;
@@ -132,6 +147,9 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                     // matches Material's ~48dp interactive minimum closely
                     // enough without covering half a small frame.
                     val checkHitR = 21.dp.toPx()
+                    // v1.3.3: grab radius for the DRAGGABLE corner handles
+                    // (drawn 4.5dp circles). Checked AFTER the chip.
+                    val cornerHitR = 24.dp.toPx()
 
                     // ---- hit testing: PiPs FIRST (they render above texts) ----
                     // Later list entry = higher z (view add order AND export
@@ -229,19 +247,42 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                         if (onChip) {
                             tappedCheck = true
                         } else {
-                            startedOnTarget = TextGestureMath.hitRotatedRect(
+                            // v1.3.3: down on a DRAGGABLE corner handle →
+                            // corner-drag session (text: scale+rotate about
+                            // the center; PiP: scale). The bottom-right seat
+                            // is the confirm chip and never starts a drag.
+                            // A corner tap counts as ON-target even when the
+                            // handle circle spills outside a tiny frame.
+                            val cornerOff = lockedFrame.nearestCornerOffset(down.position, cornerHitR)
+                            startedOnTarget = cornerOff != null || TextGestureMath.hitRotatedRect(
                                 down.position.x, down.position.y,
                                 lockedFrame.cx, lockedFrame.cy,
                                 lockedFrame.halfW, lockedFrame.halfH,
                                 lockedFrame.rotationDeg,
                             )
-                            session = newSession(
-                                when {
-                                    lockedPip != null -> GestureTarget.Pip(lockedPip)
-                                    else -> GestureTarget.Text(lockedText!!)
-                                },
-                                listOf(down),
-                            )
+                            val target = when {
+                                lockedPip != null -> GestureTarget.Pip(lockedPip)
+                                else -> GestureTarget.Text(lockedText!!)
+                            }
+                            session = if (cornerOff != null) {
+                                GestureSession(
+                                    target = target,
+                                    anchorX = down.position.x,
+                                    anchorY = down.position.y,
+                                    anchorDist = 0f,
+                                    anchorAngle = 0f,
+                                    pointers = 1,
+                                    corner = CornerAnchor(
+                                        centerX = lockedFrame.cx,
+                                        centerY = lockedFrame.cy,
+                                        baseX = cornerOff[0],
+                                        baseY = cornerOff[1],
+                                        pointerId = down.id,
+                                    ),
+                                )
+                            } else {
+                                newSession(target, listOf(down))
+                            }
                         }
                     } else {
                         // ---- nothing selected (or the selection is not at
@@ -277,6 +318,9 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                         // Finger added / removed → (re)anchor so the transform
                         // never jumps: the base re-captures the CURRENT item
                         // values and the touch anchors reset to now.
+                        // v1.3.3: corner drags NEVER re-anchor — only the
+                        // finger that grabbed the handle drives them, and
+                        // handing them to a centroid mid-twist would jump.
                         if (session == null) {
                             // A second finger landing anywhere starts a pinch on
                             // the SELECTED item — but only one VISIBLE at the
@@ -295,7 +339,7 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                                     else -> null
                                 }
                             }
-                        } else if (pressed.size != session!!.pointers) {
+                        } else if (session!!.corner == null && pressed.size != session!!.pointers) {
                             val s = vm.state.value
                             val live = when (val t = session!!.target) {
                                 is GestureTarget.Text ->
@@ -308,50 +352,94 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
 
                         val sess = session
                         if (sess != null) {
-                            val c = centroid(pressed)
-                            travelled = maxOf(
-                                travelled,
-                                hypot(c.x - down.position.x, c.y - down.position.y),
-                            )
-                            // Anchor-relative transforms (no incremental drift).
-                            when (val t = sess.target) {
-                                is GestureTarget.Text -> {
-                                    var item = TextGestureMath.pan(
-                                        t.item, c.x - sess.anchorX, c.y - sess.anchorY, contentW, contentH,
-                                    )
-                                    if (pressed.size >= 2) {
-                                        val a = twoFinger(pressed)
-                                        if (a != null && sess.anchorDist > 0f) {
-                                            item = TextGestureMath.zoom(item, a[0] / sess.anchorDist)
-                                            item = TextGestureMath.rotate(item, a[1] - sess.anchorAngle)
+                            val corner = sess.corner
+                            if (corner != null) {
+                                // ---- v1.3.3 CORNER-HANDLE DRAG ----
+                                // Only the finger that grabbed the handle
+                                // drives it; extra fingers are claimed but
+                                // ignored. When the grabbing finger lifts,
+                                // the gesture ends here — the post-loop code
+                                // commits and the still-tap rules see a
+                                // dirty drag, exactly like a pan/pinch.
+                                val tracked = pressed.firstOrNull { it.id == corner.pointerId }
+                                if (tracked == null) {
+                                    break
+                                }
+                                travelled = maxOf(
+                                    travelled,
+                                    hypot(tracked.position.x - down.position.x, tracked.position.y - down.position.y),
+                                )
+                                val v1x = tracked.position.x - corner.centerX
+                                val v1y = tracked.position.y - corner.centerY
+                                when (val t = sess.target) {
+                                    is GestureTarget.Text -> {
+                                        val item = TextGestureMath.cornerDrag(
+                                            t.item, corner.baseX, corner.baseY, v1x, v1y,
+                                        )
+                                        val current = vm.state.value.project.textById(t.item.id)
+                                        if (current != null && item != current) {
+                                            vm.updateText(item, commit = false)
+                                            dirty = true
                                         }
                                     }
-                                    val current = vm.state.value.project.textById(t.item.id)
-                                    if (current != null && item != current) {
-                                        vm.updateText(item, commit = false)
-                                        dirty = true
-                                    }
-                                }
-                                is GestureTarget.Pip -> {
-                                    var layer = PipGestureMath.pan(
-                                        t.layer, c.x - sess.anchorX, c.y - sess.anchorY, contentW, contentH,
-                                    )
-                                    if (pressed.size >= 2) {
-                                        val a = twoFinger(pressed)
-                                        if (a != null && sess.anchorDist > 0f) {
-                                            layer = PipGestureMath.zoom(layer, a[0] / sess.anchorDist)
+                                    is GestureTarget.Pip -> {
+                                        val layer = PipGestureMath.cornerZoom(
+                                            t.layer, corner.baseX, corner.baseY, v1x, v1y,
+                                        )
+                                        val current = vm.state.value.project.pipById(t.layer.id)
+                                        if (current != null && layer != current) {
+                                            vm.updatePip(layer, commit = false)
+                                            dirty = true
                                         }
                                     }
-                                    val current = vm.state.value.project.pipById(t.layer.id)
-                                    if (current != null && layer != current) {
-                                        vm.updatePip(layer, commit = false)
-                                        dirty = true
+                                }
+                                event.changes.forEach { it.consume() }
+                            } else {
+                                val c = centroid(pressed)
+                                travelled = maxOf(
+                                    travelled,
+                                    hypot(c.x - down.position.x, c.y - down.position.y),
+                                )
+                                // Anchor-relative transforms (no incremental drift).
+                                when (val t = sess.target) {
+                                    is GestureTarget.Text -> {
+                                        var item = TextGestureMath.pan(
+                                            t.item, c.x - sess.anchorX, c.y - sess.anchorY, contentW, contentH,
+                                        )
+                                        if (pressed.size >= 2) {
+                                            val a = twoFinger(pressed)
+                                            if (a != null && sess.anchorDist > 0f) {
+                                                item = TextGestureMath.zoom(item, a[0] / sess.anchorDist)
+                                                item = TextGestureMath.rotate(item, a[1] - sess.anchorAngle)
+                                            }
+                                        }
+                                        val current = vm.state.value.project.textById(t.item.id)
+                                        if (current != null && item != current) {
+                                            vm.updateText(item, commit = false)
+                                            dirty = true
+                                        }
+                                    }
+                                    is GestureTarget.Pip -> {
+                                        var layer = PipGestureMath.pan(
+                                            t.layer, c.x - sess.anchorX, c.y - sess.anchorY, contentW, contentH,
+                                        )
+                                        if (pressed.size >= 2) {
+                                            val a = twoFinger(pressed)
+                                            if (a != null && sess.anchorDist > 0f) {
+                                                layer = PipGestureMath.zoom(layer, a[0] / sess.anchorDist)
+                                            }
+                                        }
+                                        val current = vm.state.value.project.pipById(t.layer.id)
+                                        if (current != null && layer != current) {
+                                            vm.updatePip(layer, commit = false)
+                                            dirty = true
+                                        }
                                     }
                                 }
+                                // Claim the motion while dragging so nothing under
+                                // this layer reacts to it.
+                                event.changes.forEach { it.consume() }
                             }
-                            // Claim the motion while dragging so nothing under
-                            // this layer reacts to it.
-                            event.changes.forEach { it.consume() }
                         }
                     }
 
@@ -380,22 +468,27 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                     if (tappedCheck) {
                         // Confirm chip: a STILL, non-editing tap keeps the placed
                         // position and drops the selection so another element
-                        // may be picked next. (Chip touch followed by an actual
+                        // may be picked next. v1.3.3: also CLOSES the inline
+                        // tool panel — the editor returns to the standard
+                        // timeline view (the v1.3.2 bare deselect left the
+                        // TEXT/PIP tool open, and the text panel then claimed
+                        // "text deleted"). (Chip touch followed by an actual
                         // pinch already committed above — keep the selection.)
-                        if (!dirty && travelled < slop) vm.selectText(null)
+                        if (!dirty && travelled < slop) vm.confirmPreviewPlacement()
                     } else if (sess != null) {
                         if (!dirty && travelled < slop && !startedOnTarget) {
                             // v1.3.2: a still tap that began OUTSIDE the locked
                             // element's frame (empty space or another element)
                             // drops the selection — it never switches to what
-                            // else was under the finger.
-                            vm.selectText(null)
+                            // else was under the finger. v1.3.3: panel closes
+                            // too (same confirm semantics as the chip).
+                            vm.confirmPreviewPlacement()
                         }
                     } else if (travelled < slop && vm.state.value.hasSelection) {
                         // No lock was active and nothing was hit: plain tap on
                         // empty preview → drop any (possibly playhead-invisible)
-                        // selection.
-                        vm.selectText(null)
+                        // selection. v1.3.3: panel closes with it.
+                        vm.confirmPreviewPlacement()
                     }
                 }
             },
@@ -420,6 +513,24 @@ private class GestureSession(
     val anchorDist: Float,
     val anchorAngle: Float,
     val pointers: Int,
+    /**
+     * v1.3.3: non-null when the gesture started on a DRAGGABLE corner
+     * handle — corner-drag semantics replace the centroid pan/pinch math.
+     */
+    val corner: CornerAnchor? = null,
+)
+
+/**
+ * v1.3.3 corner-drag anchor: the frame center (pinned for the whole drag —
+ * corner drags never pan), the grabbed corner's vector from that center at
+ * gesture start, and the pointer id of the finger that grabbed it.
+ */
+private class CornerAnchor(
+    val centerX: Float,
+    val centerY: Float,
+    val baseX: Float,
+    val baseY: Float,
+    val pointerId: PointerId,
 )
 
 /**
@@ -438,6 +549,41 @@ private class SelectionFrame(
     fun checkCorner(): Offset {
         val r = TextGestureMath.rotateOffset(halfW, halfH, rotationDeg)
         return Offset(cx + r[0], cy + r[1])
+    }
+
+    /**
+     * v1.3.3: the three DRAGGABLE corners (top-left, top-right, bottom-left
+     * — bottom-right is the confirm chip's seat), as absolute view-space
+     * positions with the frame rotation applied.
+     */
+    fun cornerPoints(): List<Offset> {
+        val tl = TextGestureMath.rotateOffset(-halfW, -halfH, rotationDeg)
+        val tr = TextGestureMath.rotateOffset(halfW, -halfH, rotationDeg)
+        val bl = TextGestureMath.rotateOffset(-halfW, halfH, rotationDeg)
+        return listOf(
+            Offset(cx + tl[0], cy + tl[1]),
+            Offset(cx + tr[0], cy + tr[1]),
+            Offset(cx + bl[0], cy + bl[1]),
+        )
+    }
+
+    /**
+     * v1.3.3: the closest draggable corner within [radius] of [p], returned
+     * as the corner's OFFSET from the frame center — exactly the base vector
+     * a corner-drag session anchors against. Null when nothing is in reach.
+     */
+    fun nearestCornerOffset(p: Offset, radius: Float): FloatArray? {
+        if (!p.x.isFinite() || !p.y.isFinite() || radius <= 0f) return null
+        var best: FloatArray? = null
+        var bestD = radius
+        for (pt in cornerPoints()) {
+            val d = hypot(p.x - pt.x, p.y - pt.y)
+            if (d <= bestD) {
+                bestD = d
+                best = floatArrayOf(pt.x - cx, pt.y - cy)
+            }
+        }
+        return best
     }
 }
 

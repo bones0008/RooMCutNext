@@ -594,6 +594,35 @@ class EditorViewModel(
         }
     }
 
+    /**
+     * v1.3.3: the preview's CONFIRM gesture (checkmark chip, or a still tap
+     * that drops the selection). Keeps the placed geometry — the undoable
+     * commit already happened on finger-up — drops EVERY selection AND closes
+     * the inline tool panel so the editor returns to the standard timeline
+     * view.
+     *
+     * v1.3.2 shipped the chip as a bare selectText(null): the TEXT/PIP panel
+     * stayed open afterwards, and the text panel then showed its "text was
+     * deleted" fallback (panel_text_gone) because its target was gone — the
+     * user read that as "confirming deleted my text". Closing the panel here
+     * fixes both the stuck tool highlight and that misleading hint in one
+     * move: check → confirmed, timeline back, nothing selected.
+     */
+    fun confirmPreviewPlacement() {
+        val s = _state.value
+        if (!s.hasSelection && s.activePanel == null) return
+        _state.update {
+            it.copy(
+                selectedClipId = null,
+                selectedTextId = null,
+                selectedAudioId = null,
+                selectedPipId = null,
+                selectedMosaicId = null,
+                activePanel = null,
+            )
+        }
+    }
+
     fun openPanel(panel: PanelKind?) {
         // v1.1.1 toggle: tapping the toolbar button of the already-open
         // panel closes it — the inline panel sits in the timeline area, so

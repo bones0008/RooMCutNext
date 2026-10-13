@@ -279,4 +279,70 @@ class TextGestureMathTest {
         assertEquals(3_000_000L, it.endUs) // untouched fields untouched
         assertEquals("字幕", it.text)
     }
+
+    // ---------------- v1.3.3 cornerDrag (corner-handle sticker gesture) ----------------
+
+    @Test
+    fun `cornerDrag pure scale doubles the font and keeps everything else`() {
+        val base = item(x = 0.3f, y = 0.7f, size = 0.08f, rot = 0f)
+        // Corner vector (100, 0) pulled to (200, 0): 2x, no twist.
+        val out = TextGestureMath.cornerDrag(base, 100f, 0f, 200f, 0f)
+        assertEquals(0.16f, out.style.fontSizeRatio, 1e-6f)
+        assertEquals(0f, out.rotationDeg, 1e-4f)
+        // The block is drawn centered on (xRatio, yRatio): corner drags
+        // scale about the center, so the position is pinned.
+        assertEquals(0.3f, out.xRatio, 1e-6f)
+        assertEquals(0.7f, out.yRatio, 1e-6f)
+    }
+
+    @Test
+    fun `cornerDrag pure twist rotates by the swept angle`() {
+        val base = item(size = 0.1f, rot = 0f)
+        // Corner vector (100, 0) swept to (0, 100): +90 degrees.
+        val out = TextGestureMath.cornerDrag(base, 100f, 0f, 0f, 100f)
+        assertEquals(90f, out.rotationDeg, 1e-3f)
+        assertEquals(0.1f, out.style.fontSizeRatio, 1e-6f)
+        assertEquals(0.5f, out.xRatio, 1e-6f)
+        assertEquals(0.5f, out.yRatio, 1e-6f)
+    }
+
+    @Test
+    fun `cornerDrag scale and twist compose in one gesture`() {
+        val base = item(size = 0.05f, rot = 10f)
+        // (100, 0) → (0, 200): 90 degrees + 2x.
+        val out = TextGestureMath.cornerDrag(base, 100f, 0f, 0f, 200f)
+        assertEquals(0.1f, out.style.fontSizeRatio, 1e-6f)
+        assertEquals(100f, out.rotationDeg, 1e-3f)
+    }
+
+    @Test
+    fun `cornerDrag negative twist wraps into the slider domain`() {
+        val base = item(rot = 170f)
+        // (100, 0) → (0, -100): -90 degrees → 170 - 90 = 80.
+        val out = TextGestureMath.cornerDrag(base, 100f, 0f, 0f, -100f)
+        assertEquals(80f, out.rotationDeg, 1e-3f)
+    }
+
+    @Test
+    fun `cornerDrag clamps the font to the slider ceiling`() {
+        val base = item(size = 0.2f)
+        // 100x pull on a 0.2 base would be 20 — clamped to 0.25.
+        val out = TextGestureMath.cornerDrag(base, 1f, 0f, 100f, 0f)
+        assertEquals(TextGestureMath.SIZE_MAX, out.style.fontSizeRatio, 1e-6f)
+    }
+
+    @Test
+    fun `cornerDrag identical vectors are a no-op`() {
+        val base = item(size = 0.08f, rot = 33f)
+        assertEquals(base, TextGestureMath.cornerDrag(base, 40f, 25f, 40f, 25f))
+    }
+
+    @Test
+    fun `cornerDrag degenerate and non-finite inputs are no-ops`() {
+        val base = item()
+        assertEquals(base, TextGestureMath.cornerDrag(base, 0f, 0f, 100f, 0f))
+        assertEquals(base, TextGestureMath.cornerDrag(base, Float.NaN, 0f, 100f, 0f))
+        assertEquals(base, TextGestureMath.cornerDrag(base, 100f, 0f, Float.NaN, 0f))
+        assertEquals(base, TextGestureMath.cornerDrag(base, Float.POSITIVE_INFINITY, 0f, 100f, 0f))
+    }
 }

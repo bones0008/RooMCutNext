@@ -105,6 +105,42 @@ object TextGestureMath {
         return start.copy(rotationDeg = wrapDeg(start.rotationDeg + deltaDeg))
     }
 
+    /**
+     * v1.3.3 CORNER-HANDLE drag: uniform scale + rotate about the text
+     * center, driven by ONE frame corner. (v0x, v0y) is the corner's vector
+     * from the frame center at gesture start; (v1x, v1y) is the finger's
+     * vector from the SAME center now. The text block is drawn centered on
+     * (xRatio, yRatio) and rotated about it, so scaling the font and adding
+     * the angle delta keeps the center pinned — the classic sticker gesture.
+     *
+     * Scale = |v1| / |v0| (finger pulls the corner outward → text grows);
+     * rotation = signed angle from v0 to v1 (twisting the corner twists the
+     * text). Position (xRatio/yRatio) never changes. Base-relative like
+     * pan/zoom/rotate: the caller captures the item at drag start, so no
+     * incremental drift.
+     */
+    fun cornerDrag(
+        start: TextOverlayItem,
+        v0x: Float,
+        v0y: Float,
+        v1x: Float,
+        v1y: Float,
+    ): TextOverlayItem {
+        if (!v0x.isFinite() || !v0y.isFinite() || !v1x.isFinite() || !v1y.isFinite()) return start
+        val d0 = hypot(v0x, v0y)
+        val d1 = hypot(v1x, v1y)
+        if (d0 < 1e-3f) return start
+        val scale = d1 / d0
+        val deltaDeg = Math.toDegrees(
+            (kotlin.math.atan2(v1y.toDouble(), v1x.toDouble()) -
+                kotlin.math.atan2(v0y.toDouble(), v0x.toDouble())),
+        ).toFloat()
+        var item = start
+        if (scale.isFinite() && scale > 0f && scale != 1f) item = zoom(item, scale)
+        if (deltaDeg != 0f) item = rotate(item, deltaDeg)
+        return item
+    }
+
     /** Wrap to [-180, 180]: the slider's domain, and visually identical. */
     fun wrapDeg(deg: Float): Float {
         var d = deg % 360f
