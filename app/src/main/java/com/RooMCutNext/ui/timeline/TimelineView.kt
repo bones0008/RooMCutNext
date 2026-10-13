@@ -820,10 +820,11 @@ fun TimelineView(
                     dp = dp,
                 )
                 // v1.2.1: crossfade marker over the overlap region.
-                // v1.3.1: HIDDEN — the transition feature is concealed pending
-                // a redesign (the toolbar entry is commented out too). Existing
-                // projects keep their transition data and still export correctly.
-                if (false && layout.transitionUs > 0L) {
+                // v1.3.1 concealed it pending the redesign; v1.4.0 restores it
+                // (see the EditorScreen toolbar note — the reference-design
+                // audit cleared the preview architecture, and the entry
+                // points are the only thing that was ever missing).
+                if (layout.transitionUs > 0L) {
                     drawTransitionMarker(
                         layout = layout,
                         ppsValue = pps,

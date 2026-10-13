@@ -818,12 +818,16 @@ private fun ActionToolbar(
         ToolbarButton(Icons.Filled.RotateRight, stringResource(R.string.action_rotate), enabled = hasClip, active = active == PanelKind.ROTATE, onClick = onRotate)
         ToolbarButton(Icons.Filled.Crop, stringResource(R.string.action_crop), enabled = hasClip, active = active == PanelKind.CROP, onClick = onCrop)
         ToolbarButton(Icons.Filled.Tune, stringResource(R.string.action_adjust), enabled = hasClip, active = active == PanelKind.ADJUST, onClick = onAdjust)
-        // v1.3.1: crossfade transitions are HIDDEN pending a redesign — the
-        // feature has known preview defects and the owner wants it out of
-        // the UI until the new approach lands. Existing projects keep their
-        // transition data and still export correctly; only the entry points
-        // (this button + the timeline overlap marker) are concealed.
-        // ToolbarButton(Icons.Filled.CompareArrows, stringResource(R.string.action_transition), enabled = hasClip, active = active == PanelKind.TRANSITION, onClick = onTransition)
+        // v1.4.0: transitions are BACK. The redesign the v1.3.1 concealment
+        // waited for arrived via the 转场开发技术参考 analysis: the preview
+        // architecture the reference prescribes (dual player + view-layer
+        // alpha blend + preroll warm-up + text baked into BOTH layers) is
+        // exactly what the head engine already implements, and every defect
+        // the reference documents (fade stutter, last-frame flash, text
+        // fading with the clip) was fixed across v1.2.7-v1.2.10. The v1.4.0
+        // multi-audio sync fix (PipSyncPolicy) hardens the same overlay
+        // player family the head belongs to.
+        ToolbarButton(Icons.Filled.CompareArrows, stringResource(R.string.action_transition), enabled = hasClip, active = active == PanelKind.TRANSITION, onClick = onTransition)
         ToolbarButton(Icons.Filled.BlurOn, stringResource(R.string.action_mosaic), enabled = hasClip, active = active == PanelKind.MOSAIC, onClick = onMosaic)
         ToolbarButton(Icons.Filled.Info, stringResource(R.string.action_info), enabled = hasClip, active = active == PanelKind.INFO, onClick = onInfo)
         ToolbarButton(Icons.Filled.GpsFixed, stringResource(R.string.action_goto), enabled = true, active = active == PanelKind.GOTO, onClick = onGoto)

@@ -138,6 +138,29 @@ import java.util.concurrent.ConcurrentHashMap
  *     cooldown-gated seek forever — the metronome. Head hard-realign is now
  *     1.5s (beyond any decoder/effects spin-up), and drivePip got the same
  *     discipline v1.2.9 gave driveHead (400ms + cooldown while playing).
+ *
+ * v1.4.0 — TWO changes:
+ *
+ *  1. PiP hard-realign gate 400ms → 1.5s, moved into PipSyncPolicy (pure,
+ *     unit-tested). The 400ms gate was still inside the restart-latency
+ *     range when BGM + clip audio + PiP audio are ALL active (the audio
+ *     pipeline opens slower with three sources): the drift parked above
+ *     the gate and the cooldown re-fired the seek metronome — the random
+ *     "PiP stutters / everything freezes but sound keeps going / plays
+ *     fine the second time" field reports. See PipSyncPolicyTest.
+ *
+ *  2. TRANSITIONS RE-ENABLED (UI entries restored in EditorScreen +
+ *     TimelineView). The v1.3.1 concealment waited for a redesign; the
+ *     转场开发技术参考 audit confirmed this controller already IS the
+ *     reference architecture: overlapping timeline model (v1.2.1), dual
+ *     players with view-layer alpha blend (the reference's "TextureView B
+ *     over TextureView A" dissolve), preroll warm-up of the incoming
+ *     player (headPrerollUs, reference prescribes 300-500ms), text baked
+ *     into BOTH layers (constant composite — global text never fades with
+ *     the clip), and an untouched export path. GPU shader transitions
+ *     (wipe/slide/zoom — the reference's phase 5) remain the documented
+ *     future extension point; the reference itself prescribes Dissolve
+ *     first, which is what ships.
  */
 class OverlayPreviewController(private val context: Context) {
 
@@ -165,18 +188,14 @@ class OverlayPreviewController(private val context: Context) {
         onDiag?.invoke(line)
     }
 
-    /**
-     * v1.2.10: drift big enough to hard-realign a PLAYING PiP player
-     * (cooldown-gated). While playing, a constant sub-400ms lag is
-     * deliberately left alone — see the v1.2.10 note in drivePip.
-     */
-    private val pipHardRealignDriftUs = 400_000L
-
-    /** v1.2.10: cooldown between hard-realign seeks of a PLAYING PiP player. */
-    private val pipCorrectiveSeekCooldownMs = 500L
+    // v1.4.0: the PiP corrective-seek thresholds moved into PipSyncPolicy
+    // (pure, unit-tested — see PipSyncPolicyTest for the metronome
+    // regression this extraction locks down). The constants below that the
+    // HEAD path still shares delegate to the policy so there is ONE source
+    // of truth per number.
 
     /** Minimum drift to seek a PAUSED overlay (scrubbing) — under a frame. */
-    private val scrubDriftThresholdUs = 20_000L
+    private val scrubDriftThresholdUs = PipSyncPolicy.SCRUB_DRIFT_US
 
     /** Mount a head this far BEFORE its window so it is ready to fade in. */
     private val headPrerollUs = 400_000L
@@ -184,7 +203,7 @@ class OverlayPreviewController(private val context: Context) {
     /** v1.2.7: an ENDED overlay player is only "held" (last frame kept)
      * while the playhead is this close to, or past, its source span end —
      * further back it rewinds and plays again (scrub-back / replay). */
-    private val endedHoldMarginUs = 100_000L
+    private val endedHoldMarginUs = PipSyncPolicy.ENDED_HOLD_MARGIN_US
 
     /**
      * v1.2.8→v1.2.9: fade-out tail after a FORWARD window exit (playing only).
@@ -627,36 +646,41 @@ class OverlayPreviewController(private val context: Context) {
                 val posUs = player.currentPosition * 1000L
                 val drift = localUs - posUs
                 // v1.2.10 — WHILE PLAYING, moderate drift is DELIBERATELY LEFT
-                // ALONE (the same discipline driveHead got in v1.2.9). The old
-                // blanket 120ms rule seek-stormed any PiP whose source file
-                // carries an AUDIO track: ExoPlayer paces video on the audio
-                // clock, and the track opens with a ~100-250ms start latency
-                // during which the reported position FREEZES — the drift sat
-                // permanently above 120ms, every corrective seek re-opened the
-                // audio pipeline and re-incurred the lag, and the cycle
-                // repeated every few hundred ms (seek → decoder flush +
-                // keyframe re-decode → visible hiccup): "the PiP's video is
-                // choppy whenever the source has audio". A silent file opens
-                // no audio track, never crossed the threshold and played
-                // smooth — exactly the split field reports showed. A constant
-                // sub-400ms lag of PiP content has no visual reference; only
-                // genuinely broken alignment (> [pipHardRealignDriftUs], e.g.
-                // a seek landing mid-window) hard-realigns now, cooldown-gated.
-                // Paused (scrub) tracking keeps the tight sub-frame behavior.
-                if (!isPlaying) {
-                    if (kotlin.math.abs(drift) > scrubDriftThresholdUs) {
-                        runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
-                    }
-                } else if (kotlin.math.abs(drift) > pipHardRealignDriftUs) {
-                    val nowMs = android.os.SystemClock.uptimeMillis()
-                    if (nowMs - overlay.lastCorrectiveSeekMs >= pipCorrectiveSeekCooldownMs) {
-                        runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
-                        overlay.lastCorrectiveSeekMs = nowMs
-                    }
+                // ALONE. The old blanket 120ms rule seek-stormed any PiP whose
+                // source file carries an AUDIO track: ExoPlayer paces video on
+                // the audio clock, and the track opens with a ~100-250ms start
+                // latency during which the reported position FREEZES. A silent
+                // file opens no audio track, never crossed the threshold and
+                // played smooth — exactly the split field reports showed.
+                //
+                // v1.4.0 — the gate lives in PipSyncPolicy now, at 1.5s (was
+                // 400ms). With BGM + clip audio + PiP audio ALL active, the
+                // PiP's audio pipeline opens slower than the single-source
+                // 250ms ceiling — the constant drift parked above 400ms and
+                // every 500ms cooldown expiry re-fired a corrective seek,
+                // each one re-opening the decoder + audio latency it was
+                // trying to fix: the PiP stuttered on a 500ms metronome and
+                // the seek bursts also starved the body pipeline ("everything
+                // freezes, sound keeps going"; warm second plays dipped under
+                // the threshold and looked fine). Same fix the head got in
+                // v1.2.10: a constant sub-1.5s lag has no visual reference
+                // (the layer's own audio stays in sync with its own video),
+                // so it settles instead of being fought. Paused (scrub)
+                // tracking keeps the tight sub-frame behavior.
+                if (PipSyncPolicy.shouldCorrectiveSeek(
+                        driftAbsUs = kotlin.math.abs(drift),
+                        isPlaying = isPlaying,
+                        nowMs = android.os.SystemClock.uptimeMillis(),
+                        lastSeekMs = overlay.lastCorrectiveSeekMs,
+                    )
+                ) {
+                    runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
+                    overlay.lastCorrectiveSeekMs = android.os.SystemClock.uptimeMillis()
+                    if (isPlaying) diag("pip hard-realign ${drift / 1000}ms")
                 }
             }
             Player.STATE_ENDED -> {
-                if (localUs + endedHoldMarginUs < overlay.sourceSpanUs) {
+                if (PipSyncPolicy.endedRewind(localUs, overlay.sourceSpanUs)) {
                     runCatching { player.seekTo((localUs / 1000L).coerceAtLeast(0L)) }
                     if (isPlaying) player.playWhenReady = true
                 }
