@@ -136,13 +136,29 @@ object TextGestureMath {
         val dx = px - cx
         val dy = py - cy
         if (rotationDeg == 0f) return abs(dx) <= halfW && abs(dy) <= halfH
+        // Inverse-rotate the delta into the rect's local frame (= forward
+        // rotation by the NEGATED angle).
+        val l = rotateOffset(dx, dy, -rotationDeg)
+        return abs(l[0]) <= halfW && abs(l[1]) <= halfH
+    }
+
+    /**
+     * FORWARD-rotate the offset (dx, dy) by rotationDeg around the origin —
+     * the same matrix [Canvas.rotate] applies (screen/CW convention, y down).
+     * The INVERSE rotation used by [hitRotatedRect] falls out of this by
+     * negating the angle, so the two can never drift apart.
+     *
+     * v1.3.2 use: placing the confirm checkmark on the rotated bottom-right
+     * corner of the text selection frame — the corner offset (halfW, halfH)
+     * is rotated around the frame center exactly like the frame itself.
+     */
+    fun rotateOffset(dx: Float, dy: Float, rotationDeg: Float): FloatArray {
+        if (!dx.isFinite() || !dy.isFinite()) return floatArrayOf(Float.NaN, Float.NaN)
+        if (rotationDeg == 0f) return floatArrayOf(dx, dy)
         val rad = Math.toRadians(rotationDeg.toDouble())
-        val cos = cos(rad).toFloat()
-        val sin = sin(rad).toFloat()
-        // Inverse-rotate the delta into the rect's local frame.
-        val lx = dx * cos + dy * sin
-        val ly = -dx * sin + dy * cos
-        return abs(lx) <= halfW && abs(ly) <= halfH
+        val c = cos(rad).toFloat()
+        val s = sin(rad).toFloat()
+        return floatArrayOf(dx * c - dy * s, dx * s + dy * c)
     }
 
     // ------------------------------------------------------------------

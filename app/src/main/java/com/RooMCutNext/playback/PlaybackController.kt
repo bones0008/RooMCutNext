@@ -440,6 +440,35 @@ class PlaybackController(
     fun pause() { player?.pause() }
 
     /**
+     * v1.3.2: re-render the CURRENT frame while paused.
+     *
+     * The preview's baked TimedTextOverlays read the live project state on
+     * every OUTPUT frame — but a paused player renders nothing, so live text
+     * edits (gesture drags / pinch / panel sliders) stayed invisible until
+     * playback resumed ("scaling only shows after you press play"). A
+     * same-position seek is the cheapest way to push one fresh frame through
+     * the effects pipeline — the same mechanics the frame-step path relies
+     * on. No-ops while playing (frames flow on their own), while nothing is
+     * prepared (IDLE/BUFFERING — a seek there would restart preparation, the
+     * seek-storm livelock driveHead already documents) and on throttling
+     * (motion events arrive at 60-120Hz; ~66ms between nudges is plenty for
+     * the eye). [force] bypasses the throttle for the final commit at
+     * gesture end so the last finger position is never lost.
+     */
+    private var lastNudgeMs = 0L
+
+    fun nudgeRedraw(force: Boolean = false) {
+        val p = player ?: return
+        if (p.isPlaying) return
+        val state = p.playbackState
+        if (state != Player.STATE_READY && state != Player.STATE_ENDED) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!force && now - lastNudgeMs < 66L) return
+        lastNudgeMs = now
+        runCatching { p.seekTo(p.currentPosition) }
+    }
+
+    /**
      * Enter Media3 scrubbing mode for interactive playhead dragging: video
      * frames are released immediately (no vsync alignment), audio is parked,
      * and playWhenReady is retained (playback merely SUPPRESSED).

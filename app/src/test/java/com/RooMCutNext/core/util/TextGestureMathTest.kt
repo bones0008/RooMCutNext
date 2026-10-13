@@ -3,6 +3,7 @@ package com.RooMCutNext.core.util
 import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.core.model.TextStyleSpec
 import kotlin.math.abs
+import kotlin.math.hypot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -179,6 +180,72 @@ class TextGestureMathTest {
     fun `hitRotatedRect degenerate never hits`() {
         assertFalse(TextGestureMath.hitRotatedRect(100f, 100f, 100f, 100f, 0f, 20f, 0f))
         assertFalse(TextGestureMath.hitRotatedRect(Float.NaN, 100f, 100f, 100f, 50f, 20f, 0f))
+    }
+
+    // ---------------- rotateOffset (v1.3.2 confirm-chip corner math) ----------------
+
+    @Test
+    fun `rotateOffset zero degrees is identity`() {
+        val r = TextGestureMath.rotateOffset(30f, 40f, 0f)
+        assertEquals(30f, r[0], 1e-4f)
+        assertEquals(40f, r[1], 1e-4f)
+    }
+
+    @Test
+    fun `rotateOffset quarter turns follow the Canvas rotate convention`() {
+        // Canvas.rotate(90) turns the x-axis toward the y-axis (y down):
+        // (1,0)→(0,1) and (0,1)→(-1,0).
+        val a = TextGestureMath.rotateOffset(1f, 0f, 90f)
+        assertEquals(0f, a[0], 1e-4f)
+        assertEquals(1f, a[1], 1e-4f)
+        val b = TextGestureMath.rotateOffset(0f, 1f, 90f)
+        assertEquals(-1f, b[0], 1e-4f)
+        assertEquals(0f, b[1], 1e-4f)
+        // 180° flips signs; -90° is the inverse quarter.
+        val c = TextGestureMath.rotateOffset(2f, -3f, 180f)
+        assertEquals(-2f, c[0], 1e-4f)
+        assertEquals(3f, c[1], 1e-4f)
+        val d = TextGestureMath.rotateOffset(1f, 0f, -90f)
+        assertEquals(0f, d[0], 1e-4f)
+        assertEquals(-1f, d[1], 1e-4f)
+    }
+
+    @Test
+    fun `rotateOffset preserves length`() {
+        val degs = floatArrayOf(0f, 17f, 45f, 90f, 133f, 180f, 257f, 341f)
+        for (deg in degs) {
+            val r = TextGestureMath.rotateOffset(30f, 40f, deg)
+            assertEquals(50f, hypot(r[0], r[1]), 1e-3f)
+        }
+    }
+
+    @Test
+    fun `rotateOffset is the exact inverse hitRotatedRect undoes`() {
+        // For ANY angle: a point at the rotated (slightly inset) corner of
+        // the rect hits the rect, and the same point pushed outward along
+        // the rotated diagonal misses — the chip seat and the hit-test share
+        // one geometry. (1px inset/overshoot keeps the assertions clear of
+        // float round-trip noise at the inclusive boundary.)
+        for (deg in intArrayOf(0, 17, 45, 90, 145, 180, 225, 315)) {
+            val halfW = 50f
+            val halfH = 20f
+            val inside = TextGestureMath.rotateOffset(halfW - 1f, halfH - 1f, deg.toFloat())
+            assertTrue(
+                "inset corner hits at $deg°",
+                TextGestureMath.hitRotatedRect(100f + inside[0], 100f + inside[1], 100f, 100f, halfW, halfH, deg.toFloat()),
+            )
+            val beyond = TextGestureMath.rotateOffset(halfW + 1f, halfH + 1f, deg.toFloat())
+            assertFalse(
+                "beyond-corner misses at $deg°",
+                TextGestureMath.hitRotatedRect(100f + beyond[0], 100f + beyond[1], 100f, 100f, halfW, halfH, deg.toFloat()),
+            )
+        }
+    }
+
+    @Test
+    fun `rotateOffset invalid input yields NaN`() {
+        val r = TextGestureMath.rotateOffset(Float.NaN, 1f, 45f)
+        assertTrue(r[0].isNaN() && r[1].isNaN())
     }
 
     // ---------------- twoFingerAnchors ----------------

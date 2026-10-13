@@ -21,6 +21,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.PointerInputChange
@@ -48,13 +52,24 @@ import kotlin.math.hypot
  *   drag (1 finger) → move — position follows the finger 1:1 at frame rate
  *   pinch (2 fingers) → scale the font size
  *   twist (2 fingers)  → rotate
- *   tap empty space → deselect
  *
  * PiP / sticker (v1.3.1):
  *   tap a layer     → select it (opens the PiP panel when nothing else is)
  *   drag (1 finger) → move the layer
  *   pinch (2 fingers) → scale the layer
- *   tap empty space → deselect
+ *
+ * v1.3.2 SELECTION LOCK + CONFIRM CHIP:
+ *   While an element is selected AND visible at the playhead, it owns the
+ *   whole canvas — the first finger anywhere starts a gesture on THAT
+ *   element, extra fingers join it, and NOTHING can switch the selection
+ *   mid-gesture (the v1.3.1 bug: during a pinch, a stray finger landing on
+ *   another text/PiP instantly stole the selection). The only ways out:
+ *     - tap the CONFIRM CHIP (checkmark at the frame's bottom-right corner):
+ *       keep the placed position and drop the selection — the next tap may
+ *       then select another element;
+ *     - a still tap that began OUTSIDE the frame (empty space or another
+ *       element): drops the selection without ever switching to whatever
+ *       else was under the finger.
  *
  * Z-order parity with the renderers: PiP layers draw ABOVE the baked text
  * overlays (preview: overlay TextureViews sit on top of the PlayerView;
@@ -68,14 +83,19 @@ import kotlin.math.hypot
  * on every state emission (place() mirrors PipPresentation). This layer
  * simply writes the dragged item into the ViewModel with
  * updateText/updatePip(commit = false) — the same live-preview path the
- * panels' sliders use. On finger-up ONE undoable commit is recorded; the
+ * panels' sliders use. While PAUSED the engines are nudged to re-render the
+ * current frame (see PlaybackController.nudgeRedraw) — a paused player
+ * produces no output frames, which is why v1.3.1 needed a play-pause cycle
+ * to see a scaled text. On finger-up ONE undoable commit is recorded; the
  * follow-up composition refresh is a structural no-op (TextSignatures and
  * the PiP windows signature both ignore visual fields), so gestures never
  * re-prepare the player.
  *
  * Hit-testing and the selection frames are computed with the SAME geometry
  * the renderers use (TextOverlayGeometry / PipGestureMath.displayRect), so
- * what you see framed is exactly what you grab.
+ * what you see framed is exactly what you grab. v1.3.2: the text frame hugs
+ * the INK (widest line via TextOverlayGeometry.blockWidth), not the
+ * 0.92-width layout constraint the old frame (and its hit region) used.
  */
 @Composable
 fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modifier: Modifier = Modifier) {
@@ -100,12 +120,18 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                     val cw = proj.width.toFloat()
                     val ch = proj.height.toFloat()
                     if (cw <= 0f || ch <= 0f || viewSize == IntSize.Zero) return@awaitEachGesture
-                    val rect = TextGestureMath.contentRect(
-                        viewSize.width.toFloat(), viewSize.height.toFloat(), cw, ch,
-                    )
+                    val viewW = viewSize.width.toFloat()
+                    val viewH = viewSize.height.toFloat()
+                    val rect = TextGestureMath.contentRect(viewW, viewH, cw, ch)
                     val contentW = rect[2]
                     val contentH = rect[3]
                     if (contentW <= 0f || contentH <= 0f) return@awaitEachGesture
+
+                    val framePad = 5.dp.toPx()
+                    // Generous touch target around the drawn 13dp chip —
+                    // matches Material's ~48dp interactive minimum closely
+                    // enough without covering half a small frame.
+                    val checkHitR = 21.dp.toPx()
 
                     // ---- hit testing: PiPs FIRST (they render above texts) ----
                     // Later list entry = higher z (view add order AND export
@@ -119,7 +145,7 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                                 val asset = s.project.assetById(pip.assetId)
                                 asset != null && PipGestureMath.hitTest(
                                     pip, pos.x, pos.y,
-                                    viewSize.width.toFloat(), viewSize.height.toFloat(),
+                                    viewW, viewH,
                                     cw, ch, asset.width, asset.height,
                                 )
                             }
@@ -162,30 +188,86 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                         return GestureSession(target, c.x, c.y, a?.get(0) ?: 0f, a?.get(1) ?: 0f, pressed.size)
                     }
 
-                    val hitPip = hitTestPip(down.position)
-                    val hitText = if (hitPip == null) hitTestText(down.position) else null
-
-                    if (hitPip != null) {
-                        if (s0.selectedPipId != hitPip.id) {
-                            vm.selectPip(hitPip.id)
-                            // Open the PiP panel only when nothing else is
-                            // open — never hijack an in-progress panel.
-                            if (s0.activePanel == null) vm.openPanel(PanelKind.PIP)
+                    // ---- v1.3.2 SELECTION LOCK ----
+                    // A selected element that is VISIBLE at the playhead owns
+                    // the canvas until deselected: no hit-test re-routing, so
+                    // a stray finger landing on another text/PiP mid-pinch can
+                    // never steal the gesture (selections are also mutually
+                    // exclusive — a text lock wins only when no PiP is locked).
+                    val lockedPip = s0.selectedPip
+                        ?.takeIf { s0.playheadUs >= it.startUs && s0.playheadUs < it.endUs }
+                    val lockedText = if (lockedPip == null) {
+                        s0.selectedText?.takeIf { it.overlaps(s0.playheadUs) }
+                    } else null
+                    val lockedFrame = when {
+                        lockedPip != null -> proj.assetById(lockedPip.assetId)?.let { a ->
+                            pipSelectionFrame(
+                                lockedPip, viewW, viewH, proj.width, proj.height,
+                                a.width, a.height, framePad,
+                            )
                         }
-                    } else if (hitText != null && s0.selectedTextId != hitText.id) {
-                        vm.selectText(hitText.id)
-                        // Open the TEXT panel only when nothing else is open.
-                        if (s0.activePanel == null) vm.openPanel(PanelKind.TEXT)
-                    }
-
-                    var session = when {
-                        hitPip != null -> newSession(GestureTarget.Pip(hitPip), listOf(down))
-                        hitText != null -> newSession(GestureTarget.Text(hitText), listOf(down))
+                        lockedText != null -> textSelectionFrame(
+                            lockedText, viewW, viewH, proj.width, proj.height, framePad,
+                        )
                         else -> null
                     }
+
+                    var session: GestureSession? = null
                     var dirty = false
                     var travelled = 0f
+                    // True when the first finger landed ON the element that
+                    // owns the session (locked frame or freshly hit) — a still
+                    // tap like that must KEEP the selection.
+                    var startedOnTarget = false
+                    // True when the first finger landed on the confirm chip.
+                    var tappedCheck = false
                     val slop = viewConfiguration.touchSlop
+
+                    if (lockedFrame != null) {
+                        val chip = lockedFrame.checkCorner()
+                        val onChip = hypot(down.position.x - chip.x, down.position.y - chip.y) <= checkHitR
+                        if (onChip) {
+                            tappedCheck = true
+                        } else {
+                            startedOnTarget = TextGestureMath.hitRotatedRect(
+                                down.position.x, down.position.y,
+                                lockedFrame.cx, lockedFrame.cy,
+                                lockedFrame.halfW, lockedFrame.halfH,
+                                lockedFrame.rotationDeg,
+                            )
+                            session = newSession(
+                                when {
+                                    lockedPip != null -> GestureTarget.Pip(lockedPip)
+                                    else -> GestureTarget.Text(lockedText!!)
+                                },
+                                listOf(down),
+                            )
+                        }
+                    } else {
+                        // ---- nothing selected (or the selection is not at
+                        // the playhead): free hit-testing as before ----
+                        val hitPip = hitTestPip(down.position)
+                        val hitText = if (hitPip == null) hitTestText(down.position) else null
+
+                        if (hitPip != null) {
+                            startedOnTarget = true
+                            if (s0.selectedPipId != hitPip.id) {
+                                vm.selectPip(hitPip.id)
+                                // Open the PiP panel only when nothing else is
+                                // open — never hijack an in-progress panel.
+                                if (s0.activePanel == null) vm.openPanel(PanelKind.PIP)
+                            }
+                            session = newSession(GestureTarget.Pip(hitPip), listOf(down))
+                        } else if (hitText != null) {
+                            startedOnTarget = true
+                            if (s0.selectedTextId != hitText.id) {
+                                vm.selectText(hitText.id)
+                                // Open the TEXT panel only when nothing else is open.
+                                if (s0.activePanel == null) vm.openPanel(PanelKind.TEXT)
+                            }
+                            session = newSession(GestureTarget.Text(hitText), listOf(down))
+                        }
+                    }
 
                     while (true) {
                         val event = awaitPointerEvent()
@@ -197,12 +279,16 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                         // values and the touch anchors reset to now.
                         if (session == null) {
                             // A second finger landing anywhere starts a pinch on
-                            // the SELECTED item (text OR PiP — standard editor
-                            // behavior; selections are mutually exclusive).
+                            // the SELECTED item — but only one VISIBLE at the
+                            // playhead (v1.3.2: pinching an invisible selection
+                            // through empty space was a silent foot-gun).
                             if (pressed.size >= 2) {
                                 val s = vm.state.value
                                 val selPip = s.selectedPip
-                                val selText = s.selectedText
+                                    ?.takeIf { s.playheadUs >= it.startUs && s.playheadUs < it.endUs }
+                                val selText = if (selPip == null) {
+                                    s.selectedText?.takeIf { it.overlaps(s.playheadUs) }
+                                } else null
                                 session = when {
                                     selPip != null -> newSession(GestureTarget.Pip(selPip), pressed)
                                     selText != null -> newSession(GestureTarget.Text(selText), pressed)
@@ -270,31 +356,45 @@ fun BoxScope.PreviewGestureLayer(vm: EditorViewModel, state: EditorUiState, modi
                     }
 
                     val sess = session
-                    if (sess != null) {
-                        if (dirty) {
-                            when (val t = sess.target) {
-                                is GestureTarget.Text -> {
-                                    val live = vm.state.value.project.textById(t.item.id)
-                                    if (live != null) {
-                                        // Wrap into the slider's [-180, 180] domain
-                                        // at commit; the wrap is visually a no-op.
-                                        val wrapped =
-                                            if (abs(live.rotationDeg) > 180f) {
-                                                live.copy(rotationDeg = TextGestureMath.wrapDeg(live.rotationDeg))
-                                            } else live
-                                        vm.updateText(wrapped, commit = true)
-                                    }
-                                }
-                                is GestureTarget.Pip -> {
-                                    val live = vm.state.value.project.pipById(t.layer.id)
-                                    if (live != null) vm.updatePip(live, commit = true)
+                    if (sess != null && dirty) {
+                        when (val t = sess.target) {
+                            is GestureTarget.Text -> {
+                                val live = vm.state.value.project.textById(t.item.id)
+                                if (live != null) {
+                                    // Wrap into the slider's [-180, 180] domain
+                                    // at commit; the wrap is visually a no-op.
+                                    val wrapped =
+                                        if (abs(live.rotationDeg) > 180f) {
+                                            live.copy(rotationDeg = TextGestureMath.wrapDeg(live.rotationDeg))
+                                        } else live
+                                    vm.updateText(wrapped, commit = true)
                                 }
                             }
+                            is GestureTarget.Pip -> {
+                                val live = vm.state.value.project.pipById(t.layer.id)
+                                if (live != null) vm.updatePip(live, commit = true)
+                            }
                         }
-                    } else if (hitPip == null && hitText == null && travelled < slop &&
-                        vm.state.value.hasSelection
-                    ) {
-                        // Plain tap on empty preview → drop the selection.
+                    }
+
+                    if (tappedCheck) {
+                        // Confirm chip: a STILL, non-editing tap keeps the placed
+                        // position and drops the selection so another element
+                        // may be picked next. (Chip touch followed by an actual
+                        // pinch already committed above — keep the selection.)
+                        if (!dirty && travelled < slop) vm.selectText(null)
+                    } else if (sess != null) {
+                        if (!dirty && travelled < slop && !startedOnTarget) {
+                            // v1.3.2: a still tap that began OUTSIDE the locked
+                            // element's frame (empty space or another element)
+                            // drops the selection — it never switches to what
+                            // else was under the finger.
+                            vm.selectText(null)
+                        }
+                    } else if (travelled < slop && vm.state.value.hasSelection) {
+                        // No lock was active and nothing was hit: plain tap on
+                        // empty preview → drop any (possibly playhead-invisible)
+                        // selection.
                         vm.selectText(null)
                     }
                 }
@@ -322,7 +422,96 @@ private class GestureSession(
     val pointers: Int,
 )
 
-/** The rotated selection frame + corner handles for TEXT, in view coordinates. */
+/**
+ * View-space geometry of a selection frame — the SINGLE source shared by the
+ * frame drawing, the confirm-chip seat and the gesture hit-testing, so the
+ * three can never drift apart. halfW/halfH INCLUDE the frame padding.
+ */
+private class SelectionFrame(
+    val cx: Float,
+    val cy: Float,
+    val halfW: Float,
+    val halfH: Float,
+    val rotationDeg: Float,
+) {
+    /** The bottom-right corner in view coordinates — the confirm chip's seat. */
+    fun checkCorner(): Offset {
+        val r = TextGestureMath.rotateOffset(halfW, halfH, rotationDeg)
+        return Offset(cx + r[0], cy + r[1])
+    }
+}
+
+/**
+ * Text frame geometry: the block the RENDERER paints, mapped to view space.
+ * v1.3.2: hugs the widest LINE (the ink), not the 0.92 layout constraint —
+ * floored at 0.75 × block height so blank/near-empty text (editable via the
+ * panel) still shows a grabbable frame with its confirm chip.
+ */
+private fun textSelectionFrame(
+    item: TextOverlayItem,
+    viewW: Float,
+    viewH: Float,
+    canvasW: Int,
+    canvasH: Int,
+    padPx: Float,
+): SelectionFrame? {
+    if (viewW <= 0f || viewH <= 0f || canvasW <= 0 || canvasH <= 0) return null
+    val cw = canvasW.toFloat()
+    val ch = canvasH.toFloat()
+    val rect = TextGestureMath.contentRect(viewW, viewH, cw, ch)
+    if (rect[2] <= 0f || rect[3] <= 0f) return null
+    val layout = TextOverlayGeometry.fillLayout(item, canvasW, canvasH)
+    val viewPerCanvas = rect[2] / cw // view px per canvas px (uniform)
+    val cx = rect[0] + item.xRatio * rect[2]
+    val cy = rect[1] + item.yRatio * rect[3]
+    val h = layout.height * viewPerCanvas
+    val w = maxOf(TextOverlayGeometry.blockWidth(layout) * viewPerCanvas, h * 0.75f)
+    return SelectionFrame(cx, cy, w / 2f + padPx, h / 2f + padPx, item.rotationDeg)
+}
+
+/** PiP frame geometry: the exact display rect place()/PipPresentation draw. */
+private fun pipSelectionFrame(
+    pip: PipLayer,
+    viewW: Float,
+    viewH: Float,
+    canvasW: Int,
+    canvasH: Int,
+    assetW: Int,
+    assetH: Int,
+    padPx: Float,
+): SelectionFrame? {
+    val r = PipGestureMath.displayRect(
+        pip, viewW, viewH,
+        canvasW.toFloat(), canvasH.toFloat(), assetW, assetH,
+    ) ?: return null
+    return SelectionFrame(r[0], r[1], r[2] / 2f + padPx, r[3] / 2f + padPx, 0f)
+}
+
+/**
+ * v1.3.2: the confirm chip — a filled accent circle with a white check
+ * glyph, seated on the frame's bottom-right corner. Tapping it (see the
+ * gesture layer's generous [checkHitR]) commits the placed position and
+ * drops the selection.
+ */
+private fun DrawScope.drawConfirmChip(center: Offset, radius: Float) {
+    if (radius <= 0f || !center.x.isFinite() || !center.y.isFinite()) return
+    // Dark scrim under the chip so it stays legible over bright video.
+    drawCircle(color = Color(0x66000000), radius = radius + 2.dp.toPx(), center = center)
+    drawCircle(color = AccentColor, radius = radius, center = center)
+    drawCircle(color = Color.White, radius = radius, center = center, style = Stroke(width = 1.5.dp.toPx()))
+    val check = Path().apply {
+        moveTo(center.x - radius * 0.42f, center.y + radius * 0.02f)
+        lineTo(center.x - radius * 0.10f, center.y + radius * 0.36f)
+        lineTo(center.x + radius * 0.48f, center.y - radius * 0.34f)
+    }
+    drawPath(
+        check,
+        color = Color.White,
+        style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
+    )
+}
+
+/** The rotated selection frame + corner handles + confirm chip for TEXT. */
 @Composable
 private fun TextSelectionFrame(state: EditorUiState, viewSize: IntSize) {
     val item = state.selectedText
@@ -332,45 +521,37 @@ private fun TextSelectionFrame(state: EditorUiState, viewSize: IntSize) {
     if (proj.width <= 0 || proj.height <= 0) return
 
     Canvas(Modifier.fillMaxSize()) {
-        val cw = proj.width.toFloat()
-        val ch = proj.height.toFloat()
-        val rect = TextGestureMath.contentRect(size.width, size.height, cw, ch)
-        if (rect[2] <= 0f || rect[3] <= 0f) return@Canvas
+        val frame = textSelectionFrame(
+            item, size.width, size.height, proj.width, proj.height, 5.dp.toPx(),
+        ) ?: return@Canvas
 
-        // Same layout the renderer paints — the frame hugs the real glyphs.
-        val layout = TextOverlayGeometry.fillLayout(item, proj.width, proj.height)
-        val viewPerCanvas = rect[2] / cw // view px per canvas px (uniform)
-        val cx = rect[0] + item.xRatio * rect[2]
-        val cy = rect[1] + item.yRatio * rect[3]
-        val w = layout.width * viewPerCanvas
-        val h = layout.height * viewPerCanvas
-
-        val pad = 5.dp.toPx()
         val strokeW = 2.dp.toPx()
         val cornerR = 4.5.dp.toPx()
-        val halfW = w / 2f + pad
-        val halfH = h / 2f + pad
 
-        rotate(degrees = item.rotationDeg, pivot = Offset(cx, cy)) {
+        rotate(degrees = frame.rotationDeg, pivot = Offset(frame.cx, frame.cy)) {
             drawRect(
                 color = Color.White,
-                topLeft = Offset(cx - halfW, cy - halfH),
-                size = Size(halfW * 2f, halfH * 2f),
+                topLeft = Offset(frame.cx - frame.halfW, frame.cy - frame.halfH),
+                size = Size(frame.halfW * 2f, frame.halfH * 2f),
                 style = Stroke(width = strokeW),
             )
             listOf(
-                Offset(cx - halfW, cy - halfH),
-                Offset(cx + halfW, cy - halfH),
-                Offset(cx - halfW, cy + halfH),
-                Offset(cx + halfW, cy + halfH),
+                Offset(frame.cx - frame.halfW, frame.cy - frame.halfH),
+                Offset(frame.cx + frame.halfW, frame.cy - frame.halfH),
+                Offset(frame.cx - frame.halfW, frame.cy + frame.halfH),
+                // bottom-right seat is the confirm chip, not a plain handle
             ).forEach { corner ->
                 drawCircle(color = AccentColor, radius = cornerR, center = corner)
             }
+            drawConfirmChip(
+                center = Offset(frame.cx + frame.halfW, frame.cy + frame.halfH),
+                radius = 13.dp.toPx(),
+            )
         }
     }
 }
 
-/** The axis-aligned selection frame + corner handles for a PiP layer. */
+/** The axis-aligned selection frame + handles + confirm chip for a PiP layer. */
 @Composable
 private fun PipSelectionFrame(state: EditorUiState, viewSize: IntSize) {
     val pip = state.selectedPip ?: return
@@ -381,34 +562,33 @@ private fun PipSelectionFrame(state: EditorUiState, viewSize: IntSize) {
     val asset = proj.assetById(pip.assetId) ?: return
 
     Canvas(Modifier.fillMaxSize()) {
-        val r = PipGestureMath.displayRect(
-            pip, size.width, size.height,
-            proj.width.toFloat(), proj.height.toFloat(), asset.width, asset.height,
+        val frame = pipSelectionFrame(
+            pip, size.width, size.height, proj.width, proj.height,
+            asset.width, asset.height, 5.dp.toPx(),
         ) ?: return@Canvas
 
-        val pad = 5.dp.toPx()
         val strokeW = 2.dp.toPx()
         val cornerR = 4.5.dp.toPx()
-        val halfW = r[2] / 2f + pad
-        val halfH = r[3] / 2f + pad
-        val cx = r[0]
-        val cy = r[1]
 
         // Same rect place() gives the view / PipPresentation draws on export.
         drawRect(
             color = Color.White,
-            topLeft = Offset(cx - halfW, cy - halfH),
-            size = Size(halfW * 2f, halfH * 2f),
+            topLeft = Offset(frame.cx - frame.halfW, frame.cy - frame.halfH),
+            size = Size(frame.halfW * 2f, frame.halfH * 2f),
             style = Stroke(width = strokeW),
         )
         listOf(
-            Offset(cx - halfW, cy - halfH),
-            Offset(cx + halfW, cy - halfH),
-            Offset(cx - halfW, cy + halfH),
-            Offset(cx + halfW, cy + halfH),
+            Offset(frame.cx - frame.halfW, frame.cy - frame.halfH),
+            Offset(frame.cx + frame.halfW, frame.cy - frame.halfH),
+            Offset(frame.cx - frame.halfW, frame.cy + frame.halfH),
+            // bottom-right seat is the confirm chip, not a plain handle
         ).forEach { corner ->
             drawCircle(color = AccentColor, radius = cornerR, center = corner)
         }
+        drawConfirmChip(
+            center = Offset(frame.cx + frame.halfW, frame.cy + frame.halfH),
+            radius = 13.dp.toPx(),
+        )
     }
 }
 

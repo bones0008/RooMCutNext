@@ -943,6 +943,30 @@ class OverlayPreviewController(private val context: Context) {
         return 31 * lookSig + TextSignatures.windows(overlappingHeadTexts(project, active))
     }
 
+    /**
+     * v1.3.2: re-render the head player's CURRENT frame while paused.
+     *
+     * Head windows can carry baked TimedTextOverlays too (headTextEffectsFor)
+     * that read the live project state per output frame — the same
+     * paused-staleness PlaybackController.nudgeRedraw fixes for the body.
+     * Same-position seek, same throttle; no-op while playing, while no head
+     * is mounted, or when the head is an IMAGE (an ImageView has no pipeline
+     * to nudge — it re-lays out on the next sync tick anyway).
+     */
+    private var lastHeadNudgeMs = 0L
+
+    fun nudgeHeadRedraw(force: Boolean = false) {
+        if (headIsImage) return
+        val p = headPlayer ?: return
+        if (p.isPlaying) return
+        val state = p.playbackState
+        if (state != Player.STATE_READY && state != Player.STATE_ENDED) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!force && now - lastHeadNudgeMs < 66L) return
+        lastHeadNudgeMs = now
+        runCatching { p.seekTo(p.currentPosition) }
+    }
+
     private fun driveHead(playheadUs: Long, isPlaying: Boolean) {
         val spec = headSpec ?: run {
             headView?.let { if (it.alpha != 0f) it.alpha = 0f }

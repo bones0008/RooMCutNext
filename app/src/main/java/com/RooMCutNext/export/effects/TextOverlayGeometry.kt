@@ -69,6 +69,31 @@ object TextOverlayGeometry {
         }
 
     /**
+     * v1.3.2: the width the text INK actually occupies — the widest line.
+     *
+     * [StaticLayout.getWidth] is the CONSTRAINT the layout was built with
+     * (0.92 × canvas width), NOT the content extent: with ALIGN_CENTER every
+     * line is centered inside that constraint, so the glyphs span exactly
+     * [blockWidth] around the block's horizontal center. This is what the
+     * selection frame must hug and what hit-testing must use — v1.3.1 drew
+     * the frame at the full constraint width ("the box never shrinks
+     * sideways no matter how small the text"), and its hit region silently
+     * covered the whole 92% strip.
+     *
+     * Blank/empty text yields 0 — callers that need a visible minimum
+     * (e.g. the frame) apply their own floor; hit-testing rejects blank
+     * text before ever reaching here.
+     */
+    fun blockWidth(layout: StaticLayout): Float {
+        var w = 0f
+        for (i in 0 until layout.lineCount) {
+            val lw = layout.getLineWidth(i)
+            if (lw > w) w = lw
+        }
+        return w
+    }
+
+    /**
      * Hit-test a CANVAS-pixel point against the item's rendered block.
      * Returns true when the point lands inside the rotated text rect.
      */
@@ -81,7 +106,7 @@ object TextOverlayGeometry {
             py = pyCanvas,
             cx = item.xRatio * canvasW,
             cy = item.yRatio * canvasH,
-            halfW = layout.width / 2f,
+            halfW = blockWidth(layout) / 2f,
             halfH = layout.height / 2f,
             rotationDeg = item.rotationDeg,
         )

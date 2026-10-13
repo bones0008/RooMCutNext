@@ -302,6 +302,22 @@ class EditorViewModel(
         _state.update { it.copy(project = transform(it.project)) }
         _structureVersion.value += 1
         scheduleDebouncedPlaybackRefresh()
+        // v1.3.2: PAUSED live edits must still SHOW. The baked text overlays
+        // re-read the live state per OUTPUT frame, but a paused player
+        // produces no frames — without this nudge a pinch-scaled text stayed
+        // stale until the user pressed play. Both engines no-op while
+        // playing, so this line is unconditionally cheap.
+        nudgePreviewRedraw()
+    }
+
+    /**
+     * v1.3.2: push one fresh frame through both preview engines (throttled,
+     * paused-only) so live text edits render immediately. See
+     * PlaybackController.nudgeRedraw / OverlayPreviewController.nudgeHeadRedraw.
+     */
+    private fun nudgePreviewRedraw(force: Boolean = false) {
+        playback.nudgeRedraw(force)
+        overlays.nudgeHeadRedraw(force)
     }
 
     /**
@@ -324,6 +340,10 @@ class EditorViewModel(
             // pipeline for nothing.
             playbackRefreshJob?.cancel()
             refreshPlayback()
+            // v1.3.2: the throttled nudges during the drag may have eaten the
+            // very last motion tick — force one final re-render so the frame
+            // on screen is exactly the committed geometry.
+            nudgePreviewRedraw(force = true)
         } else {
             mutate(label, transform)
         }
