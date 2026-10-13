@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package com.RooMCutNext.ui.editor
 
 import android.content.Intent
@@ -11,6 +11,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -866,7 +868,7 @@ fun PipSheet(vm: EditorViewModel, state: EditorUiState, onImportMedia: () -> Uni
 }
 
 // ===========================================================================
-// Crossfade transitions (v1.2.1)
+// Transitions (v1.2.1 duration; v1.5.0 style catalog)
 // ===========================================================================
 
 @Composable
@@ -887,7 +889,7 @@ fun TransitionSheet(vm: EditorViewModel, state: EditorUiState) {
         }
     }
 
-    // Quick presets ( microseconds).
+    // Quick duration presets (microseconds).
     val presets = listOf(
         0L to stringResource(R.string.panel_transition_none),
         300_000L to "0.3s",
@@ -907,6 +909,33 @@ fun TransitionSheet(vm: EditorViewModel, state: EditorUiState) {
             )
         }
     }
+
+    // v1.5.0 — the style catalog, grouped the way CapCut-style editors
+    // group them. Style and duration are orthogonal: picking a style while
+    // the duration is 0 (none) seeds the default 0.5s in the ViewModel, and
+    // picking "none" above keeps the style stored for the next toggle-on.
+    TransitionUi.grouped().forEach { (group, styles) ->
+        Text(
+            stringResource(TransitionUi.groupTitleRes(group)),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+        )
+        FlowRow(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            styles.forEach { style ->
+                FilterChip(
+                    selected = clip.transitionType == style.id,
+                    onClick = { vm.setClipTransitionType(clip.id, style.id) },
+                    label = { Text(stringResource(TransitionUi.nameRes(style))) },
+                )
+            }
+        }
+    }
+
     LabeledSlider(
         label = stringResource(R.string.panel_transition_duration),
         value = (clip.transitionInUs / 1_000_000f).coerceIn(0f, 2f),

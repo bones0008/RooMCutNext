@@ -254,6 +254,23 @@ object TimelineOps {
         return clips.toMutableList().also { it[index] = updated }
     }
 
+    /**
+     * v1.5.0: set the transition STYLE of clips[index] — a
+     * [com.RooMCutNext.core.model.TransitionStyle] id.
+     *
+     * Deliberately orthogonal to [setTransitionIn]: picking a look never
+     * touches the duration (and a style stored with duration 0 is kept, so
+     * toggling "none" off and back on restores the look). Unknown ids are
+     * stored as-is; every READ side normalizes via
+     * [com.RooMCutNext.core.model.TransitionStyle.fromId] (dissolve).
+     */
+    fun setTransitionType(clips: List<Clip>, index: Int, styleId: String): List<Clip> {
+        if (index !in clips.indices) return clips
+        val clip = clips[index]
+        if (clip.transitionType == styleId) return clips
+        return clips.toMutableList().also { it[index] = clip.copy(transitionType = styleId) }
+    }
+
     // ------------------------------------------------------------------
     // Mosaic regions (v1.2.2)
     // ------------------------------------------------------------------

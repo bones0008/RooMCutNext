@@ -27,11 +27,11 @@ import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.core.ops.TimelineOps
 import com.RooMCutNext.core.model.effectiveTransitions
 import androidx.media3.effect.AlphaScale
-import com.RooMCutNext.export.effects.FadeInEffect
 import com.RooMCutNext.export.effects.GainAudioProcessor
 import com.RooMCutNext.export.effects.MosaicEffect
 import com.RooMCutNext.export.effects.PipPresentation
 import com.RooMCutNext.export.effects.TimedTextOverlay
+import com.RooMCutNext.export.effects.TransitionEffect
 import com.RooMCutNext.media.LutRegistry
 import java.io.File
 
@@ -235,6 +235,7 @@ object CompositionBuilder {
                     audioFadeOutUs = 0L,
                     stripEffects = stripEffects,
                     liveTextLookup = liveTextLookup,
+                    transitionStyleId = clip.transitionType,
                 )
                 transitionCursorUs = clipStartUs + tUs
             }
@@ -420,6 +421,11 @@ object CompositionBuilder {
         val speed: Float,
         val muted: Boolean,
         val volume: Float,
+        /** v1.5.0: which transition renders over the window — a
+         * [com.RooMCutNext.core.model.TransitionStyle] id ("dissolve" for
+         * old projects). The preview head player mounts the SAME GL
+         * [TransitionEffect] the export head item bakes, keyed off this. */
+        val type: String = com.RooMCutNext.core.model.TransitionStyle.DISSOLVE.id,
     )
 
     /**
@@ -449,6 +455,8 @@ object CompositionBuilder {
                 // player reads this for its volume.
                 muted = project.clipAudioMuted(clip),
                 volume = clip.volume,
+                // v1.5.0: the style the export head item bakes.
+                type = clip.transitionType,
             )
         }
         return specs
@@ -515,9 +523,13 @@ object CompositionBuilder {
      * at [timelineStartUs] on the global timeline.
      *
      * Crossfades split a clip into two windows over this one builder: a HEAD
-     * ([fadeInUs] > 0 — carries the crossfade-in effect and the clip's audio
+     * ([fadeInUs] > 0 — carries the transition effect and the clip's audio
      * fade-in) and a BODY (opaque remainder, carries the audio fade-out).
      * Windows with no transition are simply the whole clip.
+     *
+     * v1.5.0: [transitionStyleId] selects which [TransitionEffect] branch the
+     * head renders with ([com.RooMCutNext.core.model.TransitionStyle] id;
+     * only read when fadeInUs > 0).
      */
     private fun buildClipItem(
         project: Project,
@@ -533,6 +545,7 @@ object CompositionBuilder {
         audioFadeOutUs: Long,
         stripEffects: Boolean,
         liveTextLookup: ((id: String) -> TextOverlayItem?)? = null,
+        transitionStyleId: String = com.RooMCutNext.core.model.TransitionStyle.DISSOLVE.id,
     ): EditedMediaItem {
         val uri = Uri.fromFile(file)
 
@@ -609,11 +622,13 @@ object CompositionBuilder {
                 )
             }
 
-            // ---- crossfade-in: alpha ramp over the head's first fadeInUs ----
-            // Global window + item-local fallback live inside FadeMath; see
-            // FadeInEffect for the timestamp-convention rationale.
+            // ---- transition-in (v1.5.0): the style's GL branch over the
+            // head's first fadeInUs. Global window + item-local fallback live
+            // inside TransitionMath.progress; see TransitionEffect for the
+            // timestamp-convention rationale (both preview and export mount
+            // the SAME effect — WYSIWYG by construction).
             if (fadeInUs > 0L) {
-                videoEffects += FadeInEffect(fadeInUs, timelineStartUs)
+                videoEffects += TransitionEffect(transitionStyleId, fadeInUs, timelineStartUs)
             }
         }
 

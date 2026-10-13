@@ -165,4 +165,51 @@ class TransitionTest {
         assertEquals(0L, c.transitionInUs)
         assertTrue(c.mosaics.isEmpty())
     }
+
+    // ------------------------------------------------------------------
+    // v1.5.0 — the transition STYLE (which look renders over the overlap).
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `old clip json without transition type deserializes to dissolve`() {
+        // v1.4.0-and-earlier projects carry transitionInUs but no type.
+        val json = """{"id":"c1","assetId":"a","sourceInUs":0,"sourceOutUs":2000000,"transitionInUs":500000}"""
+        val c = kotlinx.serialization.json.Json.decodeFromString<Clip>(json)
+        assertEquals("dissolve", c.transitionType)
+    }
+
+    @Test
+    fun `setTransitionType stores the style without touching the duration`() {
+        // The style and the duration are orthogonal: picking a look must
+        // never move geometry (the panel layers the default-duration logic
+        // on top in the ViewModel, not here).
+        val clips = listOf(
+            clip("a", 2_000_000L),
+            clip("b", 3_000_000L, transitionInUs = 500_000L),
+        )
+        val out = TimelineOps.setTransitionType(clips, 1, "spin")
+        assertEquals("spin", out[1].transitionType)
+        assertEquals(500_000L, out[1].transitionInUs)
+        // Nothing else moved.
+        assertEquals(clips[0], out[0])
+        // Idempotent re-set returns the same list value.
+        assertEquals(out, TimelineOps.setTransitionType(out, 1, "spin"))
+    }
+
+    @Test
+    fun `setTransitionType keeps the style when the duration is zero`() {
+        // "None" (us=0) hides the transition but preserves the chosen look
+        // so toggling the duration back on restores it.
+        val clips = listOf(clip("a", 2_000_000L), clip("b", 3_000_000L))
+        val out = TimelineOps.setTransitionType(clips, 1, "blinds")
+        assertEquals(0L, out[1].transitionInUs)
+        assertEquals("blinds", out[1].transitionType)
+    }
+
+    @Test
+    fun `setTransitionType refuses out-of-range indices`() {
+        val clips = listOf(clip("a", 2_000_000L), clip("b", 3_000_000L))
+        assertEquals(clips, TimelineOps.setTransitionType(clips, -1, "spin"))
+        assertEquals(clips, TimelineOps.setTransitionType(clips, 2, "spin"))
+    }
 }

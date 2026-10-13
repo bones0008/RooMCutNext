@@ -76,6 +76,7 @@ class HeadOverlaySpecTest {
         assertEquals(1_000_000L, s.durationUs)       // fade width = effective transition
         assertEquals(4_000_000L, s.sourceInUs)       // head plays the clip's source-IN span
         assertEquals(5_000_000L, s.sourceOutUs)      // sourceIn + T*speed
+        assertEquals("dissolve", s.type)             // v1.5.0: default style (old JSON)
     }
 
     @Test
@@ -134,6 +135,20 @@ class HeadOverlaySpecTest {
         assertEquals(9_000_000L, specs[0].startUs)
         assertEquals(18_000_000L, specs[1].startUs)
         assertEquals(1_000_000L, specs[1].durationUs)
+    }
+
+    @Test
+    fun `head carries the clip transition style`() {
+        // v1.5.0: the spec is what the PREVIEW head player feeds its GL
+        // transition shader with — it must mirror the style the EXPORT head
+        // item bakes (clip.transitionType), or preview and export diverge.
+        val a = videoAsset("a1")
+        val p = project(
+            clip("c1", "a1"),
+            clip("c2", "a1", transitionInUs = 1_000_000L).copy(transitionType = "spin"),
+            assets = listOf(a),
+        )
+        assertEquals("spin", CompositionBuilder.headOverlaySpecs(p).single().type)
     }
 
     @Test

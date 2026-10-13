@@ -934,6 +934,27 @@ class EditorViewModel(
         if (commit) commitOrMutate("转场") { apply(it) } else previewTransform { apply(it) }
     }
 
+    /**
+     * v1.5.0: set the transition STYLE of the selected clip (a
+     * [com.RooMCutNext.core.model.TransitionStyle] id). Style and duration
+     * stay orthogonal at the ops layer; HERE a look picked while the
+     * duration is 0 (none) also seeds the default 0.5s so tapping a style
+     * immediately shows something — one undo step covers both fields.
+     */
+    fun setClipTransitionType(clipId: String, styleId: String) {
+        commitOrMutate("转场样式") { p ->
+            val idx = p.clips.indexOfFirst { it.id == clipId }
+            if (idx < 0) p
+            else {
+                var clips = TimelineOps.setTransitionType(p.clips, idx, styleId)
+                if (p.clips[idx].transitionInUs == 0L) {
+                    clips = TimelineOps.setTransitionIn(clips, idx, TRANSITION_TYPE_DEFAULT_US)
+                }
+                if (clips === p.clips) p else p.copy(clips = clips)
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // Mosaic regions (v1.2.2)
     // ------------------------------------------------------------------
@@ -1563,6 +1584,9 @@ class EditorViewModel(
     companion object {
         const val MIN_PPS = 6f
         const val MAX_PPS = 480f
+
+        /** v1.5.0: duration seeded when a style is picked while duration=0. */
+        private const val TRANSITION_TYPE_DEFAULT_US = 500_000L
 
         fun factory(app: Application, projectId: String): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {

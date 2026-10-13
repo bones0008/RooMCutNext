@@ -161,13 +161,61 @@
 
     <!-- Crossfade transitions (v1.2.1) -->
     <string name="action_transition">转场</string>
-    <string name="panel_transition_title">转场（叠化）</string>
+    <string name="panel_transition_title">转场</string>
     <string name="panel_transition_none">无</string>
     <string name="panel_transition_duration">时长</string>
     <string name="panel_transition_sec_fmt">%1$.1f 秒</string>
     <string name="panel_transition_first_clip">第一段素材前面没有其他素材，无法添加转场。选中后一段素材再设置。</string>
     <string name="panel_transition_gap">与前一段素材之间有空隙（黑场），转场需要两段素材首尾相接。先把空隙去掉（拖动素材贴紧）后再试。</string>
     <string name="panel_transition_effective_fmt">实际生效 %1$s（受相邻片段长度限制）</string>
+
+    <!-- Transition styles (v1.5.0): group headers, panel names, marker shorts -->
+    <string name="transition_group_basic">基础</string>
+    <string name="transition_group_slide">滑动</string>
+    <string name="transition_group_wipe">擦除</string>
+    <string name="transition_group_effect">效果</string>
+    <string name="transition_name_dissolve">叠化</string>
+    <string name="transition_name_fade_black">闪黑</string>
+    <string name="transition_name_fade_white">闪白</string>
+    <string name="transition_name_slide_left">左滑入</string>
+    <string name="transition_name_slide_right">右滑入</string>
+    <string name="transition_name_slide_up">上滑入</string>
+    <string name="transition_name_slide_down">下滑入</string>
+    <string name="transition_name_wipe_left">左擦除</string>
+    <string name="transition_name_wipe_right">右擦除</string>
+    <string name="transition_name_wipe_up">上擦除</string>
+    <string name="transition_name_wipe_down">下擦除</string>
+    <string name="transition_name_iris_open">圆形展开</string>
+    <string name="transition_name_iris_close">圆形收缩</string>
+    <string name="transition_name_clock_wipe">时钟擦除</string>
+    <string name="transition_name_zoom_in">缩放进入</string>
+    <string name="transition_name_zoom_out">缩放退出</string>
+    <string name="transition_name_spin">旋转进入</string>
+    <string name="transition_name_blur">模糊</string>
+    <string name="transition_name_mosaic">马赛克</string>
+    <string name="transition_name_flash">闪屏</string>
+    <string name="transition_name_blinds">百叶窗</string>
+    <string name="transition_short_dissolve">叠化</string>
+    <string name="transition_short_fade_black">闪黑</string>
+    <string name="transition_short_fade_white">闪白</string>
+    <string name="transition_short_slide_left">左滑</string>
+    <string name="transition_short_slide_right">右滑</string>
+    <string name="transition_short_slide_up">上滑</string>
+    <string name="transition_short_slide_down">下滑</string>
+    <string name="transition_short_wipe_left">左擦</string>
+    <string name="transition_short_wipe_right">右擦</string>
+    <string name="transition_short_wipe_up">上擦</string>
+    <string name="transition_short_wipe_down">下擦</string>
+    <string name="transition_short_iris_open">圆展</string>
+    <string name="transition_short_iris_close">圆收</string>
+    <string name="transition_short_clock_wipe">时钟</string>
+    <string name="transition_short_zoom_in">缩放</string>
+    <string name="transition_short_zoom_out">缩出</string>
+    <string name="transition_short_spin">旋转</string>
+    <string name="transition_short_blur">模糊</string>
+    <string name="transition_short_mosaic">块化</string>
+    <string name="transition_short_flash">闪屏</string>
+    <string name="transition_short_blinds">百叶</string>
 
     <!-- Mosaic regions (v1.2.2) -->
     <string name="action_mosaic">马赛克</string>

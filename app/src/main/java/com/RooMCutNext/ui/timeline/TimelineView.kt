@@ -45,10 +45,12 @@ import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.model.TextOverlayItem
+import com.RooMCutNext.core.model.TransitionStyle
 import com.RooMCutNext.core.ops.TimelineOps
 import com.RooMCutNext.core.util.TimeCode
 import com.RooMCutNext.ui.editor.EditorViewModel
 import com.RooMCutNext.ui.editor.PanelKind
+import com.RooMCutNext.ui.editor.TransitionUi
 import com.RooMCutNext.ui.theme.AccentColor
 import com.RooMCutNext.ui.theme.ClipBgColor
 import com.RooMCutNext.ui.theme.ClipBorderColor
@@ -90,6 +92,9 @@ private data class ClipLayout(
     val gapWidth: Float = 0f,
     /** Effective crossfade-in of this clip (v1.2.1); 0 = hard cut. */
     val transitionUs: Long = 0L,
+    /** v1.5.0: which style renders over the overlap (a TransitionStyle id;
+     *  the marker pill shows its short label). */
+    val transitionType: String = "",
 )
 
 /** Projected drop of a clip drag (v1.0.9 free positioning): the slot the
@@ -614,6 +619,7 @@ fun TimelineView(
                 clip, index, left, width,
                 gapLeft = acc, gapWidth = gapWidth,
                 transitionUs = transitions[index],
+                transitionType = clip.transitionType,
             )
             acc = left + width
         }
@@ -711,6 +717,11 @@ fun TimelineView(
             }
     ) {
         // ---------------- content canvas ----------------
+        // v1.5.0: short labels for the transition marker pills, resolved in
+        // the composable scope (canvas draws take plain strings).
+        val transitionShortLabels = TransitionStyle.entries.associate { s ->
+            s.id to stringResource(TransitionUi.shortRes(s.id))
+        }
         Canvas(Modifier.fillMaxSize()) {
             val snap = snapshot ?: return@Canvas
             val g = geom
@@ -831,6 +842,7 @@ fun TimelineView(
                         trackTop = g.trackTop,
                         badgePaint = badgePaint,
                         dp = dp,
+                        typeLabel = transitionShortLabels[layout.transitionType] ?: "",
                     )
                 }
             }
@@ -1766,10 +1778,11 @@ private val PipColor = Color(0xFF64B5F6)
 private val TransitionColor = Color(0xFFFFB74D)
 
 /**
- * Crossfade marker on the overlap region (v1.2.1): a dark pill straddling
- * the boundary between the two clips with converging triangles and — when
- * there is room — the effective fade duration. Centered on the overlap's
- * midpoint, which sits at the visual seam between the two blocks.
+ * Transition marker on the overlap region (v1.2.1; v1.5.0 style label):
+ * a dark pill straddling the boundary between the two clips with converging
+ * triangles and — when there is room — the style's short label plus the
+ * effective duration. Centered on the overlap's midpoint, which sits at
+ * the visual seam between the two blocks.
  */
 private fun DrawScope.drawTransitionMarker(
     layout: ClipLayout,
@@ -1777,6 +1790,7 @@ private fun DrawScope.drawTransitionMarker(
     trackTop: Float,
     badgePaint: Paint,
     dp: Float,
+    typeLabel: String,
 ) {
     val transitionPx = layout.transitionUs / 1_000_000f * ppsValue
     if (transitionPx <= 3f * dp) return
@@ -1785,7 +1799,9 @@ private fun DrawScope.drawTransitionMarker(
     val cx = layout.left + transitionPx / 2f
     val cy = top + height / 2f
 
-    val pillW = minOf(transitionPx, 72f * dp).coerceAtLeast(22f * dp)
+    // v1.5.0: wider cap — the label now carries the style short name plus
+    // the duration ("叠化 0.5s").
+    val pillW = minOf(transitionPx, 100f * dp).coerceAtLeast(22f * dp)
     val pillH = 15f * dp
     val pillTopLeft = Offset(cx - pillW / 2f, cy - pillH / 2f)
     drawRoundRect(
@@ -1802,9 +1818,10 @@ private fun DrawScope.drawTransitionMarker(
         style = Stroke(width = 1.dp.toPx()),
     )
 
-    // Converging triangles glyph (◁ ▷ meeting = dissolve) on the left side
-    // of the pill; the duration text takes the right side when there is room.
-    val hasText = pillW >= 46f * dp
+    // Converging triangles glyph (◁ ▷ meeting = a transition) on the left
+    // side of the pill; the style label + duration take the rest if roomy.
+    val text = "$typeLabel ${TimeCode.formatShort(layout.transitionUs)}".trim()
+    val hasText = pillW >= 60f * dp && text.isNotEmpty()
     val glyphCx = if (hasText) cx - pillW / 4f else cx
     val s = 4f * dp
     val gapGlyph = 2.5f * dp
@@ -1820,15 +1837,15 @@ private fun DrawScope.drawTransitionMarker(
     }
     drawPath(path, TransitionColor)
 
-    // Effective duration when the pill has room for it.
+    // Style short label + effective duration when the pill has room.
     if (hasText) {
         val canvas = drawContext.canvas.nativeCanvas
         badgePaint.color = android.graphics.Color.argb(0xF0, 0xFF, 0xFF, 0xFF)
         badgePaint.textAlign = android.graphics.Paint.Align.CENTER
         badgePaint.textSize = 9f * dp
         canvas.drawText(
-            TimeCode.formatShort(layout.transitionUs),
-            cx + pillW / 4f, cy + 3f * dp, badgePaint,
+            text,
+            cx + pillW / 5f, cy + 3f * dp, badgePaint,
         )
     }
 }

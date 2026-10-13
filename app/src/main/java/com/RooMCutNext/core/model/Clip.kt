@@ -20,6 +20,13 @@ import kotlinx.serialization.Serializable
  * [TRANSITION_MIN_GAP_US]); a black hole between two clips disables the
  * transition. Old JSON deserializes with transitionInUs = 0 = hard cuts.
  *
+ * v1.5.0 — [transitionType] selects WHICH transition renders over the
+ * overlap (see [TransitionStyle]; "dissolve" = the classic crossfade every
+ * version before v1.5.0 shipped). The type is meaningless while
+ * transitionInUs is 0 (no overlap = hard cut); it is kept in the model so
+ * toggling the duration off and back on preserves the chosen style.
+ * Old JSON deserializes with transitionType = "dissolve".
+ *
  * Source-side coordinates: [sourceInUs]/[sourceOutUs] address the source media
  * file directly; [durationUs] is the timeline duration after speed is applied.
  */
@@ -56,6 +63,10 @@ data class Clip(
      * before any geometry is derived from it.
      */
     val transitionInUs: Long = 0L,
+    /** v1.5.0: which transition renders over the overlap — a
+     * [TransitionStyle] id. Only meaningful while [transitionInUs] > 0;
+     * unknown/missing ids degrade to "dissolve" ([TransitionStyle.fromId]). */
+    val transitionType: String = TransitionStyle.DISSOLVE.id,
     /** Per-clip mosaic regions (v1.2.2), normalized to this clip's frame. */
     val mosaics: List<MosaicRegion> = emptyList(),
 ) {

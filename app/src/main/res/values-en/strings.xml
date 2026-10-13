@@ -161,13 +161,61 @@
 
     <!-- Crossfade transitions (v1.2.1) -->
     <string name="action_transition">Transition</string>
-    <string name="panel_transition_title">Transition (crossfade)</string>
+    <string name="panel_transition_title">Transition</string>
     <string name="panel_transition_none">None</string>
     <string name="panel_transition_duration">Duration</string>
     <string name="panel_transition_sec_fmt">%1$.1f s</string>
     <string name="panel_transition_first_clip">There is no clip before the first one, so it cannot have a transition. Select a later clip instead.</string>
     <string name="panel_transition_gap">There is a black gap before this clip; crossfades need two clips side by side. Remove the gap (drag the clip tight) first.</string>
     <string name="panel_transition_effective_fmt">Effective %1$s (limited by neighboring clips)</string>
+
+    <!-- Transition styles (v1.5.0): group headers, panel names, marker shorts -->
+    <string name="transition_group_basic">Basic</string>
+    <string name="transition_group_slide">Slide</string>
+    <string name="transition_group_wipe">Wipe</string>
+    <string name="transition_group_effect">Effect</string>
+    <string name="transition_name_dissolve">Dissolve</string>
+    <string name="transition_name_fade_black">Fade to black</string>
+    <string name="transition_name_fade_white">Fade to white</string>
+    <string name="transition_name_slide_left">Slide in left</string>
+    <string name="transition_name_slide_right">Slide in right</string>
+    <string name="transition_name_slide_up">Slide in up</string>
+    <string name="transition_name_slide_down">Slide in down</string>
+    <string name="transition_name_wipe_left">Wipe left</string>
+    <string name="transition_name_wipe_right">Wipe right</string>
+    <string name="transition_name_wipe_up">Wipe up</string>
+    <string name="transition_name_wipe_down">Wipe down</string>
+    <string name="transition_name_iris_open">Iris open</string>
+    <string name="transition_name_iris_close">Iris close</string>
+    <string name="transition_name_clock_wipe">Clock wipe</string>
+    <string name="transition_name_zoom_in">Zoom in</string>
+    <string name="transition_name_zoom_out">Zoom out</string>
+    <string name="transition_name_spin">Spin</string>
+    <string name="transition_name_blur">Blur</string>
+    <string name="transition_name_mosaic">Mosaic</string>
+    <string name="transition_name_flash">Flash</string>
+    <string name="transition_name_blinds">Blinds</string>
+    <string name="transition_short_dissolve">Dissolve</string>
+    <string name="transition_short_fade_black">Black</string>
+    <string name="transition_short_fade_white">White</string>
+    <string name="transition_short_slide_left">Slide L</string>
+    <string name="transition_short_slide_right">Slide R</string>
+    <string name="transition_short_slide_up">Slide U</string>
+    <string name="transition_short_slide_down">Slide D</string>
+    <string name="transition_short_wipe_left">Wipe L</string>
+    <string name="transition_short_wipe_right">Wipe R</string>
+    <string name="transition_short_wipe_up">Wipe U</string>
+    <string name="transition_short_wipe_down">Wipe D</string>
+    <string name="transition_short_iris_open">Iris O</string>
+    <string name="transition_short_iris_close">Iris C</string>
+    <string name="transition_short_clock_wipe">Clock</string>
+    <string name="transition_short_zoom_in">Zoom I</string>
+    <string name="transition_short_zoom_out">Zoom O</string>
+    <string name="transition_short_spin">Spin</string>
+    <string name="transition_short_blur">Blur</string>
+    <string name="transition_short_mosaic">Mosaic</string>
+    <string name="transition_short_flash">Flash</string>
+    <string name="transition_short_blinds">Blinds</string>
 
     <!-- Mosaic regions (v1.2.2) -->
     <string name="action_mosaic">Mosaic</string>

@@ -22,6 +22,7 @@ import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.core.util.TextSignatures
 import com.RooMCutNext.export.CompositionBuilder
 import com.RooMCutNext.export.effects.TimedTextOverlay
+import com.RooMCutNext.export.effects.TransitionEffect
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -157,10 +158,26 @@ import java.util.concurrent.ConcurrentHashMap
  *     over TextureView A" dissolve), preroll warm-up of the incoming
  *     player (headPrerollUs, reference prescribes 300-500ms), text baked
  *     into BOTH layers (constant composite — global text never fades with
- *     the clip), and an untouched export path. GPU shader transitions
- *     (wipe/slide/zoom — the reference's phase 5) remain the documented
- *     future extension point; the reference itself prescribes Dissolve
- *     first, which is what ships.
+ *     the clip), and an untouched export path.
+ *
+ * v1.5.0 — THE FULL TRANSITION CATALOG (the reference's phase 5, GPU
+ * shader transitions). The head player's effect chain now ends with the
+ * SAME TransitionEffect the export head item bakes (wipe/slide/zoom/spin/
+ * blur/mosaic/flash/blinds/iris/clock/through-color — see TransitionStyle),
+ * so preview and export render pixel-identical transitions by construction.
+ * Timestamps: the head is a PLAIN ExoPlayer whose GL effects receive
+ * SOURCE-clock positions, so the effect is constructed with fadeUs = the
+ * head's source span (T*speed) and globalStartUs = -1 — TransitionMath's
+ * item-local window then maps source time onto timeline progress.
+ *
+ * View alpha is now SPLIT by path: while the transition shader is mounted
+ * the shader owns the head's per-pixel alpha and the TextureView sits at
+ * alpha 1 in-window (driveHead); the view-layer ramp remains for the two
+ * shader-less fallbacks — image heads (an ImageView has no pipeline) and
+ * the effects-fallback session mode (headEffectsFallback) — where any
+ * style degrades to the classic dissolve ramp. The post-window tail
+ * (HeadWindowMath) still uses the view alpha on every path: at tail time
+ * the shader is at progress 1 (opaque) and the fade-out is the view's job.
  */
 class OverlayPreviewController(private val context: Context) {
 
@@ -840,6 +857,14 @@ class OverlayPreviewController(private val context: Context) {
             // v1.2.10: + the overlapping texts (local windows) and, when
             // needed, the canvas Presentation ahead of them — chain order
             // mirrors buildClipItem: look → canvas fit → text.
+            //
+            // v1.5.0: + the TRANSITION itself, same chain tail as the export
+            // head item (look → canvas → text → transition). fadeUs is the
+            // head's SOURCE span (durationUs × speed) because plain-player
+            // effect timestamps run on the source clock; globalStartUs = -1
+            // disables the global window so only the item-local one rules.
+            // While this is mounted the shader owns the head's alpha and
+            // driveHead keeps the view at 1 in-window (see the class doc).
             val lookEffects: List<Effect> = if (headEffectsFallback) {
                 emptyList()
             } else {
@@ -855,6 +880,19 @@ class OverlayPreviewController(private val context: Context) {
                     )
                 }
                 addAll(textEffects)
+                // v1.5.0: the transition shader. SKIPPED in the fallback
+                // session (headEffectsFallback) — a device whose effects
+                // path is broken gets the plain player + the view-layer
+                // dissolve ramp instead (driveHead's shaderOwnsAlpha=false).
+                if (!headEffectsFallback) {
+                    add(
+                        TransitionEffect(
+                            active.type,
+                            (active.sourceOutUs - active.sourceInUs).coerceAtLeast(1L),
+                            -1L,
+                        )
+                    )
+                }
             }
             headEffectsActive = effects.isNotEmpty()
             if (effects.isNotEmpty()) runCatching { player.setVideoEffects(effects) }
@@ -957,14 +995,18 @@ class OverlayPreviewController(private val context: Context) {
 
     /**
      * Mount signature of the head's effect chain: the clip's look effects
-     * (as before) plus the texts overlapping the window, so editing either
-     * while mounted triggers a rebuild.
+     * (as before) plus the texts overlapping the window plus the transition
+     * STYLE (v1.5.0), so editing any of them while mounted triggers a
+     * rebuild.
      */
     private fun headEffectsSignature(project: Project, active: CompositionBuilder.HeadOverlaySpec): Int {
         val lookSig = project.clips.firstOrNull { it.id == active.clipId }?.lookSignature() ?: 0
         // v1.3.0: WINDOWS ONLY (TextSignatures) — visual text edits render
         // live via liveTextLookup and must not churn the head player anymore.
-        return 31 * lookSig + TextSignatures.windows(overlappingHeadTexts(project, active))
+        val textSig = TextSignatures.windows(overlappingHeadTexts(project, active))
+        // v1.5.0: the style selects the shader branch — a type change must
+        // rebuild the player to remount the effect.
+        return 31 * (31 * lookSig + textSig) + active.type.hashCode()
     }
 
     /**
@@ -997,6 +1039,10 @@ class OverlayPreviewController(private val context: Context) {
             headImageView?.let { if (it.visibility != View.INVISIBLE) it.visibility = View.INVISIBLE }
             return
         }
+
+        /** v1.5.0: view alpha in-window — 1 while the transition shader
+         * owns the head's per-pixel alpha, the dissolve ramp otherwise. */
+        fun viewAlphaFor(ramp: Float): Float = if (headEffectsActive) 1f else ramp
         val localUs = playheadUs - spec.startUs
         val inWindow = localUs in 0 until spec.durationUs
         // v1.2.8: forward fade-out tail (playing only) — see HeadWindowMath.
@@ -1051,11 +1097,20 @@ class OverlayPreviewController(private val context: Context) {
                 diag("head effects→plain (no first frame ${sinceMountMs}ms after mount)")
             }
         }
-        headTargetAlpha = ramp
+        headTargetAlpha = viewAlphaFor(ramp)
         // v1.2.5: alpha follows the ramp DIRECTLY — no first-frame gate (same
         // reasoning as drivePip: an unrendered TextureView is transparent, so
         // the fade can never deadlock on a missing first-frame callback).
-        if (tv.alpha != ramp) tv.alpha = ramp
+        //
+        // v1.5.0: with the transition shader mounted the SHADER owns the
+        // head's per-pixel alpha (masks, coverage, ramps — see the class
+        // doc), so the view sits at 1 in-window and the GL output composites
+        // directly over the body. The classic view-layer ramp survives only
+        // for the shader-less fallbacks: image heads (this branch is video-
+        // only; images use the ImageView path above) and the effects-
+        // fallback session, where headEffectsActive is false and every style
+        // degrades to the dissolve ramp.
+        if (tv.alpha != headTargetAlpha) tv.alpha = headTargetAlpha
 
         // v1.2.7: position math is SPEED-AWARE (the clipped player advances
         // at spec.speed × wall time while the playhead advances 1×) and the
