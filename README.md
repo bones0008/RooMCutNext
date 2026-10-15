@@ -1,7 +1,8 @@
 # RooMCutNext
 
 **Android 原生单层时间线视频剪辑器** — Kotlin + Jetpack Compose + Media3。
-Native Android single-layer timeline video editor.
+
+**[中文](README.md)** | [English](README.en.md)
 
 从一个空项目到能导出 MP4 的完整剪辑工具：导入素材 → 时间线排列 → 精确剪辑 → 预览 → 导出。
 
@@ -9,19 +10,19 @@ Native Android single-layer timeline video editor.
 
 ## 目录 / Contents
 
-1. [功能清单（对照需求）](#功能清单)
-2. [安装 APK（最快上手）](#安装-apk)
-3. [从源码构建](#从源码构建)
-4. [操作指南](#操作指南)
-5. [架构说明（含 OpenCut / LibreCuts 研究结论）](#架构说明)
-6. [30FPS / 24FPS 混合素材的处理策略](#帧率策略)
-7. [已知限制与路线图](#已知限制)
+1. [功能清单](#功能清单)
+2. [安装 APK](#安装-apk)
+3. [操作指南](#操作指南)
+4. [架构说明](#架构说明)
+5. [30FPS / 24FPS 混合素材的处理策略](#帧率策略)
+6. [已知限制与路线图](#已知限制)
+7. [第三方组件与许可](#第三方组件与许可)
 
 ---
 
 ## 功能清单
 
-对照你的 V1 需求清单逐条实现（✅ = V1 已实现，⚠️ = 简化实现，❌ = 留待后续版本）：
+对照 V1 需求清单逐条实现（✅ = 已实现，⚠️ = 简化实现，❌ = 留待后续版本）：
 
 ### 〇、项目管理（首页）
 - ✅ 项目卡片封面 = **时间线第 20 帧自动抓取**（v1.0.11）：回到项目列表时自动刷新，剪辑/调序/变速后封面跟着变（选第 20 帧是因为片头第 1 帧常常是黑场）；空时间线 / 纯音频 / 提取失败的项目回退到影片图标
@@ -168,49 +169,16 @@ Native Android single-layer timeline video editor.
 
 最简单的方式（无需任何开发环境）：
 
-1. 把 `RooMCutNext-v1.2.2-release.apk` 传到手机（微信/网盘/USB 均可）
-2. 在手机上点开该文件，系统询问「允许安装未知来源应用」时选择允许
-3. 安装完成，桌面出现「RooMCutNext」图标
+1. 打开本仓库的 [Releases](https://github.com/bones0008/RooMCutNext/releases) 页面，进入最新版本（当前为 **v1.5.2**），下载 `app-release.apk`
+2. 把 APK 传到手机（微信/网盘/USB 均可）
+3. 在手机上点开该文件，系统询问「允许安装未知来源应用」时选择允许
+4. 安装完成，桌面出现「RooMCutNext」图标
 
 > v1.0.5 起改用随仓库保存的固定签名密钥（旧 debug 密钥随构建环境丢失）。
 > **从 v1.0.4 及更早版本升级时需先卸载旧版再安装**（一次性，此后升级不再受签名影响）。
 > 卸载会清除应用内的项目数据，如有需要请先导出成品视频。
 
 **系统要求：Android 12（API 31）及以上。**
-
----
-
-## 从源码构建
-
-### 方式 A：Android Studio（推荐）
-
-1. 安装 [Android Studio](https://developer.android.com/studio)（Ladybug 或更新版本）
-2. 打开本工程目录（含 `build.gradle.kts` 的那一层）
-3. 等待 Gradle Sync 完成（首次会自动下载依赖，需几分钟）
-4. 手机开启「开发者选项 → USB 调试」，插上电脑
-5. 点绿色 ▶ Run 按钮 — 完成
-
-### 方式 B：命令行
-
-```bash
-# 需要 JDK 17+，且已安装 Android SDK（compileSdk 36 / build-tools）
-./gradlew assembleDebug
-# 产物: app/build/outputs/apk/debug/app-debug.apk
-
-# 单元测试（66 个核心剪辑算法/时间码测试）
-./gradlew testDebugUnitTest
-```
-
-### 版本环境
-
-| 组件 | 版本 |
-|---|---|
-| AGP | 8.13.2 |
-| Gradle | 8.13 |
-| Kotlin | 2.2.20 |
-| Compose BOM | 2024.12.01 |
-| Media3 | 1.11.1 |
-| compileSdk / minSdk / targetSdk | 36 / 31 / 35 |
 
 ---
 
@@ -260,23 +228,9 @@ app/src/main/java/com.RooMCutNext/
 └── ui/                    Compose 界面（Home / Editor / Timeline / Panels）
 ```
 
-### 关键设计决策（源自两个开源项目的研究）
-
-本项目深度研究了 **OpenCut**（网页版剪映式编辑器）与 **LibreCuts**（安卓单层剪辑器），吸收了它们的架构教训：
-
-| 决策 | 来源 |
-|---|---|
-| 整数微秒时间系统 + snap-once 取整（split/trim 只对动的一侧取帧对齐，另一侧减法推导，保证时长守恒不变量） | OpenCut 用 120k ticks 整数时钟重构，浮点秒曾造成帧对齐漂移 |
-| 统一 `List<Clip>` + 前缀和坐标（无 start/end 字段）| LibreCuts 验证了这是单层时间线"最简正确模型"；它的反例是"主视频槽位+merge 列表"双轨制导致 index-0 特判地狱 |
-| 快照式撤销栈 | 两者殊途同归：不可变小数据结构下全量快照成本≈0，且永不失步 |
-| **预览与导出共用同一个 Composition** | OpenCut 的核心经验："WYSIWYG 由构造保证"。预览用 `CompositionPlayer`、导出用 `Transformer`，吃同一个 `Composition` 对象——修剪/变速/旋转/裁剪/调色/文字在两边天然一致 |
-| 媒体导入即复制 | 两者共同的坑：URI 权限过期 → 项目损坏 |
-| 拖动手势「预览→松手提交」两段式 | LibreCuts 的 TrackTrimView 经验：拖动实时 seek、抬手才进历史栈 |
-| 自动保存 + 原子写入 | OpenCut 的 SaveManager 模式（防崩溃损坏文件） |
-
 ### 帧率策略
 
-针对你的素材组合（手机拍摄 30FPS + AI 生成 24FPS）：
+针对 30FPS 手机素材 + 24FPS AI 生成素材的混合场景：
 
 1. **项目帧率**：首个导入视频的帧率自动吸附到 24/25/30/50/60（AI 视频 24FPS 的项目就是 24FPS 项目）
 2. **帧步进**：播放头位于哪个片段，就按**该片段源帧率**步进（在 30FPS 项目里步进 24FPS 的 AI 片段 = 每次 1/24 秒）
@@ -287,22 +241,48 @@ app/src/main/java/com.RooMCutNext/
 
 ## 已知限制
 
-1. **转场（Crossfade 等）** 未实现 — 如你的需求文档所述，转场会引入多层合成架构，计划 V2 做复合层
+1. **转场（Crossfade 等）** 未实现 — 如需求文档所述，转场会引入多层合成架构，计划 V2 做复合层
 2. ~~音频独立轨道未实现~~ → **v1.0.4 已实现**：独立音频轨（导入 MP3/AAC/WAV/FLAC/OGG 等，多轨混音、拖动/修剪/音量/淡入淡出）
 3. **导出为 VFR**（可变帧率）MP4 — 所有主流播放器/平台都支持，但某些严格 CFR 的工具可能需要转码
 4. **HDR 素材（HLG/HDR10）自动色调映射为 SDR** — 预览与导出一致，在所有设备上稳定；V1 不导出 HDR。若设备 GL 管线异常，预览会自动降级到兼容模式（画面效果不显示，导出不受影响）
 5. **自由裁剪** 通过边距滑杆实现（不是框选手势）
 6. 文字内容编辑不进入撤销栈（样式调整会进）
-7. debug APK 体积较大（~66MB，含全量图标与调试符号）；开启 R8 的 release 构建可显著缩小，V1 为稳定性默认关闭混淆
+7. debug APK 体积较大（~71MB，含全量图标与调试符号）；release 构建约 53MB
 8. CompositionPlayer 为 Media3 实验性 API（`@UnstableApi`），升级 Media3 大版本时需回归测试
 
 ## 路线图（建议优先级）
 
-1. V1.1：转场（Crossfade/Dissolve/黑场/白场）— 基于现有 Composition 双层序列扩展
+1. ~~V1.1：转场（Crossfade/Dissolve/黑场/白场）~~ → **v1.5.0 已实现全量 21 种转场**
 2. ~~V1.2：背景音乐轨~~ → **v1.0.4 已实现**（多序列音频混音）；音频抽取（从视频提取原声为独立音频轨）留后续
 3. V1.3：release 构建 + R8 + Play 签名
-4. V2：关键帧动画（文字/缩放）、贴纸、画中画
+4. V2：关键帧动画（文字/缩放）、贴纸、画中画 → **画中画/贴纸 v1.2 已实现**
 
 ---
 
-*Built with Kotlin 2.2 · Jetpack Compose · Media3 1.11 · 单层时间线编辑内核 48 项单元测试全绿*
+## 第三方组件与许可
+
+本项目**没有拷贝任何第三方项目的源码**——全部 Kotlin / GLSL 代码为本项目原创（OpenCut 与 LibreCuts 仅作架构层面的研究参考，未引入其代码）。使用到的开源组件均为标准依赖库，全部为宽松许可（可免费商用、无传染性、无需开源自有代码）：
+
+| 组件 | 用途 | 许可 |
+|---|---|---|
+| AndroidX / Jetpack Compose | UI 框架 | Apache-2.0 |
+| Media3（ExoPlayer / Transformer / Effect） | 预览播放 + 导出合成 | Apache-2.0 |
+| Kotlin Coroutines / Serialization | 异步与 JSON 持久化 | Apache-2.0 |
+| Coil | 图片加载 | Apache-2.0 |
+| JUnit 4 | 单元测试（仅测试期使用） | EPL-1.0 |
+
+内置字体（随 APK 分发的字库文件，均允许免费商用与随应用分发）：
+
+| 字体 | 文件 | 许可 |
+|---|---|---|
+| Noto Sans SC（黑体） | `assets/fonts/font_hei.ttf` | SIL OFL 1.1 |
+| Noto Serif SC（宋体） | `assets/fonts/font_song.ttf` | SIL OFL 1.1 |
+| 霞鹜文楷 LXGW WenKai | `assets/fonts/font_kai.ttf` | SIL OFL 1.1 |
+| 得意黑 Smiley Sans | `assets/fonts/font_duyi.ttf` | SIL OFL 1.1 |
+| 站酷快乐体 ZCOOL KuaiLe | `assets/fonts/font_kuaile.ttf` | 站酷免费商用授权 |
+
+内置 8 款 `.cube` LUT 滤镜为本项目程序化生成，无第三方版权。
+
+---
+
+*Built with Kotlin 2.2 · Jetpack Compose · Media3 1.11 · 单层时间线编辑内核 297 项单元测试全绿*
