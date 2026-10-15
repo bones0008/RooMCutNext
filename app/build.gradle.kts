@@ -19,14 +19,30 @@ android {
     }
 
     signingConfigs {
-        // Stable key committed with the repo so every environment reset can
-        // still produce upgrade-compatible APKs (the original auto-generated
-        // debug keystore died with the machine that created it).
-        create("stable") {
-            storeFile = rootProject.file("keystore/release.keystore")
-            storePassword = "***REMOVED***"
-            keyAlias = "roocmcutnext"
-            keyPassword = "***REMOVED***"
+        // Release signing is read from local.properties (git-ignored) or env
+        // vars so key material never enters the repository:
+        //   roocmcut.keystore=/absolute/path/to/release.keystore
+        //   roocmcut.storePassword=...
+        //   roocmcut.keyPassword=...   (defaults to store password)
+        //   roocmcut.keyAlias=...      (defaults to roocmcutnext)
+        // or ROOCMCUT_KEYSTORE / ROOCMCUT_STORE_PASSWORD env vars.
+        // When unconfigured, builds fall back to the debug keystore so a
+        // fresh clone builds out of the box.
+        create("release") {
+            val props = java.util.Properties()
+            runCatching {
+                rootProject.file("local.properties").inputStream().use { props.load(it) }
+            }
+            val ksPath = props.getProperty("roocmcut.keystore")
+                ?: System.getenv("ROOCMCUT_KEYSTORE")
+            val ksPass = props.getProperty("roocmcut.storePassword")
+                ?: System.getenv("ROOCMCUT_STORE_PASSWORD")
+            if (!ksPath.isNullOrEmpty() && !ksPass.isNullOrEmpty() && rootProject.file(ksPath).exists()) {
+                storeFile = rootProject.file(ksPath)
+                storePassword = ksPass
+                keyAlias = props.getProperty("roocmcut.keyAlias") ?: "roocmcutnext"
+                keyPassword = props.getProperty("roocmcut.keyPassword") ?: ksPass
+            }
         }
     }
 
@@ -35,10 +51,11 @@ android {
             // V1 keeps minify off for maximum stability; enable later with proper keep rules.
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("stable")
+            signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
+                ?: signingConfigs.getByName("debug")
         }
         debug {
-            signingConfig = signingConfigs.getByName("stable")
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

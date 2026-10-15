@@ -175,9 +175,9 @@ The easiest way (no development environment needed):
 3. Tap the file on the phone and allow "install from unknown sources" when prompted
 4. After installation, the "RooMCutNext" icon appears on the home screen
 
-> Since v1.0.5 the app is signed with a stable keystore stored in this repository (the original debug key died with its build machine).
-> **Upgrading from v1.0.4 or earlier requires uninstalling the old version first** (one time only; later upgrades are signature-compatible).
-> Uninstalling wipes in-app project data — export your finished videos first if needed.
+> Signing keys are never distributed with the repository: official Release APKs are signed with a key stored outside the repo.
+> **Upgrading from the v1.5.2 official APK to any later release requires a one-time uninstall + reinstall** (the signing key was rotated when the repository went public); same for v1.0.4 or earlier. Uninstalling wipes in-app project data — export your finished videos first.
+> Building from source: debug builds work out of the box after cloning; configure release signing via `local.properties` (git-ignored) keys `roocmcut.keystore` / `roocmcut.storePassword`, or env vars `ROOCMCUT_KEYSTORE` / `ROOCMCUT_STORE_PASSWORD` — builds fall back to debug signing when unconfigured.
 
 **System requirements: Android 12 (API 31) or newer.**
 
