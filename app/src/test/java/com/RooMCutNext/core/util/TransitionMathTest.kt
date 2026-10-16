@@ -233,12 +233,17 @@ class TransitionMathTest {
     }
 
     @Test
-    fun `zoom out scales from oversize back to full`() {
-        assertEquals(1.8f, TransitionMath.zoomScale(TransitionStyle.ZOOM_OUT, 0f), 1e-4f)
+    fun `zoom out enters magnified and settles quadratically`() {
+        // v1.5.3: 2.4x start, quadratic settle (1 + 1.4·(1−p)²).
+        assertEquals(2.4f, TransitionMath.zoomScale(TransitionStyle.ZOOM_OUT, 0f), 1e-4f)
+        assertEquals(1.35f, TransitionMath.zoomScale(TransitionStyle.ZOOM_OUT, 0.5f), 1e-4f)
         assertEquals(1f, TransitionMath.zoomScale(TransitionStyle.ZOOM_OUT, 1f), 1e-4f)
-        // The zoom-out fade-in completes within the first 30%.
+        // v1.5.3: the coverage ramp now spans the WHOLE window so the settle
+        // — the style's only visible trait — is watched arriving (the v1.5.2
+        // 3p curve hid it behind an already-opaque B).
         assertEquals(0f, TransitionMath.zoomOutRevealAlpha(0f), 1e-4f)
-        assertEquals(1f, TransitionMath.zoomOutRevealAlpha(0.4f), 1e-4f)
+        assertEquals(0.5f, TransitionMath.zoomOutRevealAlpha(0.5f), 1e-4f)
+        assertEquals(1f, TransitionMath.zoomOutRevealAlpha(1f), 1e-4f)
     }
 
     @Test
@@ -257,10 +262,18 @@ class TransitionMathTest {
     }
 
     @Test
-    fun `mosaic blocks refine as the transition proceeds`() {
+    fun `mosaic blocks stay coarse then refine late`() {
+        // v1.5.3: 24·40^(p³) — the v1.5.2 linear ramp hit ~490 blocks by
+        // mid-window (≈2px blocks at 1080p) and the style previewed as plain
+        // dissolve; the cubic holds a visibly coarse grid through the first
+        // ~2/3 and refines late.
         assertEquals(24f, TransitionMath.mosaicBlocks(0f), 1e-3f)
-        assertTrue(TransitionMath.mosaicBlocks(1f) > 700f) // ~per-pixel by the end
-        assertTrue(TransitionMath.mosaicBlocks(0.5f) > 24f && TransitionMath.mosaicBlocks(0.5f) < TransitionMath.mosaicBlocks(1f))
+        assertEquals(960f, TransitionMath.mosaicBlocks(1f), 1e-2f)
+        // Mid-window still visibly pixelated: ~38 blocks ≈ 28px blocks at 1080p.
+        assertEquals(38.06f, TransitionMath.mosaicBlocks(0.5f), 0.5f)
+        // p=0.8 (the old linear curve was already ~787): still coarse.
+        assertTrue(TransitionMath.mosaicBlocks(0.8f) < 200f)
+        assertTrue(TransitionMath.mosaicBlocks(0.5f) < TransitionMath.mosaicBlocks(0.8f))
         // The last stretch cross-fades the residual quantization away.
         assertEquals(0f, TransitionMath.mosaicClearMix(0.5f), 1e-4f)
         assertEquals(1f, TransitionMath.mosaicClearMix(1f), 1e-4f)

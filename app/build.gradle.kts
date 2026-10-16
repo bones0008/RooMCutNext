@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -13,8 +15,8 @@ android {
         applicationId = "com.RooMCutNext"
         minSdk = 31
         targetSdk = 35
-        versionCode = 38
-        versionName = "1.5.2"
+        versionCode = 39
+        versionName = "1.5.3"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -29,7 +31,7 @@ android {
         // When unconfigured, builds fall back to the debug keystore so a
         // fresh clone builds out of the box.
         create("release") {
-            val props = java.util.Properties()
+            val props = Properties()
             runCatching {
                 rootProject.file("local.properties").inputStream().use { props.load(it) }
             }

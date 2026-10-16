@@ -118,4 +118,62 @@ class HeadEffectsPolicyTest {
         assertTrue(HeadEffectsPolicy.staleSpec(mounted, listOf(spec(durationUs = 400_000L))))
         assertTrue(HeadEffectsPolicy.staleSpec(mounted, listOf(spec(muted = true))))
     }
+
+    // ---- v1.5.3 premount ----
+
+    @Test
+    fun `premount picks the earliest upcoming window while playing`() {
+        val far = spec(clipId = "far", startUs = 10_000_000L)
+        val near = spec(clipId = "near", startUs = 3_000_000L)
+        val specs = listOf(far, near)
+        // Playhead at 1s: `near` starts 2s ahead (inside the 2.5s lead), the
+        // far one 9s ahead.
+        assertEquals(
+            near,
+            HeadEffectsPolicy.premountSpec(specs, playheadUs = 1_000_000L, isPlaying = true, inTail = false),
+        )
+    }
+
+    @Test
+    fun `premount ignores windows behind or containing the playhead`() {
+        // startUs must be strictly ahead: a window the playhead is INSIDE is
+        // the normal active-mount path's job, and a past window is history.
+        val w = spec(startUs = 1_000_000L, durationUs = 800_000L)
+        assertEquals(
+            null,
+            HeadEffectsPolicy.premountSpec(listOf(w), playheadUs = 1_200_000L, isPlaying = true, inTail = false),
+        )
+        assertEquals(
+            null,
+            HeadEffectsPolicy.premountSpec(listOf(w), playheadUs = 5_000_000L, isPlaying = true, inTail = false),
+        )
+    }
+
+    @Test
+    fun `premount is suppressed while paused and mid-tail`() {
+        val w = spec(startUs = 3_000_000L)
+        // Paused: the scrub path keeps preroll + hidden-keep, no premount.
+        assertEquals(
+            null,
+            HeadEffectsPolicy.premountSpec(listOf(w), playheadUs = 1_000_000L, isPlaying = false, inTail = false),
+        )
+        // Mid-tail of the previous window: releasing the coasting head would
+        // re-expose the boundary flash the tail masks.
+        assertEquals(
+            null,
+            HeadEffectsPolicy.premountSpec(listOf(w), playheadUs = 1_000_000L, isPlaying = true, inTail = true),
+        )
+    }
+
+    @Test
+    fun `premount lead covers the cold grace budget`() {
+        // The whole point of v1.5.3: a session's FIRST effects mount (cold:
+        // EGL + shader compile + codec init, 0.8-2s on mid-range devices)
+        // must fit inside the lead so the warm-up lands while parked, not
+        // inside the fade. Pin premount >= cold grace.
+        assertTrue(
+            "premount ${HeadEffectsPolicy.PREMOUNT_US / 1000}ms must cover cold grace ${HeadEffectsPolicy.COLD_GRACE_WALL_MS}ms",
+            HeadEffectsPolicy.PREMOUNT_US / 1000L >= HeadEffectsPolicy.COLD_GRACE_WALL_MS,
+        )
+    }
 }

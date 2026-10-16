@@ -51,6 +51,46 @@ object HeadEffectsPolicy {
     const val PREROLL_US = 600_000L
 
     /**
+     * v1.5.3: mount the NEXT window's head this far ahead WHILE PLAYING, so
+     * the cold pipeline (codec init + EGL context + shader compile, commonly
+     * 0.8–2s on mid-range devices) completes while the player is parked at
+     * position 0 — instead of landing inside/near the window. The v1.5.2
+     * field reports on this: per-style stutter through every window and a
+     * flash-black that only smoothed out after 7–8 plays, i.e. only after the
+     * process-wide codec/shader caches had warmed; premounting moves that
+     * warm-up off the window (and the parked player's first frame also
+     * pre-initializes the INCOMING clip's codec type, softening the body
+     * player's own item-boundary switch at the window end — the other half
+     * of the flash-black). Matches [COLD_GRACE_WALL_MS] so even a session's
+     * first-ever mount fits inside the lead.
+     */
+    const val PREMOUNT_US = 2_500_000L
+
+    /**
+     * The spec to mount for PREMOUNT while playing forward (v1.5.3): the
+     * earliest upcoming window whose start is within [premountUs] of the
+     * playhead. Null while not playing (the paused path keeps the preroll +
+     * hidden-keep scrub optimization unchanged) or when nothing is upcoming
+     * in range.
+     *
+     * [inTail] suppresses premount while the CURRENT head is coasting out
+     * its boundary-masking tail — releasing it mid-tail would re-expose the
+     * exact item-boundary flash the tail exists to cover.
+     */
+    fun premountSpec(
+        specs: List<CompositionBuilder.HeadOverlaySpec>,
+        playheadUs: Long,
+        isPlaying: Boolean,
+        inTail: Boolean,
+        premountUs: Long = PREMOUNT_US,
+    ): CompositionBuilder.HeadOverlaySpec? {
+        if (!isPlaying || inTail) return null
+        return specs
+            .filter { it.startUs > playheadUs && it.startUs - playheadUs <= premountUs }
+            .minByOrNull { it.startUs }
+    }
+
+    /**
      * Wall-clock grace for a WARM effects mount (the session has already
      * rendered at least one effects head). Must EXCEED the preroll so a
      * merely-slow-but-working warm render is never mistaken for a broken

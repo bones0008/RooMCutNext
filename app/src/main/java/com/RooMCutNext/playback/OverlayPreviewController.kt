@@ -407,6 +407,16 @@ class OverlayPreviewController(private val context: Context) {
     /** Set by driveHead to force reconcileHead to rebuild the head player. */
     private var headNeedsRebuild = false
 
+    /**
+     * v1.5.3: in-window clock-steering state (HeadSyncPolicy) — true while
+     * the head's playback speed is trimmed (runs ahead of the playhead) or
+     * parked (far ahead; paused until the playhead catches up). Reset on
+     * every mount/release. See HeadSyncPolicy's class doc for the mid-window
+     * effect-vanish bug this machinery replaces.
+     */
+    private var headTrimming = false
+    private var headParked = false
+
     /** Alpha to apply when the head's first frame renders (see PipOverlay.targetAlpha). */
     private var headTargetAlpha = 0f
 
@@ -483,7 +493,7 @@ class OverlayPreviewController(private val context: Context) {
         }
 
         reconcilePips(project, mediaDir)
-        reconcileHead(project, mediaDir, playheadUs)
+        reconcileHead(project, mediaDir, playheadUs, isPlaying)
 
         pipOverlays.forEach { (id, overlay) ->
             val pip = project.pips.firstOrNull { it.id == id } ?: return@forEach
@@ -792,13 +802,32 @@ class OverlayPreviewController(private val context: Context) {
         return headSpecsCache
     }
 
-    private fun reconcileHead(project: Project, mediaDir: File, playheadUs: Long) {
+    private fun reconcileHead(project: Project, mediaDir: File, playheadUs: Long, isPlaying: Boolean) {
         val host = layer ?: return
         val specs = headSpecsOf(project)
 
         val active = specs.firstOrNull { playheadUs >= it.startUs && playheadUs < it.startUs + it.durationUs }
             ?: specs.filter { playheadUs >= it.startUs - headPrerollUs && playheadUs < it.startUs + it.durationUs }
                 .minByOrNull { it.startUs }
+            // v1.5.3: PREMOUNT — while playing forward with nothing active in
+            // the (preroll-extended) window, mount the NEXT upcoming window's
+            // head up to HeadEffectsPolicy.PREMOUNT_US ahead so the cold
+            // pipeline (codec + EGL + shader compile) warms while the player
+            // is parked at position 0, NOT inside the fade. The parked
+            // player renders its first frame during the lead, which also
+            // flips the grace to WARM and keeps the in-window fallback latch
+            // from ever firing on a merely-cold mount. Suppressed mid-tail
+            // (releasing a coasting head would re-expose the boundary flash
+            // the tail masks) and while paused (scrub keeps the preroll +
+            // hidden-keep behavior).
+            ?: run {
+                val mounted = headSpec
+                val inTailNow = mounted != null && isPlaying &&
+                    HeadWindowMath.inTail(
+                        playheadUs - mounted.startUs, mounted.durationUs, headHoldTailUs, /* isPlaying = */ true,
+                    )
+                HeadEffectsPolicy.premountSpec(specs, playheadUs, isPlaying, inTailNow)
+            }
 
         if (active == null) {
             // v1.2.8: HOLD-TAIL — the playhead just left this window forward
@@ -864,6 +893,9 @@ class OverlayPreviewController(private val context: Context) {
         headEffectsSig = effectsSig
         headFirstFrame = false
         headTargetAlpha = 0f
+        // v1.5.3: fresh steering state for the new mount.
+        headTrimming = false
+        headParked = false
         // v1.2.10: TEXT ON THE HEAD + canvas Presentation — see the class doc.
         // The same texts the export bakes into the head ITEM are baked into
         // the head PLAYER here (local windows, HeadTextWindows), preceded by
@@ -1268,30 +1300,74 @@ class OverlayPreviewController(private val context: Context) {
                 val posUs = player.currentPosition * 1000L
                 val drift = expectedPosUs - posUs
                 if (!isPlaying) {
+                    headTrimming = false
+                    headParked = false
                     if (kotlin.math.abs(drift) > scrubDriftThresholdUs) {
                         runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
                     }
-                } else if (kotlin.math.abs(drift) > headHardRealignDriftUs) {
-                    val nowMs = android.os.SystemClock.uptimeMillis()
-                    if (nowMs - headLastCorrectiveSeekMs >= headCorrectiveSeekCooldownMs) {
-                        runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
-                        headLastCorrectiveSeekMs = nowMs
-                        diag("head hard-realign ${drift / 1000}ms")
+                } else {
+                    // v1.5.3: CLOCK STEERING while playing (HeadSyncPolicy).
+                    // AHEAD (posUs > expectedPosUs — the head's own clock ran
+                    // past the playhead, typically because the BODY stalled at
+                    // an item boundary while the head kept decoding) used to be
+                    // left alone below the 1.5s hard gate; the head then hit
+                    // its span end early, parked at shader progress 1 (full-B,
+                    // no effect) while the playhead was still mid-window — the
+                    // "圆形/时钟效果做到一半突然消失直接显示第二段" report.
+                    // Now: small ahead-drift TRIMS the speed (no decoder flush
+                    // — the v1.2.8 seek-storm lesson), growing drift PARKS the
+                    // player (freeze a mid-effect frame over the equally
+                    // stalled body instead of racing to the endpoint).
+                    // BEHIND stays alone below the hard gate (v1.2.9 doctrine:
+                    // a constant lag of brand-new content has no visual
+                    // reference).
+                    val aheadUs = posUs - expectedPosUs
+                    headParked = HeadSyncPolicy.shouldPark(aheadUs, headParked)
+                    val trim = if (headParked) 1f else HeadSyncPolicy.speedFactor(aheadUs, headTrimming)
+                    headTrimming = !headParked && trim < 1f
+                    val wantSpeed = spec.speed * trim
+                    if (kotlin.math.abs(player.playbackParameters.speed - wantSpeed) > 1e-3f) {
+                        runCatching { player.setPlaybackSpeed(wantSpeed) }
+                    }
+                    if (kotlin.math.abs(drift) > headHardRealignDriftUs) {
+                        val nowMs = android.os.SystemClock.uptimeMillis()
+                        if (nowMs - headLastCorrectiveSeekMs >= headCorrectiveSeekCooldownMs) {
+                            runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
+                            headLastCorrectiveSeekMs = nowMs
+                            headTrimming = false
+                            headParked = false
+                            diag("head hard-realign ${drift / 1000}ms")
+                        }
                     }
                 }
             }
             Player.STATE_ENDED -> {
                 val spanUs = spec.sourceOutUs - spec.sourceInUs
                 if (expectedPosUs + endedHoldMarginUs < spanUs) {
-                    runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
-                    if (isPlaying) player.playWhenReady = true
+                    // v1.5.3: the ENDED rewind now shares the corrective-seek
+                    // COOLDOWN. Without it a head that ended early (the ahead-
+                    // drift end state) re-seeked on EVERY ~33ms sync tick —
+                    // each seek flushing the decoder, the visible freeze/pop
+                    // cycle on top of the already-broken alignment.
+                    val nowMs = android.os.SystemClock.uptimeMillis()
+                    if (nowMs - headLastCorrectiveSeekMs >= headCorrectiveSeekCooldownMs) {
+                        runCatching { player.seekTo((expectedPosUs / 1000L).coerceAtLeast(0L)) }
+                        headLastCorrectiveSeekMs = nowMs
+                        headTrimming = false
+                        headParked = false
+                        if (isPlaying) player.playWhenReady = true
+                    }
                 }
             }
             else -> Unit // BUFFERING/IDLE: let it finish preparing on its own
         }
-        if (isPlaying && !player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
+        // v1.5.3: a PARKED head (far ahead) stays paused even while the body
+        // plays — un-parking happens in the READY branch once the playhead
+        // catches back inside HeadSyncPolicy.AHEAD_UNPARK_US.
+        val headWantsPlay = isPlaying && !headParked
+        if (headWantsPlay && !player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
             player.playWhenReady = true
-        } else if (!isPlaying && player.playWhenReady) {
+        } else if (!headWantsPlay && player.playWhenReady) {
             player.playWhenReady = false
         }
         // v1.3.1: live per-sync volume — a video-track mute toggle must
@@ -1313,6 +1389,9 @@ class OverlayPreviewController(private val context: Context) {
         headSpec = null
         headFirstFrame = false
         headIsImage = false
+        // v1.5.3: steering state dies with the mount.
+        headTrimming = false
+        headParked = false
     }
 
     // ------------------------------------------------------------------
@@ -1322,25 +1401,22 @@ class OverlayPreviewController(private val context: Context) {
     private fun layoutOverlays() {
         if (layerW <= 0 || layerH <= 0 || canvasW <= 0 || canvasH <= 0) return
 
-        // Content rect: aspect-fit of the canvas inside the layer — the exact
-        // rect PlayerView's RESIZE_MODE_FIT gives the composition frame.
-        val canvasAspect = canvasW.toFloat() / canvasH
-        val layerAspect = layerW.toFloat() / layerH
-        val contentW: Int
-        val contentH: Int
-        val contentLeft: Int
-        val contentTop: Int
-        if (layerAspect > canvasAspect) {
-            contentH = layerH
-            contentW = (layerH * canvasAspect).toInt()
-            contentLeft = (layerW - contentW) / 2
-            contentTop = 0
-        } else {
-            contentW = layerW
-            contentH = (layerW / canvasAspect).toInt()
-            contentLeft = 0
-            contentTop = (layerH - contentH) / 2
-        }
+        // v1.5.3: the content rect replicates AspectRatioFrameLayout
+        // (RESIZE_MODE_FIT) EXACTLY — including its 1% deformation tolerance,
+        // where the library leaves the video surface filling the whole view
+        // (CanvasFitMath has the source-verified branch map and the field
+        // report). The old unconditional truncation came out 1px short of
+        // the body video on stages whose aspect sits inside that band (the
+        // landscape editor's aspectRatio(16/9) stage), leaking a 1px row of
+        // the OUTGOING clip under every transition whose mask covers the
+        // bottom rows — the "转场时画面最下面一条亮线" report.
+        val content = CanvasFitMath.contentRect(
+            layerW, layerH, canvasW.toFloat() / canvasH,
+        )
+        val contentW = content.width
+        val contentH = content.height
+        val contentLeft = content.left
+        val contentTop = content.top
 
         // Place a view whose content has aspect [contentAspect] so that its
         // DISPLAY WIDTH is displayWRatio × contentW, centered at the given
@@ -1384,10 +1460,31 @@ class OverlayPreviewController(private val context: Context) {
 
         // Canvas-fit (SCALE_TO_FIT of [contentAspect] inside the canvas,
         // centered) — the rect the export chain's canvas Presentation makes.
+        //
+        // v1.5.3: an aspect within CanvasFitMath's deformation tolerance of
+        // the canvas snaps to the FULL content rect instead of the truncating
+        // fit — a truncating fit on a near-canvas aspect ends 1px short, the
+        // same seam class the content-rect fix above removes (the head must
+        // cover the body video pixel-for-pixel).
+        fun placeRect(view: View, left: Int, top: Int, w: Int, h: Int) {
+            val lp = view.layoutParams as? FrameLayout.LayoutParams
+                ?: FrameLayout.LayoutParams(w, h)
+            if (lp.width != w || lp.height != h || lp.leftMargin != left || lp.topMargin != top) {
+                lp.width = w
+                lp.height = h
+                lp.leftMargin = left
+                lp.topMargin = top
+                view.layoutParams = lp
+            }
+        }
         fun placeCanvasFit(view: View, contentAspect: Float) {
             val canvasAspectF = canvasW.toFloat() / canvasH
-            val displayWRatio = if (contentAspect >= canvasAspectF) 1f else contentAspect / canvasAspectF
-            place(view, 0.5f, 0.5f, displayWRatio, contentAspect)
+            if (CanvasFitMath.canvasFitSnapsFull(contentAspect, canvasAspectF)) {
+                placeRect(view, contentLeft, contentTop, contentW, contentH)
+            } else {
+                val displayWRatio = if (contentAspect >= canvasAspectF) 1f else contentAspect / canvasAspectF
+                place(view, 0.5f, 0.5f, displayWRatio, contentAspect)
+            }
         }
 
         currentProject?.let { project ->

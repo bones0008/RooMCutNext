@@ -3,6 +3,7 @@ package com.RooMCutNext.core.util
 import com.RooMCutNext.core.model.TransitionStyle
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
@@ -153,15 +154,29 @@ object TransitionMath {
     // zoom / spin
     // ------------------------------------------------------------------
 
-    /** Sampling scale: suv = 0.5 + (uv−0.5)/scale. */
+    /**
+     * Sampling scale: suv = 0.5 + (uv−0.5)/scale.
+     *
+     * v1.5.3 zoom_out strengthening: the v1.5.2 curve (1.8→1.0 linear) was
+     * too gentle to read as an effect — a 1.8× start settling 0.8× over the
+     * window reads as a slightly-odd dissolve, and field reports called it
+     * “缩放退出无效”. Now B enters at 2.4× magnification and the settle is
+     * quadratic (fast early shrink, gentle landing):
+     *   p=0 → 2.4, p=0.5 → 1.35, p=1 → 1.0.
+     */
     fun zoomScale(style: TransitionStyle, p: Float): Float = when (style) {
         TransitionStyle.ZOOM_IN -> 0.25f + 0.75f * p
-        TransitionStyle.ZOOM_OUT -> 1f + 0.8f * (1f - p)
+        TransitionStyle.ZOOM_OUT -> 1f + 1.4f * (1f - p) * (1f - p)
         else -> 1f
     }
 
-    /** zoom_out settles in fast: fully visible by 30% progress. */
-    fun zoomOutRevealAlpha(p: Float): Float = (3f * p).coerceIn(0f, 1f)
+    /**
+     * zoom_out coverage ramps across the WHOLE window (v1.5.3). The v1.5.2
+     * 3p curve made B fully opaque by 30% progress, leaving the settle — the
+     * style's only visible trait — running over a clip users couldn't see
+     * arriving; combined with the gentle scale it read as “no effect”.
+     */
+    fun zoomOutRevealAlpha(p: Float): Float = p.coerceIn(0f, 1f)
 
     /** spin's remaining rotation, radians (240° at p=0 → 0 at p=1). */
     fun spinAngleRad(p: Float): Float = (1f - p) * (240f * Math.PI.toFloat() / 180f)
@@ -176,8 +191,18 @@ object TransitionMath {
     /** blur: 9-tap box blur radius in UV units (0.05 → 0, linear). */
     fun blurRadiusUv(p: Float): Float = 0.05f * (1f - p)
 
-    /** mosaic: quantization grid density along one axis (24 → 960). */
-    fun mosaicBlocks(p: Float): Float = 24f + (960f - 24f) * p
+    /**
+     * mosaic: quantization grid density along one axis (24 → 960).
+     *
+     * v1.5.3: the density follows 24·40^(p³) instead of the v1.5.2 linear
+     * ramp — the linear curve hit ~490 blocks by mid-window (≈2px blocks at
+     * 1080p, imperceptible), and under the linear dissolve-style coverage
+     * alpha the whole style previewed as plain 叠化 (field report: “马赛克，
+     * 表现和淡入淡出一样”). The cubic keeps a visibly coarse grid through
+     * the first ~2/3 (p=0.5 → ~38 blocks ≈ 28px blocks at 1080p) and
+     * refines late, finishing into [mosaicClearMix]'s window.
+     */
+    fun mosaicBlocks(p: Float): Float = 24f * 40f.pow(p * p * p)
 
     /** mosaic: cross-fades the last-residual quantization away (p>0.92). */
     fun mosaicClearMix(p: Float): Float = ((p - 0.92f) / 0.08f).coerceIn(0f, 1f)

@@ -267,8 +267,11 @@ void main() {
     alpha = softLe(t, p, 0.008);
     rgb = texture2D(uTexSampler, uv).rgb;
   } else if (S == 14 || S == 15) {
-    // zoom_in / zoom_out — TransitionMath.zoomScale.
-    float sc = (S == 14) ? (0.25 + 0.75 * p) : (1.0 + 0.8 * (1.0 - p));
+    // zoom_in / zoom_out — TransitionMath.zoomScale (v1.5.3: zoom_out
+    // enters at 2.4x magnification and settles quadratically; the v1.5.2
+    // 1.8x linear settle read as "no effect" in the field).
+    float sc = (S == 14) ? (0.25 + 0.75 * p)
+                         : (1.0 + 1.4 * (1.0 - p) * (1.0 - p));
     vec2 suv = vec2(0.5) + (uv - vec2(0.5)) / sc;
     rgb = texture2D(uTexSampler, clamp(suv, 0.001, 0.999)).rgb;
     if (S == 14) {
@@ -277,8 +280,10 @@ void main() {
       float by = clamp((0.5 - abs(suv.y - 0.5)) / 0.008, 0.0, 1.0);
       alpha = min(bx, by) * mix(0.6, 1.0, p);
     } else {
-      // zoom_out — TransitionMath.zoomOutRevealAlpha: settles in by 30%.
-      alpha = clamp(3.0 * p, 0.0, 1.0);
+      // zoom_out — TransitionMath.zoomOutRevealAlpha (v1.5.3: linear
+      // coverage across the WHOLE window; the v1.5.2 3p curve hid the
+      // settle behind an already-opaque B).
+      alpha = p;
     }
   } else if (S == 16) {
     // spin — TransitionMath.spinAngleRad/spinScale: unwinds 240 degrees
@@ -314,8 +319,10 @@ void main() {
     rgb = acc / 9.0;
   } else if (S == 18) {
     // mosaic — TransitionMath.mosaicBlocks/mosaicClearMix: B materializes
-    // as a coarse pixel grid that refines into the sharp image.
-    float blocks = 24.0 + 936.0 * p;
+    // as a coarse pixel grid that refines into the sharp image. v1.5.3: the
+    // density follows 24*40^(p^3) — the v1.5.2 linear ramp was near-sharp
+    // by mid-window and the style previewed as plain dissolve.
+    float blocks = 24.0 * pow(40.0, p * p * p);
     vec2 q = (floor(uv * blocks) + vec2(0.5)) / blocks;
     vec2 suv = mix(q, uv, clamp((p - 0.92) / 0.08, 0.0, 1.0));
     alpha = p;
