@@ -176,4 +176,44 @@ class HeadEffectsPolicyTest {
             HeadEffectsPolicy.PREMOUNT_US / 1000L >= HeadEffectsPolicy.COLD_GRACE_WALL_MS,
         )
     }
+
+    // ---------------- v1.5.6: live-tail clip extension ----------------
+
+    @Test
+    fun `tail extension converts the tail to source time at the clip speed`() {
+        // speed 1x: the clip runs tail + margin past the window end.
+        assertEquals(
+            600_000L + HeadEffectsPolicy.TAIL_MARGIN_US,
+            HeadEffectsPolicy.previewTailExtensionSourceUs(speed = 1f, tailUs = 600_000L),
+        )
+        // 2x speed: the source advances twice as fast, so the same tail
+        // duration needs twice the source extension.
+        assertEquals(
+            (600_000L + HeadEffectsPolicy.TAIL_MARGIN_US) * 2L,
+            HeadEffectsPolicy.previewTailExtensionSourceUs(speed = 2f, tailUs = 600_000L),
+        )
+        // 0.5x slow-mo: half the source time covers the same wall-clock tail.
+        assertEquals(
+            ((600_000L + HeadEffectsPolicy.TAIL_MARGIN_US) / 2L),
+            HeadEffectsPolicy.previewTailExtensionSourceUs(speed = 0.5f, tailUs = 600_000L),
+        )
+    }
+
+    @Test
+    fun `tail extension never goes negative and honors a custom margin`() {
+        assertEquals(0L, HeadEffectsPolicy.previewTailExtensionSourceUs(speed = 0f, tailUs = 0L))
+        assertEquals(
+            500_000L,
+            HeadEffectsPolicy.previewTailExtensionSourceUs(speed = 1f, tailUs = 300_000L, marginUs = 200_000L),
+        )
+    }
+
+    @Test
+    fun `tail margin covers a typical decoder spin-up lag`() {
+        // The margin exists so a head that lags the playhead by the usual
+        // window-entry spin-up (uncorrected per the v1.2.9 constant-lag
+        // doctrine) does not run its clip dry before the tail ends.
+        // Typical spin-up on mid-range devices is 100-200ms.
+        assertTrue(HeadEffectsPolicy.TAIL_MARGIN_US >= 200_000L)
+    }
 }

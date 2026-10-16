@@ -48,6 +48,7 @@ Mapped against the original V1 requirements (✅ = implemented, ⚠️ = simplif
 - ✅ Free clip placement via drag (v1.0.9): drop a clip anywhere, gaps allowed; live drop preview + haptic feedback
 - ✅ **Fixed timeline height + vertical scrolling (v1.5.4)**: the track stack is now **bottom-anchored** — the video/audio tracks are pinned at the bottom of the timeline area and text/PiP layers grow upward, so no number of text layers can push the video track under the toolbar (on portrait projects the old top-anchored layout saturated at 2 text + 1 PiP + video + audio and clipped everything past it). When the stack outgrows the visible area it automatically becomes vertically scrollable (drag blank space or track backgrounds up/down; swipe up to reveal lower content); the ruler stays pinned at the top; a selected/newly-added layer that is off-screen auto-scrolls minimally into view; the timeline's total height is fixed in both portrait and landscape projects. The vertical layout math (region geometry / anchoring / scroll clamping / selection reveal) is extracted into pure functions pinned by unit tests
 - ✅ **Transition preview smoothness triple fix (v1.5.5)**: the transition head player is now **session-persistent** (media3 playlist-mode in-place effect-chain swap reusing one EGL context and the compiled shader cache — window changes no longer tear down and rebuild the whole pipeline, killing both the end-of-transition hitch and the accumulate-over-plays degradation); the post-window fade-out tail now **interpolates per display frame** (it used to step alpha at the 33ms sync cadence — the visible "end-of-transition jump"); the head's **audio ducks with the tail** (removing the short echo where the head overlapped the body's own clip audio at the boundary)
+- ✅ **LIVE fade-out tail (v1.5.6)**: the preview head clip now runs PAST the transition window end (600ms tail + margin), so the fade-out fades the incoming clip's LIVE frames instead of a frozen boundary frame — the frozen frame used to drift up to 400ms behind the body underneath, and that growing content offset read as the end-of-transition "jump" no alpha smoothing could remove; the offset is now the body's render lag (~1-2 frames), smooth by construction (the transition shader pins p>=1 to fully-opaque B, and export is untouched). Also fixes the v1.5.5 persistent-slot **stale-frame flash** (a reused TextureView briefly showed the PREVIOUS window's last frame on entries without premount lead — the view now stays transparent until the new stream's first frame renders), lengthens the tail to 600ms of pure masking coverage, hard-mutes the head's audio at the boundary (the body's own clip-B audio takes over cleanly), and adds a head mount→first-frame latency readout to the hidden DIAG overlay for field diagnosis of the "degrades over plays" report
 - ✅ **Audio import lands at the playhead (v1.5.5)**: imported audio no longer appends after the last clip — it inserts from the playhead position (overlaps are fine, lanes pack automatically; multiple files queue sequentially); **zoom removed from the transition panel** (field report: the effect reads as dead on device, and a zoom belongs at a clip's ending, not between two clips; the enum entries stay for old-project compatibility but the panel no longer offers them)
 
 ### 3. Cutting
@@ -179,13 +180,13 @@ Mapped against the original V1 requirements (✅ = implemented, ⚠️ = simplif
 
 The easiest way (no development environment needed):
 
-1. Open this repository's [Releases](https://github.com/bones0008/RooMCutNext/releases) page, go to the latest version (currently **v1.5.5**) and download `app-release.apk`
+1. Open this repository's [Releases](https://github.com/bones0008/RooMCutNext/releases) page, go to the latest version (currently **v1.5.6**) and download `app-release.apk`
 2. Transfer the APK to your phone (WeChat / cloud drive / USB all work)
 3. Tap the file on the phone and allow "install from unknown sources" when prompted
 4. After installation, the "RooMCutNext" icon appears on the home screen
 
 > Signing keys are never distributed with the repository: official Release APKs are signed with a key stored outside the repo.
-> The v1.5.5 official APK **keeps the original signing key** (rotation is deferred until just before an app-store listing), so upgrades from any v1.5.x official APK install directly over the top with project data intact; v1.0.4 or earlier requires a one-time uninstall first. When the rotation eventually happens it will be prominently noted in the release notes (a one-time uninstall/reinstall will be needed then).
+> The v1.5.6 official APK **keeps the original signing key** (rotation is deferred until just before an app-store listing), so upgrades from any v1.5.x official APK install directly over the top with project data intact; v1.0.4 or earlier requires a one-time uninstall first. When the rotation eventually happens it will be prominently noted in the release notes (a one-time uninstall/reinstall will be needed then).
 > Building from source: debug builds work out of the box after cloning; configure release signing via `local.properties` (git-ignored) keys `roocmcut.keystore` / `roocmcut.storePassword`, or env vars `ROOCMCUT_KEYSTORE` / `ROOCMCUT_STORE_PASSWORD` — builds fall back to debug signing when unconfigured.
 
 **System requirements: Android 12 (API 31) or newer.**
@@ -306,4 +307,4 @@ The 8 built-in `.cube` LUT filters are procedurally generated by this project �
 
 ---
 
-*Built with Kotlin 2.2 · Jetpack Compose · Media3 1.11 · single-layer timeline editing kernel with 339 passing unit tests · source code released under AGPL-3.0*
+*Built with Kotlin 2.2 · Jetpack Compose · Media3 1.11 · single-layer timeline editing kernel with 342 passing unit tests · source code released under AGPL-3.0*

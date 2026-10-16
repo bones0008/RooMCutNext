@@ -288,8 +288,17 @@ class OverlayPreviewController(private val context: Context) {
      * seconds end, the first clip's last frame pops for one blink"). The
      * composite during the tail remains the incoming clip over itself at a
      * ≤400ms offset — still imperceptible.
+     *
+     * v1.5.6: 400ms → 600ms, now that the tail is LIVE (the head's clip runs
+     * past the window end — see headMediaItemFor). A frozen-frame tail had a
+     * visible cost floor: the two layers' content drifted apart by up to the
+     * full tail length, so a longer tail made the end-of-fade shear WORSE —
+     * 400ms was a compromise between mask coverage and shear. A LIVE tail has
+     * no shear (the offset stays at the body's render lag), so the length is
+     * pure coverage: 600ms hides body crossings that exceed 400ms (the field
+     * report this version fixes — the boundary reveal read as "跳帧").
      */
-    private val headHoldTailUs = 400_000L
+    private val headHoldTailUs = 600_000L
 
     /**
      * v1.2.9: cooldown between HARD realign seeks of a playing head player
@@ -505,6 +514,28 @@ class OverlayPreviewController(private val context: Context) {
             headAlphaAnimRunning = true
             v.postOnAnimation(headAlphaAnim)
         }
+    }
+
+    /**
+     * v1.5.6: per-tick alpha application for the VIDEO head with a FIRST-FRAME
+     * GATE. A REUSED (persistent-slot) TextureView is NOT transparent before
+     * its new stream renders — it still shows the PREVIOUS window's last
+     * frame after stop()+prepare(). Revealing it at full alpha before the
+     * first frame (v1.5.5 did, on every entry without premount lead: scrub
+     * jumps into a window, replay into window 1, tail-cut retargets) flashed
+     * the WRONG clip full-screen for a few frames. The gate keeps the view at
+     * 0 until onRenderedFirstFrame; the listener's post then applies
+     * [headTargetAlpha] the moment a real frame exists — byte-for-byte the
+     * fresh-player reveal semantics (a fresh TextureView is transparent until
+     * rendered, so gating it changes nothing visually).
+     */
+    private fun applyHeadAlphaForTick(want: Float, smooth: Boolean) {
+        if (headFirstFrame) {
+            setHeadViewAlpha(want, smooth)
+            return
+        }
+        headTargetAlpha = want
+        headView?.let { if (it.alpha != 0f) it.alpha = 0f }
     }
 
     /** Memoized headOverlaySpecs — keyed by Project identity; during playback
@@ -1157,6 +1188,7 @@ class OverlayPreviewController(private val context: Context) {
         player.setMediaItem(headMediaItemFor(active, file), 0L)
         player.playWhenReady = false
         player.prepare()
+        diag("head retarget (persistent)")
     }
 
     /**
@@ -1175,7 +1207,11 @@ class OverlayPreviewController(private val context: Context) {
                 // headEffectsActive so a plain (fallback) mount never
                 // fakes the proof.
                 if (headEffectsActive) headEffectsEverRendered = true
-                diag("head firstframe ✓")
+                // v1.5.6: mount→first-frame LATENCY in the DIAG stream — the
+                // field question "does the head get slower every playthrough?"
+                // is now directly readable from the hidden overlay.
+                val latencyMs = android.os.SystemClock.uptimeMillis() - headMountedAtMs
+                diag("head firstframe +${latencyMs}ms")
                 tv.post { if (tv.isAttachedToWindow) tv.alpha = headTargetAlpha }
             }
 
@@ -1236,17 +1272,31 @@ class OverlayPreviewController(private val context: Context) {
         }
     }
 
-    /** The head player's clipped media item for [active]. */
-    private fun headMediaItemFor(active: CompositionBuilder.HeadOverlaySpec, file: File): MediaItem =
-        MediaItem.Builder()
+    /**
+     * The head player's clipped media item for [active].
+     *
+     * v1.5.6: LIVE TAIL — the clip extends [HeadEffectsPolicy.previewTailExtensionSourceUs]
+     * past the window end so the fade-out tail fades LIVE incoming-clip
+     * content over the catching-up body instead of a frozen boundary frame
+     * (the frozen frame drifted up to tailUs behind the body by fade-out
+     * completion — the reported end-of-transition jump). The transition
+     * shader clamps its progress at p=1 to fully-opaque B, so frames past the
+     * window render as plain B; the EXPORT head item keeps the exact window
+     * (only this PREVIEW player's clipping is extended).
+     */
+    private fun headMediaItemFor(active: CompositionBuilder.HeadOverlaySpec, file: File): MediaItem {
+        val extensionUs = HeadEffectsPolicy.previewTailExtensionSourceUs(active.speed, headHoldTailUs)
+        val clipEndUs = (active.sourceOutUs + extensionUs).coerceAtLeast(active.sourceInUs + 1L)
+        return MediaItem.Builder()
             .setUri(Uri.fromFile(file))
             .setClippingConfiguration(
                 MediaItem.ClippingConfiguration.Builder()
                     .setStartPositionUs(active.sourceInUs)
-                    .setEndPositionUs(active.sourceOutUs.coerceAtLeast(active.sourceInUs + 1L))
+                    .setEndPositionUs(clipEndUs)
                     .build(),
             )
             .build()
+    }
 
     /**
      * v1.5.5: park the head VIDEO slot (image head active, or the spec went
@@ -1438,31 +1488,34 @@ class OverlayPreviewController(private val context: Context) {
             return
         }
         if (inTail) {
-            // v1.2.8: coasting out. Fade the head's (held or still-playing)
-            // frame across the tail — its content IS the incoming clip at the
-            // window end, so it seamlessly covers the body player's item
-            // boundary crossing underneath. No pauses, no drift correction,
-            // no ENDED rewind: alignment is over, only the alpha matters
-            // here. A corrective seek in the tail would clamp to the item end
-            // and cause a visible hiccup at mid-alpha.
+            // v1.2.8: coasting out. Fade the head's frame across the tail — its
+            // content IS the incoming clip at the window end, so it seamlessly
+            // covers the body player's item-boundary crossing underneath. No
+            // pauses, no drift correction, no ENDED rewind: alignment is over,
+            // only the alpha matters here. A corrective seek in the tail would
+            // clamp to the item end and cause a visible hiccup at mid-alpha.
             //
-            // v1.5.5: the fade now INTERPOLATES at display rate (the sync
-            // tick still owns the target — a stalled body freezes the
-            // playhead, the target, and therefore the tail, exactly like the
-            // v1.2.10 design demands; only the 33ms staircase became a
-            // continuous ramp — the visible "end-of-transition jump" once
-            // the shader path itself got smooth).
+            // v1.5.5: the fade INTERPOLATES at display rate (the sync tick
+            // still owns the target — a stalled body freezes the playhead, the
+            // target, and therefore the tail, exactly like the v1.2.10 design
+            // demands; only the 33ms staircase became a continuous ramp).
+            //
+            // v1.5.6: LIVE TAIL — the head's clip now runs PAST the window end
+            // (headMediaItemFor), so what fades here is B's LIVE frames over
+            // the body catching up, not a frozen boundary frame that was up to
+            // tailUs stale by fade-out completion (the visible
+            // end-of-transition "跳帧" the v1.5.5 smoother could not remove:
+            // smoothing WHEN the alpha steps fired cannot fix WHAT the two
+            // layers' content offset was doing underneath).
             val tailAlpha = HeadWindowMath.alphaAt(localUs, spec.durationUs, headHoldTailUs, isPlaying)
-            setHeadViewAlpha(tailAlpha, smooth = true)
-            // v1.5.5: duck the head's AUDIO with the tail. At the window end
-            // the body's composition already plays clip B's own audio; the
-            // (still slightly behind) head kept playing ITS copy at full
-            // volume through the tail — a ~100-300ms echo/comb right at the
-            // boundary. The view fade and the volume fade now land together.
-            val baseVol = if (spec.muted || currentProject?.videoTrackMuted == true) 0f
-            else spec.volume.coerceIn(0f, 1f)
-            val ducked = baseVol * tailAlpha
-            if (player.volume != ducked) player.volume = ducked
+            applyHeadAlphaForTick(tailAlpha, smooth = true)
+            // v1.5.6: HARD-MUTE the head's audio at the boundary. The body's
+            // composition takes over clip B's own audio at the window end at
+            // full volume; the head keeps a second copy that lags it by the
+            // decoder spin-up offset — ANY audible mix of the two combs
+            // (v1.5.5's linear duck still let the early tail overlap). One
+            // hard cut at full-body audio is the only clean seam.
+            if (player.volume != 0f) player.volume = 0f
             return
         }
         // v1.2.5: effects-grace fallback, measured in WALL time from MOUNT.
@@ -1486,6 +1539,12 @@ class OverlayPreviewController(private val context: Context) {
         // v1.2.5: alpha follows the ramp DIRECTLY — no first-frame gate (same
         // reasoning as drivePip: an unrendered TextureView is transparent, so
         // the fade can never deadlock on a missing first-frame callback).
+        // That reasoning holds for a FRESH view; v1.5.6 routes the application
+        // through applyHeadAlphaForTick, which re-adds the gate for the
+        // PERSISTENT slot's REUSED TextureView (it is NOT transparent before
+        // the new stream's first frame — see that function's doc). The
+        // listener's first-frame post then reveals at headTargetAlpha: exact
+        // fresh-view semantics on both paths.
         //
         // v1.5.0: with the transition shader mounted the SHADER owns the
         // head's per-pixel alpha (masks, coverage, ramps — see the class
@@ -1500,7 +1559,7 @@ class OverlayPreviewController(private val context: Context) {
         // exactly 1 the moment the window opens or the composite dims), SMOOTH
         // on the fallback dissolve ramp (which stepped at the sync rate like
         // the tail used to).
-        setHeadViewAlpha(viewAlphaFor(ramp), smooth = !headEffectsActive)
+        applyHeadAlphaForTick(viewAlphaFor(ramp), smooth = !headEffectsActive)
 
         // v1.2.7: position math is SPEED-AWARE (the clipped player advances
         // at spec.speed × wall time while the playhead advances 1×) and the

@@ -120,6 +120,45 @@ object HeadEffectsPolicy {
         if (effectsEverRendered) WARM_GRACE_WALL_MS else COLD_GRACE_WALL_MS
 
     /**
+     * v1.5.6: how much EXTRA source time the PREVIEW head player's clip
+     * carries past the transition window end.
+     *
+     * WHY (the field report the v1.5.5 alpha smoother could not fix: "转场
+     * 结束的时候都有一个跳帧，不平滑"): the head's clip used to END exactly
+     * at the window end, so through the 400ms fade-out TAIL the head showed a
+     * FROZEN frame of B at the boundary while the body underneath kept
+     * advancing into B — the composite's two copies of B drifted up to a full
+     * 400ms apart, and the picture visibly "slides forward" as the fade
+     * completes: the end-of-transition jump. The preview clip now runs
+     * [tailUs] + [TAIL_MARGIN_US] PAST the window (converted to source
+     * coordinates at the clip's speed), so the tail fades LIVE B content over
+     * the catching-up body and the offset stays at the body's render lag
+     * (~1-2 vsyncs) instead of growing to 400ms.
+     *
+     * The TRANSITION SHADER is unaffected: its fadeUs stays the window's own
+     * source span, and the shader clamps progress to [0,1] with the p>=1
+     * endpoint pinned to fully-opaque B (TransitionShaderProgram's endpoint
+     * hygiene) — frames past the window end render as plain B. Export is
+     * untouched (the export head item keeps the exact window; only the
+     * preview player's clipping is extended).
+     *
+     * The MARGIN covers a head that lags the playhead slightly (typical
+     * decoder spin-up at window entry, deliberately uncorrected per the
+     * v1.2.9 constant-lag doctrine): the clip should not run dry before the
+     * tail ends. If the SOURCE is shorter than the extension (B barely longer
+     * than its transition), the clip simply ends early and the tail's last
+     * stretch degrades gracefully to the old held-frame behavior.
+     */
+    fun previewTailExtensionSourceUs(
+        speed: Float,
+        tailUs: Long,
+        marginUs: Long = TAIL_MARGIN_US,
+    ): Long = ((tailUs + marginUs) * speed).toLong().coerceAtLeast(0L)
+
+    /** Slack added to the tail extension; see [previewTailExtensionSourceUs]. */
+    const val TAIL_MARGIN_US = 250_000L
+
+    /**
      * True when the mounted head's spec has vanished from the CURRENT
      * spec list: the transition was deleted, or any identity field of the
      * window (style, length, speed, mute, volume) was edited while the
