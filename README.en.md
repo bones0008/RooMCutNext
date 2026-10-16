@@ -109,7 +109,7 @@ Mapped against the original V1 requirements (✅ = implemented, ⚠️ = simplif
 - ✅ **Recoverable compatibility preview**: the degraded state auto-retries full effects as the timeline structure changes; after deleting all clips the timeline keeps a black editable canvas (while text/audio/PiP remain) instead of requiring project recreation
 - ✅ **PiP-only import**: the PiP panel gains "Import new media" — new files insert directly as PiP layers, never forced onto the main timeline (stickers/small-window media decoupled from the main timeline)
 
-### 16. Transitions (v1.2.1 → v1.5.0 → v1.5.1 → v1.5.2)
+### 16. Transitions (v1.2.1 → v1.5.0 → v1.5.1 → v1.5.2 → v1.5.3)
 - ✅ **Crossfade**: select the later clip → toolbar "Transition" → duration slider or presets (none / 0.3 / 0.5 / 1 / 2 s); media is inserted early into the previous clip's tail, the two overlap and crossfade, total timeline length shrinks accordingly
 - ✅ **Full transition library (v1.5.0)**: all the common editorial transitions, four groups —
   - Basic: crossfade / fade-to-black / fade-to-white;
@@ -124,6 +124,12 @@ Mapped against the original V1 requirements (✅ = implemented, ⚠️ = simplif
   - Combined: playing *through* a transition (rather than seeking directly into the window) almost always triggered session-level fallback, degrading every style to view-layer dissolve gradients; the direct-seek path dodged the reset, making the bug deceptively "position-dependent"
   - Fix: the first-frame flag lifecycle is now "set false on mount, set true on first render, nothing else may touch it"; grace split into cold/hot tiers (2500 ms for the session's first effects mount — covering EGL context + shader compilation + decoder cold start; 1200 ms afterwards); preroll 400→600 ms; the numeric invariants are pinned in HeadEffectsPolicy unit tests (preventing a v1.2.8-style "comment vs arithmetic contradiction" regression)
   - **Deleted-transition residue** (same release): reconcileHead used to only hide mounted heads whose window no longer contained the playhead, while driveHead in the same sync tick pulled alpha back to 1 from a **stale** spec — after deleting a transition, every tick did "hide then resurrect" until re-entering the project. Now a mounted spec vanishing from the current spec list (transition deleted, or style/duration/mute/volume changed) fully releases the player; only byte-identical specs keep the "hidden for reuse" drag optimization
+- ✅ **v1.5.3 fixed the five field-reported preview symptom groups** (root causes verified at media3 source level):
+  - **Bright line at the bottom during transitions (slide-in-from-bottom / wipe-down immune)**: the overlay layer's content rect came out 1px SHORTER than the PlayerView's video surface — media3's AspectRatioFrameLayout has a 1% deformation tolerance (within it the video fills the whole view), while the old layout code truncated unconditionally, leaking a 1px row of the outgoing clip under the head. CanvasFitMath now replicates the library's branch map exactly (tolerance band included), so the head covers the body video pixel-for-pixel
+  - **Stutter + first-play flash-black (smooth only after 7-8 plays)**: the cold pipeline (codec + EGL + shader compile) cannot finish inside the 600ms preroll. While playing, the next window's head is now PRE-MOUNTED 2.5s ahead and warms up while parked; the pre-mount also pre-initializes the incoming clip's codec, softening the body's item-boundary switch at the window end (the other half of the flash-black)
+  - **Iris/clock effect vanishing halfway to a full second clip**: dual-clock drift — when the body stalls the playhead freezes while the head keeps advancing, hitting its span end early and parking at full-B; the cooldown-free ENDED rewind then seek-stormed every sync tick. Now: clock steering (trim speed at +80ms ahead, park at +500ms) plus a rewind cooldown
+  - **Mosaic reading as dissolve**: block density is now 24·40^(p³) — a visibly coarse grid through the first ~2/3, refining late, instead of near-sharp by mid-window
+  - **Zoom-out reading as no effect**: now enters at 2.4× magnification with a quadratic settle and a whole-window linear coverage ramp — the settle is visible the entire time
 - ✅ Automatic constraint clamping: a transition cannot exceed the neighboring clips' available length (previous clip's remaining body / this clip's 0.1 s minimum); the panel shows the "effective" value; unavailable when a black gap separates the two clips (close the gap first); audio fades follow the head/tail
 - ✅ Timeline visualization: two overlapping blocks (CapCut-style) + orange transition marker (with effective duration and style abbreviation); transitions auto-recompute on undo/trim
 - ⚠️ Known approximation: **image** clips as the transition "from" side still preview as a dissolve gradient (ImageView has no effects pipeline; export renders the proper style)
@@ -176,7 +182,7 @@ The easiest way (no development environment needed):
 4. After installation, the "RooMCutNext" icon appears on the home screen
 
 > Signing keys are never distributed with the repository: official Release APKs are signed with a key stored outside the repo.
-> **Upgrading from the v1.5.2 official APK to any later release requires a one-time uninstall + reinstall** (the signing key was rotated when the repository went public); same for v1.0.4 or earlier. Uninstalling wipes in-app project data — export your finished videos first.
+> The v1.5.3 official APK **keeps the original signing key** (rotation is deferred until just before an app-store listing), so upgrades from any v1.5.x official APK install directly over the top with project data intact; v1.0.4 or earlier requires a one-time uninstall first. When the rotation eventually happens it will be prominently noted in the release notes (a one-time uninstall/reinstall will be needed then).
 > Building from source: debug builds work out of the box after cloning; configure release signing via `local.properties` (git-ignored) keys `roocmcut.keystore` / `roocmcut.storePassword`, or env vars `ROOCMCUT_KEYSTORE` / `ROOCMCUT_STORE_PASSWORD` — builds fall back to debug signing when unconfigured.
 
 **System requirements: Android 12 (API 31) or newer.**
@@ -297,4 +303,4 @@ The 8 built-in `.cube` LUT filters are procedurally generated by this project �
 
 ---
 
-*Built with Kotlin 2.2 · Jetpack Compose · Media3 1.11 · single-layer timeline editing kernel with 297 passing unit tests · source code released under AGPL-3.0*
+*Built with Kotlin 2.2 · Jetpack Compose · Media3 1.11 · single-layer timeline editing kernel with 312 passing unit tests · source code released under AGPL-3.0*
