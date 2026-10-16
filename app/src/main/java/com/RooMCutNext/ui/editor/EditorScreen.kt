@@ -698,7 +698,10 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
         //  2) Typography: monospace timecodes — every digit has the same
         //     advance width, so the total-duration text (which follows the
         //     playhead text) holds perfectly still frame to frame.
-        val canSplit = state.project.clips.isNotEmpty() || state.project.audios.isNotEmpty()
+        // v1.5.5: PiP layers are splittable too (the razor cuts every layer
+        // type under the playhead — see EditorViewModel.splitAtPlayhead).
+        val canSplit = state.project.clips.isNotEmpty() || state.project.audios.isNotEmpty() ||
+            state.project.pips.isNotEmpty()
         val hasClip = state.selectedClip != null
         Row(
             Modifier.fillMaxWidth().padding(vertical = 2.dp),

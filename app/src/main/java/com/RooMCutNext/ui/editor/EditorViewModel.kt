@@ -475,10 +475,16 @@ class EditorViewModel(
                         // Video / image assets append as timeline clips.
                         visuals.forEach { asset -> np = np.copy(clips = np.clips + newClipFor(asset)) }
                     }
-                    // Audio assets become independent-layer audio clips placed
-                    // sequentially from the current playhead.
+                    // Audio assets become independent-layer audio clips
+                    // placed sequentially FROM THE PLAYHEAD (v1.5.5: the
+                    // cursor used to start at max(clipsDuration, playhead),
+                    // so an import into a populated timeline always landed
+                    // AFTER the last clip — "每次导入音频一定在素材的最后面".
+                    // Overlapping existing audio is fine: audioLanes packs
+                    // independent layers into lanes, exactly like a BGM bed
+                    // under a voiceover).
                     if (outcome.assets.any { it.isAudio }) {
-                        var cursor = np.clipsDurationUs.coerceAtLeast(playheadUs)
+                        var cursor = playheadUs
                         outcome.assets.filter { it.isAudio }.forEach { asset ->
                             np = np.copy(
                                 audios = TimelineOps.insertAudio(
@@ -671,26 +677,38 @@ class EditorViewModel(
             s.playheadUs,
             IdGen.new("aud"),
         )
-        if (videoResult == null && audioResult == null) {
+        // v1.5.5: PiP layers split too — the razor now cuts EVERY layer type
+        // under the playhead ("画中画无法被剪辑" was the missing half; the
+        // right half plays the source from the cut point via sourceInUs).
+        val pipResult = TimelineOps.splitPipAt(
+            s.project.pips,
+            s.playheadUs,
+            IdGen.new("pip"),
+        )
+        if (videoResult == null && audioResult == null && pipResult == null) {
             _state.update { it.copy(toast = "此处无法分割（位于片段边界或片段过短）") }
             return
         }
         // One undo step: cutting at the playhead slices EVERY layer under it
-        // (video AND audio), like a multi-track razor in classic NLEs.
+        // (video, audio AND PiP), like a multi-track razor in classic NLEs.
         mutate("分割") { p ->
             p.copy(
                 clips = videoResult?.clips ?: p.clips,
                 audios = audioResult?.first ?: p.audios,
+                pips = pipResult?.first ?: p.pips,
             )
         }
         _state.update {
             // Selection stays exclusive: prefer the video right half (the
-            // layer the user most likely wants to keep trimming), otherwise
-            // the audio right half.
-            if (videoResult != null) {
-                it.copy(selectedClipId = videoResult.rightId, selectedTextId = null, selectedAudioId = null)
-            } else {
-                it.copy(selectedClipId = null, selectedTextId = null, selectedAudioId = audioResult!!.second)
+            // layer the user most likely wants to keep trimming), then the
+            // PiP right half, otherwise the audio right half.
+            when {
+                videoResult != null ->
+                    it.copy(selectedClipId = videoResult.rightId, selectedTextId = null, selectedAudioId = null, selectedPipId = null)
+                pipResult != null ->
+                    it.copy(selectedPipId = pipResult.second, selectedClipId = null, selectedTextId = null, selectedAudioId = null)
+                else ->
+                    it.copy(selectedClipId = null, selectedTextId = null, selectedAudioId = audioResult!!.second, selectedPipId = null)
             }
         }
     }

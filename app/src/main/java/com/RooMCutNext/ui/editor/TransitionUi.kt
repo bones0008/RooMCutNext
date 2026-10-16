@@ -75,9 +75,22 @@ object TransitionUi {
         TransitionStyle.Group.EFFECT -> R.string.transition_group_effect
     }
 
-    /** The catalog grouped for the panel, in display order. */
+    /**
+     * The catalog grouped for the panel, in display order.
+     *
+     * v1.5.5: ZOOM_IN / ZOOM_OUT are HIDDEN from the panel (field report:
+     * "转场中的缩放没有反应…直接删掉这个效果" — the zoom pair reads as a
+     * dead effect on the reported device, and a zoom belongs at a clip's
+     * ending, not between two clips). The enum entries stay: ordinals are
+     * the shader branch indices (DO NOT renumber — see TransitionStyle),
+     * and projects that already saved a zoom transition keep rendering it.
+     */
     fun grouped(): List<Pair<TransitionStyle.Group, List<TransitionStyle>>> =
         TransitionStyle.Group.entries.map { g ->
-            g to TransitionStyle.entries.filter { it.group == g }
+            g to TransitionStyle.entries.filter { it.group == g && it !in PanelHidden }
         }
+
+    /** v1.5.5: styles removed from the panel grid (kept in the catalog). */
+    private val PanelHidden =
+        setOf(TransitionStyle.ZOOM_IN, TransitionStyle.ZOOM_OUT)
 }

@@ -343,6 +343,9 @@ class OverlayPreviewController(private val context: Context) {
         var windowStartUs = -1L
         var windowDurationUs = -1L
 
+        /** v1.5.5: source offset of the window (see PipLayer.sourceInUs). */
+        var windowSourceInUs = -1L
+
         /** v1.2.7: source span the player is clipped to (window-relative) —
          * an ENDED player only stays held while the playhead is past this. */
         var sourceSpanUs = Long.MAX_VALUE
@@ -419,6 +422,90 @@ class OverlayPreviewController(private val context: Context) {
 
     /** Alpha to apply when the head's first frame renders (see PipOverlay.targetAlpha). */
     private var headTargetAlpha = 0f
+
+    /**
+     * v1.5.5: the head slot is SESSION-PERSISTENT while the device's effects
+     * path works. The old lifecycle built a FRESH ExoPlayer + TextureView per
+     * transition window and tore it down again on the next swap — every mount
+     * paid PlaybackVideoGraphWrapper construction (a new EGL context + shader
+     * compilation), codec init and a view attach, and every unmount paid the
+     * teardown, all on the main thread / shared GL thread WHILE THE BODY
+     * PLAYED. With the v1.5.3 premount the swap lands right after each
+     * window's fade-out tail — the field reports "每个转场结束的时候都会有
+     * 跳帧的感觉" and "播放次数越多转场越卡顿" (every mount/teardown cycle
+     * also gives a leak-prone driver one more chance to strand GPU memory).
+     *
+     * media3 1.11.1 is BUILT for the persistent shape (source-verified):
+     * MediaCodecVideoRenderer creates the PlaybackVideoGraphWrapper once, on
+     * the FIRST enable ("the video sink can only be enabled the first time the
+     * renderer is enabled, or after it has been reset"), and the sink's
+     * setVideoEffects re-registers the input stream IN PLACE — the playlist
+     * mode the renderer's wrapper is constructed with. So the persistent slot
+     * retargets with stop() → setVideoEffects(new chain) → setMediaItem →
+     * prepare(), reusing the ONE EGL context and the compiled shader cache
+     * for the whole session: no per-window context churn, no view churn, and
+     * a re-prepare on the same player+TextureView is exactly the pattern
+     * reclipPipPlayer has run in production since v1.2.4.
+     *
+     * False (fresh player per window) only while [headEffectsFallback] holds
+     * the session on the plain path — a player built WITHOUT effects can never
+     * grow them later (the renderer only creates the sink when effects were
+     * set before the first enable), so the fallback keeps the legacy fresh
+     * mounts, which are cheap without a video graph.
+     */
+    private var headPlayerIsPersistent = false
+
+    /**
+     * v1.5.5: vsync alpha smoother. The sync loop only re-targets the head's
+     * view alpha every ~33ms poll tick, so a 400ms tail fade took ~12 visible
+     * 8% alpha STEPS — with the shader path otherwise smooth, that staircase
+     * read as "转场结束的时候有跳帧感". A postOnAnimation loop now lerps the
+     * live view toward [headTargetAlpha] at display rate; the sync tick keeps
+     * owning the TARGET (so a stalled body still freezes the tail exactly like
+     * the v1.2.10 design demands), only the interpolation became continuous.
+     * Hides (target 0 outside the tail) still SNAP for sample-accurate scrub
+     * exits, and the shader-owned in-window alpha (pinned at 1) snaps too.
+     */
+    private var headAlphaAnimRunning = false
+
+    private val headAlphaAnim = object : Runnable {
+        override fun run() {
+            val v = if (headIsImage) headImageView else headView
+            headAlphaAnimRunning = v != null && stepHeadAlpha(v)
+            if (headAlphaAnimRunning) v!!.postOnAnimation(this)
+        }
+    }
+
+    /** One exponential lerp step toward [headTargetAlpha]; false when settled. */
+    private fun stepHeadAlpha(v: View): Boolean {
+        val target = headTargetAlpha
+        val cur = v.alpha
+        val delta = target - cur
+        if (kotlin.math.abs(delta) < 0.006f) {
+            if (cur != target) v.alpha = target
+            return false
+        }
+        v.alpha = cur + delta * 0.4f
+        return true
+    }
+
+    /**
+     * Set the head view's alpha target. [smooth] = interpolate at vsync rate
+     * (tail fades, dissolve ramps); otherwise snap (hides, the shader path's
+     * in-window pin at 1, first-frame reveals).
+     */
+    private fun setHeadViewAlpha(target: Float, smooth: Boolean) {
+        headTargetAlpha = target
+        val v: View = (if (headIsImage) headImageView else headView) ?: return
+        if (!smooth) {
+            if (v.alpha != target) v.alpha = target
+            return
+        }
+        if (!headAlphaAnimRunning && v.isAttachedToWindow) {
+            headAlphaAnimRunning = true
+            v.postOnAnimation(headAlphaAnim)
+        }
+    }
 
     /** Memoized headOverlaySpecs — keyed by Project identity; during playback
      * the state flow re-emits the SAME immutable instance ~30×/s. */
@@ -529,7 +616,8 @@ class OverlayPreviewController(private val context: Context) {
             val existing = pipOverlays[pip.id]
             val assetChanged = existing != null && existing.assetId != pip.assetId
             val windowChanged = existing != null && !assetChanged &&
-                (existing.windowStartUs != pip.startUs || existing.windowDurationUs != pip.durationUs)
+                (existing.windowStartUs != pip.startUs || existing.windowDurationUs != pip.durationUs ||
+                    existing.windowSourceInUs != pip.sourceInUs)
 
             // v1.2.4: the steady-state path (nothing changed — the case at
             // ~30Hz during playback) must not touch the filesystem AT ALL;
@@ -557,15 +645,17 @@ class OverlayPreviewController(private val context: Context) {
                     existing.assetId = fresh.assetId
                     existing.windowStartUs = fresh.windowStartUs
                     existing.windowDurationUs = fresh.windowDurationUs
+                    existing.windowSourceInUs = fresh.windowSourceInUs
                     existing.sourceSpanUs = fresh.sourceSpanUs
                     existing.firstFrameRendered = false
                     existing.targetAlpha = 0f
                     existing.views.forEach(host::addView)
                 } else {
-                    // Same asset, window moved/trimmed: just re-clip.
+                    // Same asset, window moved/trimmed/re-offset: just re-clip.
                     existing.windowStartUs = pip.startUs
                     existing.windowDurationUs = pip.durationUs
-                    existing.sourceSpanUs = pipClipEndUs(asset, pip).coerceAtLeast(1L)
+                    existing.windowSourceInUs = pip.sourceInUs
+                    existing.sourceSpanUs = pipSourceSpanUs(asset, pip)
                     existing.player?.let { reclipPipPlayer(it, asset, file, pip) }
                     existing.firstFrameRendered = false
                     existing.targetAlpha = 0f
@@ -579,7 +669,8 @@ class OverlayPreviewController(private val context: Context) {
         overlay.assetId = pip.assetId
         overlay.windowStartUs = pip.startUs
         overlay.windowDurationUs = pip.durationUs
-        overlay.sourceSpanUs = pipClipEndUs(asset, pip).coerceAtLeast(1L)
+        overlay.windowSourceInUs = pip.sourceInUs
+        overlay.sourceSpanUs = pipSourceSpanUs(asset, pip)
         if (asset.isImage) {
             val iv = ImageView(context).apply {
                 // Bounds carry the exact aspect (see place()).
@@ -625,9 +716,23 @@ class OverlayPreviewController(private val context: Context) {
         return overlay
     }
 
-    /** PiP source window: [0, min(duration, asset duration)] — same clip as export. */
+    /**
+     * v1.5.5: PiP source window in SOURCE coordinates —
+     * [pip.sourceInUs, sourceInUs + durationUs) for video (capped by the
+     * source duration), the still's full virtual window for images (a still
+     * has no source time axis; sourceIn is ignored). The player clips to
+     * exactly this window, so position 0 inside the clip == sourceInUs and
+     * drivePip's timeline-local math needs no changes.
+     */
     private fun pipClipEndUs(asset: MediaAsset, pip: PipLayer): Long =
-        if (asset.isImage) pip.durationUs else pip.durationUs.coerceAtMost(asset.durationUs)
+        if (asset.isImage) pip.durationUs
+        else (pip.sourceInUs + pip.durationUs).coerceAtMost(asset.durationUs)
+
+    /** The source span the player is clipped to (window-relative length). */
+    private fun pipSourceSpanUs(asset: MediaAsset, pip: PipLayer): Long {
+        val span = if (asset.isImage) pip.durationUs else pipClipEndUs(asset, pip) - pip.sourceInUs
+        return span.coerceAtLeast(1L)
+    }
 
     private fun preparePipPlayer(player: ExoPlayer, asset: MediaAsset, file: File, pip: PipLayer) {
         val item = MediaItem.Builder()
@@ -636,12 +741,12 @@ class OverlayPreviewController(private val context: Context) {
                 if (!asset.isImage) {
                     setClippingConfiguration(
                         MediaItem.ClippingConfiguration.Builder()
-                            .setStartPositionUs(0L)
-                            .setEndPositionUs(pipClipEndUs(asset, pip).coerceAtLeast(1L))
+                            .setStartPositionUs(pip.sourceInUs)
+                            .setEndPositionUs(pipClipEndUs(asset, pip).coerceAtLeast(pip.sourceInUs + 1L))
                             .build(),
                     )
                 } else {
-                    setImageDurationMs((pipClipEndUs(asset, pip) / 1000L).coerceAtLeast(1L))
+                    setImageDurationMs((pip.durationUs / 1000L).coerceAtLeast(1L))
                 }
             }
             .build()
@@ -658,12 +763,12 @@ class OverlayPreviewController(private val context: Context) {
                 if (!asset.isImage) {
                     setClippingConfiguration(
                         MediaItem.ClippingConfiguration.Builder()
-                            .setStartPositionUs(0L)
-                            .setEndPositionUs(pipClipEndUs(asset, pip).coerceAtLeast(1L))
+                            .setStartPositionUs(pip.sourceInUs)
+                            .setEndPositionUs(pipClipEndUs(asset, pip).coerceAtLeast(pip.sourceInUs + 1L))
                             .build(),
                     )
                 } else {
-                    setImageDurationMs((pipClipEndUs(asset, pip) / 1000L).coerceAtLeast(1L))
+                    setImageDurationMs((pip.durationUs / 1000L).coerceAtLeast(1L))
                 }
             }
             .build()
@@ -847,20 +952,23 @@ class OverlayPreviewController(private val context: Context) {
             // Keep the last head mounted but hidden (cheap scrub back/forth).
             // v1.2.4: alpha, not visibility — same TextureView rule as PiPs.
             //
-            // v1.5.2: STALE-SPEC RELEASE (bug 2: "a deleted transition keeps
-            // playing until the project is re-entered"). The mounted spec may
-            // no longer exist in the CURRENT spec list (transition deleted,
-            // or its style/length/mute/volume edited while parked outside
-            // the window). driveHead runs AFTER this function in the same
-            // sync tick and drives the view from the STALE spec, which
-            // resurrected the deleted transition every tick; hiding it here
-            // was undone 33ms later. A spec that vanished must be RELEASED.
+            // v1.5.2: STALE-SPEC (bug 2: "a deleted transition keeps playing
+            // until the project is re-entered"). The mounted spec may no
+            // longer exist in the CURRENT spec list (transition deleted, or
+            // its style/length/mute/volume edited while parked outside the
+            // window). driveHead runs AFTER this function in the same sync
+            // tick and drives the view from the STALE spec, which resurrected
+            // the deleted transition every tick; hiding it here was undone
+            // 33ms later. A spec that vanished must be DETACHED from the slot.
+            // v1.5.5: detach now means headSpec = null (driveHead hides it)
+            // instead of a player release — the persistent slot parks and
+            // waits for the next window's retarget; tearing it down here is
+            // exactly the mount/teardown churn the persistent slot kills.
             // Only a byte-equal spec keeps the scrub optimization alive.
             if (HeadEffectsPolicy.staleSpec(mounted, specs)) {
-                releaseHeadPlayer()
-                return
+                headSpec = null
             }
-            headView?.let { if (it.alpha != 0f) it.alpha = 0f }
+            setHeadViewAlpha(0f, smooth = false)
             headImageView?.let { if (it.visibility != View.INVISIBLE) it.visibility = View.INVISIBLE }
             headPlayer?.let { if (it.playWhenReady) it.playWhenReady = false }
             return
@@ -884,9 +992,6 @@ class OverlayPreviewController(private val context: Context) {
         val file = File(mediaDir, asset.fileName)
         if (!file.exists()) return
 
-        if (headPlayer != null || headImageView != null) {
-            releaseHeadPlayer()
-        }
         headNeedsRebuild = false
 
         headSpec = active
@@ -896,6 +1001,38 @@ class OverlayPreviewController(private val context: Context) {
         // v1.5.3: fresh steering state for the new mount.
         headTrimming = false
         headParked = false
+        // v1.5.5: the alpha smoother restarts cold for every new window.
+        headAlphaAnimRunning = false
+
+        if (asset.isImage) {
+            // Image head: a fading still, canvas-fitted. The video slot (any
+            // kind) is PARKED, not released — the next video window retargets
+            // it (v1.5.5; the old release/rebuild here was the churn the
+            // persistent slot exists to kill).
+            parkHeadVideoSlot()
+            headImageView?.let { layer?.removeView(it) }
+            val iv = ImageView(context).apply {
+                scaleType = ImageView.ScaleType.FIT_XY
+                visibility = View.INVISIBLE
+                setImageBitmap(decodedSticker(file))
+            }
+            headImageView = iv
+            headIsImage = true
+            headEffectsActive = false
+            headContentAspect = contentAspectOf(clip, asset)
+            // v1.2.8: anchor the effects-fallback grace to MOUNT time (wall
+            // clock) — see headEffectsGraceWallMs.
+            headMountedAtMs = android.os.SystemClock.uptimeMillis()
+            headLastCorrectiveSeekMs = 0L
+            host.addView(iv, 0) // index 0: above the body, below all PiPs
+            return
+        }
+
+        // Video head. Drop any stale image head first.
+        headImageView?.let { layer?.removeView(it) }
+        headImageView = null
+        headIsImage = false
+
         // v1.2.10: TEXT ON THE HEAD + canvas Presentation — see the class doc.
         // The same texts the export bakes into the head ITEM are baked into
         // the head PLAYER here (local windows, HeadTextWindows), preceded by
@@ -918,135 +1055,211 @@ class OverlayPreviewController(private val context: Context) {
         headMountedAtMs = android.os.SystemClock.uptimeMillis()
         headLastCorrectiveSeekMs = 0L
 
-        if (asset.isImage) {
-            // Image head: a fading still, canvas-fitted.
-            val iv = ImageView(context).apply {
-                scaleType = ImageView.ScaleType.FIT_XY
-                visibility = View.INVISIBLE
-                setImageBitmap(decodedSticker(file))
-            }
-            headImageView = iv
-            headIsImage = true
-            host.addView(iv, 0) // index 0: above the body, below all PiPs
-        } else {
-            // v1.2.4: VISIBLE from birth + alpha gating (same deadlock fix
-            // as the PiP layers — see buildPipOverlay).
-            val tv = TextureView(context).apply {
-                setOpaque(false)
-                alpha = 0f
-            }
-            val player = ExoPlayer.Builder(context).build()
-            player.setVideoTextureView(tv)
-            player.addListener(object : Player.Listener {
-                override fun onRenderedFirstFrame() {
-                    headFirstFrame = true
-                    // v1.5.2: this is the evidence the device's effects path
-                    // WORKS: later mounts get the WARM grace budget instead of
-                    // the COLD one (HeadEffectsPolicy). Guarded by
-                    // headEffectsActive so a plain (fallback) mount never
-                    // fakes the proof.
-                    if (headEffectsActive) headEffectsEverRendered = true
-                    diag("head firstframe ✓")
-                    tv.post { if (tv.isAttachedToWindow) tv.alpha = headTargetAlpha }
-                }
-
-                // v1.2.5: silent failures made transitions invisible with no
-                // trace — surface overlay-player errors in the DIAG overlay.
-                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                    diag("head ERR ${error.errorCodeName}: ${(error.message ?: "").take(60)}")
-                }
-            })
-            // Look effects (rotate/flip, crop, grading, LUT, mosaic) — the
-            // same list the composition's head item carries. Positioning
-            // is the TextureView's job (canvas-fit of the content aspect).
-            //
-            // v1.2.5: once the device's effects-playback path (setVideoEffects
-            // → PlaybackVideoGraphWrapper) has proven unable to render a head
-            // in time, heads rebuild PLAIN — byte-for-byte the proven PiP
-            // player path — so a transition never stays invisible for a
-            // cosmetic grading pass. See headEffectsFallback.
-            //
-            // v1.2.10: + the overlapping texts (local windows) and, when
-            // needed, the canvas Presentation ahead of them — chain order
-            // mirrors buildClipItem: look → canvas fit → text.
-            //
-            // v1.5.0: + the TRANSITION itself, same chain tail as the export
-            // head item (look → canvas → text → transition). fadeUs is the
-            // head's SOURCE span (durationUs × speed) because plain-player
-            // effect timestamps run on the source clock; globalStartUs = -1
-            // disables the global window so only the item-local one rules.
-            // While this is mounted the shader owns the head's alpha and
-            // driveHead keeps the view at 1 in-window (see the class doc).
-            val lookEffects: List<Effect> = if (headEffectsFallback) {
-                emptyList()
-            } else {
-                CompositionBuilder.clipLookEffects(clip, stripEffects = false)
-            }
-            val effects: List<Effect> = buildList {
-                addAll(lookEffects)
-                if (canvasPresentationInChain) {
-                    add(
-                        Presentation.createForWidthAndHeight(
-                            project.width, project.height, Presentation.LAYOUT_SCALE_TO_FIT,
-                        )
-                    )
-                }
-                addAll(textEffects)
-                // v1.5.0: the transition shader. SKIPPED in the fallback
-                // session (headEffectsFallback) — a device whose effects
-                // path is broken gets the plain player + the view-layer
-                // dissolve ramp instead (driveHead's shaderOwnsAlpha=false).
-                //
-                // v1.5.1: premultipliedAlpha = TRUE — this player's output
-                // goes straight into the TextureView's SurfaceTexture, which
-                // Android HWUI composites PREMULTIPLIED; a straight-alpha
-                // buffer made every position-stable style read as a ghosted
-                // dissolve (B at full brightness wherever alpha > 0, A
-                // bleeding through). The EXPORT head item keeps straight
-                // alpha because DefaultVideoCompositor blends GL_SRC_ALPHA
-                // — see TransitionEffect's v1.5.1 section.
-                if (!headEffectsFallback) {
-                    add(
-                        TransitionEffect(
-                            active.type,
-                            (active.sourceOutUs - active.sourceInUs).coerceAtLeast(1L),
-                            -1L,
-                            premultipliedAlpha = true,
-                        )
-                    )
-                }
-            }
-            headEffectsActive = effects.isNotEmpty()
-            // v1.5.2: a THROWN setVideoEffects used to leave headEffectsActive
-            // true with no shader mounted (hard-cut instead of the intended
-            // graceful ramp). On failure, drop to plain explicitly so the
-            // view-layer dissolve ramp covers the window and the DIAG overlay
-            // records why.
-            if (effects.isNotEmpty()) {
-                if (runCatching { player.setVideoEffects(effects) }.isFailure) {
-                    headEffectsActive = false
-                    diag("head setVideoEffects FAILED, plain ramp")
-                }
-            }
-            if (active.speed != 1f) player.setPlaybackSpeed(active.speed)
-            player.volume = if (active.muted) 0f else active.volume.coerceIn(0f, 1f)
-            val item = MediaItem.Builder()
-                .setUri(Uri.fromFile(file))
-                .setClippingConfiguration(
-                    MediaItem.ClippingConfiguration.Builder()
-                        .setStartPositionUs(active.sourceInUs)
-                        .setEndPositionUs(active.sourceOutUs.coerceAtLeast(active.sourceInUs + 1L))
-                        .build(),
-                )
-                .build()
-            player.setMediaItem(item, 0L)
-            player.playWhenReady = false
-            player.prepare()
-            headPlayer = player
-            headView = tv
-            headIsImage = false
-            host.addView(tv, 0)
+        if (headPlayerIsPersistent && headPlayer != null && !headEffectsFallback) {
+            // v1.5.5: RETARGET the persistent slot — no new player, no new
+            // TextureView, no new EGL context; the media3 playlist-mode
+            // re-registration (see retargetHeadPlayer) is the whole cost.
+            retargetHeadPlayer(project, clip, active, textEffects, canvasPresentationInChain, file)
+            return
         }
+
+        if (headPlayer != null) {
+            // Legacy slot (the fallback session, or the latch just fired on
+            // the persistent one): full release, fresh build below.
+            releaseHeadPlayer()
+        }
+
+        // v1.2.4: VISIBLE from birth + alpha gating (same deadlock fix
+        // as the PiP layers — see buildPipOverlay).
+        val tv = TextureView(context).apply {
+            setOpaque(false)
+            alpha = 0f
+        }
+        val player = ExoPlayer.Builder(context).build()
+        player.setVideoTextureView(tv)
+        player.addListener(headPlayerListener(tv))
+        val effects: List<Effect> =
+            headEffectsChainFor(project, clip, active, textEffects, canvasPresentationInChain)
+        headEffectsActive = effects.isNotEmpty()
+        // v1.5.2: a THROWN setVideoEffects used to leave headEffectsActive
+        // true with no shader mounted (hard-cut instead of the intended
+        // graceful ramp). On failure, drop to plain explicitly so the
+        // view-layer dissolve ramp covers the window and the DIAG overlay
+        // records why.
+        if (effects.isNotEmpty()) {
+            if (runCatching { player.setVideoEffects(effects) }.isFailure) {
+                headEffectsActive = false
+                diag("head setVideoEffects FAILED, plain ramp")
+            }
+        }
+        player.setPlaybackSpeed(active.speed)
+        player.volume = if (active.muted) 0f else active.volume.coerceIn(0f, 1f)
+        player.setMediaItem(headMediaItemFor(active, file), 0L)
+        player.playWhenReady = false
+        player.prepare()
+        headPlayer = player
+        headView = tv
+        // v1.5.5: the slot becomes persistent exactly when the effects path
+        // is live — a plain player can never GROW effects later (the renderer
+        // only builds the video sink when effects were set before the first
+        // enable), so fallback sessions keep the cheap fresh mounts.
+        headPlayerIsPersistent = headEffectsActive && !headEffectsFallback
+        host.addView(tv, 0)
+    }
+
+    /**
+     * v1.5.5: point the PERSISTENT head player at a new window —
+     * stop() → setVideoEffects(new chain) → setMediaItem → prepare().
+     *
+     * This is media3's playlist-mode shape (source-verified in
+     * PlaybackVideoGraphWrapper / MediaCodecVideoRenderer): the renderer
+     * builds the PlaybackVideoGraphWrapper once, on its FIRST enable, and
+     * the sink's setVideoEffects re-registers the input stream IN PLACE —
+     * the EGL context and the compiled shader programs carry over, so the
+     * retarget costs a codec init and an effect-chain swap, NOT a context
+     * creation. The one redundant stream registration (the sink re-registers
+     * with the stale inputFormat at setVideoEffects time, then again when
+     * the new item's first stream arrives) runs on the GL thread, off the
+     * main thread. A re-prepare on the same player + TextureView is exactly
+     * what reclipPipPlayer has done in production since v1.2.4.
+     *
+     * Speed is set UNCONDITIONALLY: unlike a fresh player (default 1), the
+     * persistent one inherits the previous window's speed AND any steering
+     * trim the clock policy left on it.
+     */
+    private fun retargetHeadPlayer(
+        project: Project,
+        clip: Clip,
+        active: CompositionBuilder.HeadOverlaySpec,
+        textEffects: List<Effect>,
+        canvasPresentationInChain: Boolean,
+        file: File,
+    ) {
+        val player = headPlayer ?: return
+        val effects: List<Effect> =
+            headEffectsChainFor(project, clip, active, textEffects, canvasPresentationInChain)
+        runCatching { player.stop() }
+        if (effects.isNotEmpty()) {
+            if (runCatching { player.setVideoEffects(effects) }.isFailure) {
+                // Practically unreachable (the same call succeeded at mount
+                // on this very player), but a retarget that failed to swap
+                // the chain would render the OLD transition style over the
+                // NEW window: degrade to the plain path on the next tick
+                // instead of shipping a wrong-style window.
+                diag("head setVideoEffects FAILED on retarget, fallback")
+                headEffectsFallback = true
+                headNeedsRebuild = true
+            }
+        }
+        headEffectsActive = effects.isNotEmpty() && !headNeedsRebuild
+        player.setPlaybackSpeed(active.speed)
+        player.volume = if (active.muted) 0f else active.volume.coerceIn(0f, 1f)
+        player.setMediaItem(headMediaItemFor(active, file), 0L)
+        player.playWhenReady = false
+        player.prepare()
+    }
+
+    /**
+     * v1.5.5: the head player's shared listener — the fresh mount and the
+     * retarget keep the same first-frame/error wiring (a retargeted player
+     * re-fires onRenderedFirstFrame when the new stream's first frame
+     * lands, which is what re-arms headFirstFrame per window).
+     */
+    private fun headPlayerListener(tv: TextureView): Player.Listener =
+        object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                headFirstFrame = true
+                // v1.5.2: this is the evidence the device's effects path
+                // WORKS: later mounts get the WARM grace budget instead of
+                // the COLD one (HeadEffectsPolicy). Guarded by
+                // headEffectsActive so a plain (fallback) mount never
+                // fakes the proof.
+                if (headEffectsActive) headEffectsEverRendered = true
+                diag("head firstframe ✓")
+                tv.post { if (tv.isAttachedToWindow) tv.alpha = headTargetAlpha }
+            }
+
+            // v1.2.5: silent failures made transitions invisible with no
+            // trace — surface overlay-player errors in the DIAG overlay.
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                diag("head ERR ${error.errorCodeName}: ${(error.message ?: "").take(60)}")
+            }
+        }
+
+    /**
+     * The head player's effect chain, shared by the fresh mount and the
+     * v1.5.5 retarget so the two paths stay byte-identical:
+     * look → canvas Presentation → texts → transition shader. The comments
+     * that used to live inline on the fresh mount (v1.2.5 fallback, v1.2.10
+     * text+canvas order, v1.5.0 transition tail, v1.5.1 premultiplied
+     * alpha) still govern — see the class doc.
+     */
+    private fun headEffectsChainFor(
+        project: Project,
+        clip: Clip,
+        active: CompositionBuilder.HeadOverlaySpec,
+        textEffects: List<Effect>,
+        canvasPresentationInChain: Boolean,
+    ): List<Effect> {
+        // Look effects (rotate/flip, crop, grading, LUT, mosaic) — the same
+        // list the composition's head item carries. Positioning is the
+        // TextureView's job (canvas-fit of the content aspect).
+        val lookEffects: List<Effect> = if (headEffectsFallback) {
+            emptyList()
+        } else {
+            CompositionBuilder.clipLookEffects(clip, stripEffects = false)
+        }
+        return buildList {
+            addAll(lookEffects)
+            if (canvasPresentationInChain) {
+                add(
+                    Presentation.createForWidthAndHeight(
+                        project.width, project.height, Presentation.LAYOUT_SCALE_TO_FIT,
+                    )
+                )
+            }
+            addAll(textEffects)
+            // The transition shader, same chain tail as the export head item.
+            // premultipliedAlpha = TRUE on the preview path only (v1.5.1 —
+            // HWUI composites this view's SurfaceTexture premultiplied; the
+            // EXPORT item keeps straight alpha for DefaultVideoCompositor).
+            if (!headEffectsFallback) {
+                add(
+                    TransitionEffect(
+                        active.type,
+                        (active.sourceOutUs - active.sourceInUs).coerceAtLeast(1L),
+                        -1L,
+                        premultipliedAlpha = true,
+                    )
+                )
+            }
+        }
+    }
+
+    /** The head player's clipped media item for [active]. */
+    private fun headMediaItemFor(active: CompositionBuilder.HeadOverlaySpec, file: File): MediaItem =
+        MediaItem.Builder()
+            .setUri(Uri.fromFile(file))
+            .setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionUs(active.sourceInUs)
+                    .setEndPositionUs(active.sourceOutUs.coerceAtLeast(active.sourceInUs + 1L))
+                    .build(),
+            )
+            .build()
+
+    /**
+     * v1.5.5: park the head VIDEO slot (image head active, or the spec went
+     * stale): paused, speed reset, view faded to 0. The player and its
+     * TextureView stay alive for the next retarget — releasing here would
+     * rebuild the whole EGL/effects pipeline one window later.
+     */
+    private fun parkHeadVideoSlot() {
+        headPlayer?.let { p ->
+            if (p.playWhenReady) p.playWhenReady = false
+            if (p.playbackParameters.speed != 1f) runCatching { p.setPlaybackSpeed(1f) }
+        }
+        headView?.let { if (it.alpha != 0f) it.alpha = 0f }
     }
 
     // ------------------------------------------------------------------
@@ -1167,6 +1380,11 @@ class OverlayPreviewController(private val context: Context) {
 
     private fun driveHead(playheadUs: Long, isPlaying: Boolean) {
         val spec = headSpec ?: run {
+            // No spec (hidden-keep or stale-detached): hide both slots.
+            // v1.5.5: also freeze the smoother's target so a posted frame
+            // callback cannot fight this direct hide.
+            headTargetAlpha = 0f
+            headAlphaAnimRunning = false
             headView?.let { if (it.alpha != 0f) it.alpha = 0f }
             headImageView?.let { if (it.visibility != View.INVISIBLE) it.visibility = View.INVISIBLE }
             return
@@ -1186,15 +1404,19 @@ class OverlayPreviewController(private val context: Context) {
         if (headIsImage) {
             headImageView?.let { iv ->
                 iv.visibility = if (inWindow || inTail) View.VISIBLE else View.INVISIBLE
-                iv.alpha = if (inTail) {
+                // v1.5.5: the still's ramp and tail smooth at vsync rate too
+                // (the 33ms staircase was just as visible on a fading still);
+                // out-of-window targets snap for sample-accurate scrub.
+                val target = if (inTail) {
                     HeadWindowMath.alphaAt(localUs, spec.durationUs, headHoldTailUs, isPlaying)
-                } else ramp
+                } else if (inWindow) ramp else 0f
+                setHeadViewAlpha(target, smooth = target > 0f)
             }
             return
         }
 
         val player = headPlayer ?: return
-        val tv = headView ?: return
+        headView ?: return // v1.2.4: the view must exist for the alpha gating below.
         // v1.2.4: alpha gating (VISIBLE view, never toggled) — same fix as PiP.
         // v1.5.2: headFirstFrame is deliberately NOT reset here anymore.
         // The v1.2.4-era reset made every PREROLL tick erase a first frame
@@ -1209,8 +1431,10 @@ class OverlayPreviewController(private val context: Context) {
         // nothing in between touches it.
         if (!inWindow && !inTail) {
             if (player.playWhenReady) player.playWhenReady = false
-            headTargetAlpha = 0f
-            if (tv.alpha != 0f) tv.alpha = 0f
+            // v1.5.5: SNAP the hide — backward/past-tail exits stay
+            // sample-accurate for frame-stepping (the smoother is only for
+            // the playing fades).
+            setHeadViewAlpha(0f, smooth = false)
             return
         }
         if (inTail) {
@@ -1221,9 +1445,24 @@ class OverlayPreviewController(private val context: Context) {
             // no ENDED rewind: alignment is over, only the alpha matters
             // here. A corrective seek in the tail would clamp to the item end
             // and cause a visible hiccup at mid-alpha.
+            //
+            // v1.5.5: the fade now INTERPOLATES at display rate (the sync
+            // tick still owns the target — a stalled body freezes the
+            // playhead, the target, and therefore the tail, exactly like the
+            // v1.2.10 design demands; only the 33ms staircase became a
+            // continuous ramp — the visible "end-of-transition jump" once
+            // the shader path itself got smooth).
             val tailAlpha = HeadWindowMath.alphaAt(localUs, spec.durationUs, headHoldTailUs, isPlaying)
-            headTargetAlpha = tailAlpha
-            if (tv.alpha != tailAlpha) tv.alpha = tailAlpha
+            setHeadViewAlpha(tailAlpha, smooth = true)
+            // v1.5.5: duck the head's AUDIO with the tail. At the window end
+            // the body's composition already plays clip B's own audio; the
+            // (still slightly behind) head kept playing ITS copy at full
+            // volume through the tail — a ~100-300ms echo/comb right at the
+            // boundary. The view fade and the volume fade now land together.
+            val baseVol = if (spec.muted || currentProject?.videoTrackMuted == true) 0f
+            else spec.volume.coerceIn(0f, 1f)
+            val ducked = baseVol * tailAlpha
+            if (player.volume != ducked) player.volume = ducked
             return
         }
         // v1.2.5: effects-grace fallback, measured in WALL time from MOUNT.
@@ -1244,7 +1483,6 @@ class OverlayPreviewController(private val context: Context) {
                 )
             }
         }
-        headTargetAlpha = viewAlphaFor(ramp)
         // v1.2.5: alpha follows the ramp DIRECTLY — no first-frame gate (same
         // reasoning as drivePip: an unrendered TextureView is transparent, so
         // the fade can never deadlock on a missing first-frame callback).
@@ -1257,7 +1495,12 @@ class OverlayPreviewController(private val context: Context) {
         // only; images use the ImageView path above) and the effects-
         // fallback session, where headEffectsActive is false and every style
         // degrades to the dissolve ramp.
-        if (tv.alpha != headTargetAlpha) tv.alpha = headTargetAlpha
+        //
+        // v1.5.5: SNAP while the shader owns the alpha (the view must sit at
+        // exactly 1 the moment the window opens or the composite dims), SMOOTH
+        // on the fallback dissolve ramp (which stepped at the sync rate like
+        // the tail used to).
+        setHeadViewAlpha(viewAlphaFor(ramp), smooth = !headEffectsActive)
 
         // v1.2.7: position math is SPEED-AWARE (the clipped player advances
         // at spec.speed × wall time while the playhead advances 1×) and the
@@ -1392,6 +1635,11 @@ class OverlayPreviewController(private val context: Context) {
         // v1.5.3: steering state dies with the mount.
         headTrimming = false
         headParked = false
+        // v1.5.5: the persistent slot and its alpha smoother die with it
+        // (session teardown / the fallback latch — the retarget path never
+        // comes through here).
+        headPlayerIsPersistent = false
+        headAlphaAnimRunning = false
     }
 
     // ------------------------------------------------------------------

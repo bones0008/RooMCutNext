@@ -846,21 +846,29 @@ object CompositionBuilder {
             items += buildTransparentPadItem(project, mediaDir, pip.startUs)
         }
 
-        val clippedDurationUs = pip.durationUs.coerceAtMost(
-            if (asset.isImage) pip.durationUs else asset.durationUs
-        )
+        val clippedDurationUs = if (asset.isImage) pip.durationUs
+        else pip.durationUs.coerceAtMost((asset.durationUs - pip.sourceInUs).coerceAtLeast(0L))
         val mediaItem = if (asset.isImage) {
             MediaItem.Builder()
                 .setUri(Uri.fromFile(file))
                 .setImageDurationMs((pip.durationUs / 1000L).coerceAtLeast(1L))
                 .build()
         } else {
+            // v1.5.5: the layer is a WINDOW into the source
+            // ([sourceInUs, sourceInUs + durationUs), capped by the source
+            // duration) — the same window the preview player clips to
+            // (OverlayPreviewController.pipClipEndUs), so a split or
+            // left-trimmed layer exports the frames it previewed.
             MediaItem.Builder()
                 .setUri(Uri.fromFile(file))
                 .setClippingConfiguration(
                     MediaItem.ClippingConfiguration.Builder()
-                        .setStartPositionUs(0L)
-                        .setEndPositionUs(pip.durationUs.coerceAtMost(asset.durationUs))
+                        .setStartPositionUs(pip.sourceInUs)
+                        .setEndPositionUs(
+                            (pip.sourceInUs + pip.durationUs)
+                                .coerceAtMost(asset.durationUs)
+                                .coerceAtLeast(pip.sourceInUs + 1L)
+                        )
                         .build()
                 )
                 .build()

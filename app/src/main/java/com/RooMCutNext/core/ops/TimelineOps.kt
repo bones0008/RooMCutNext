@@ -585,7 +585,15 @@ object TimelineOps {
     /**
      * Trim one edge of a PiP layer in TIMELINE coordinates (opposite edge
      * fixed). Video layers are limited by the source duration on BOTH edges
-     * (the layer plays the source from 0); image layers have no source limit.
+     * (the layer plays the source from [PipLayer.sourceInUs]); image layers
+     * have no source limit.
+     *
+     * v1.5.5: dragging the LEFT edge of a video layer now ADVANCES the source
+     * window with the edge (sourceInUs += the dragged delta, clamped to the
+     * source bounds) instead of restarting the source from 0 — the content
+     * that was on screen at the new start keeps playing seamlessly, and a
+     * left-then-right trim pair can finally select ANY sub-window of the
+     * material (the old semantics could only ever cut the tail).
      */
     fun trimPipEdge(
         pips: List<PipLayer>,
@@ -601,11 +609,18 @@ object TimelineOps {
                 val endUs = pip.endUs
                 if (isLeft) {
                     val newStart = timelineTargetUs.coerceIn(0L, (endUs - PIP_MIN_DURATION_US).coerceAtLeast(0L))
-                    pip.copy(startUs = newStart, durationUs = (endUs - newStart).coerceAtLeast(PIP_MIN_DURATION_US))
+                    val newSourceIn = if (sourceLimit == Long.MAX_VALUE) pip.sourceInUs
+                    else (pip.sourceInUs + (newStart - pip.startUs))
+                        .coerceIn(0L, (sourceLimit - PIP_MIN_DURATION_US).coerceAtLeast(0L))
+                    pip.copy(
+                        startUs = newStart,
+                        sourceInUs = newSourceIn,
+                        durationUs = (endUs - newStart).coerceAtLeast(PIP_MIN_DURATION_US),
+                    )
                 } else {
                     val minEnd = pip.startUs + PIP_MIN_DURATION_US
                     val maxEnd = if (sourceLimit == Long.MAX_VALUE) Long.MAX_VALUE
-                    else pip.startUs + sourceLimit
+                    else pip.startUs + (sourceLimit - pip.sourceInUs).coerceAtLeast(PIP_MIN_DURATION_US)
                     val newEnd = timelineTargetUs.coerceIn(minEnd, maxEnd)
                     pip.copy(durationUs = newEnd - pip.startUs)
                 }
@@ -637,6 +652,44 @@ object TimelineOps {
         val left = audio.copy(sourceOutUs = boundary)
         val right = audio.copy(id = newId, startUs = timelineUs, sourceInUs = boundary)
         val out = audios.toMutableList()
+        out[idx] = left
+        out.add(idx + 1, right)
+        return out to right.id
+    }
+
+    /**
+     * v1.5.5: split the PiP layer under [timelineUs] at that timeline
+     * position — the missing half of "画中画无法剪辑，只能拖拽和缩短". The
+     * right half plays the source from the cut point
+     * ([PipLayer.sourceInUs] + the left half's span), so the two halves show
+     * SEQUENTIAL content, exactly like splitting a video clip; without the
+     * offset the right half would restart the source from its head. Geometry
+     * (x/y/scale/opacity) is inherited by both halves — a split is a cut, not
+     * a restyle. Image layers split too (the still simply continues).
+     *
+     * Returns null when no layer covers the position or either half would be
+     * shorter than [PIP_MIN_DURATION_US] — the same contract as
+     * [splitAudioAt].
+     */
+    fun splitPipAt(
+        pips: List<PipLayer>,
+        timelineUs: Long,
+        newId: String,
+    ): Pair<List<PipLayer>, String>? {
+        val idx = pips.indexOfFirst { timelineUs >= it.startUs && timelineUs < it.endUs }
+        if (idx < 0) return null
+        val pip = pips[idx]
+        val leftSpanUs = timelineUs - pip.startUs
+        if (leftSpanUs < PIP_MIN_DURATION_US) return null
+        if (pip.endUs - timelineUs < PIP_MIN_DURATION_US) return null
+        val left = pip.copy(durationUs = leftSpanUs)
+        val right = pip.copy(
+            id = newId,
+            startUs = timelineUs,
+            sourceInUs = pip.sourceInUs + leftSpanUs,
+            durationUs = pip.endUs - timelineUs,
+        )
+        val out = pips.toMutableList()
         out[idx] = left
         out.add(idx + 1, right)
         return out to right.id
