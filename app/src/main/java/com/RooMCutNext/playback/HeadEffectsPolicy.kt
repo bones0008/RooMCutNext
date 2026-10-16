@@ -291,6 +291,58 @@ object HeadEffectsPolicy {
         retargetCount >= MAX_HEAD_RETARGETS
 
     /**
+     * v1.5.8: whether a mounted head whose window the playhead has ALREADY
+     * played through must be RETARGETED because the playhead crossed BACK
+     * over it — replay, loop, or a backward seek while playing.
+     *
+     * THE BUG THIS PINS (v1.5.7 field report, fourth round on "播放次数越
+     * 多越卡": "播放了7次，head firstframe +46984ms；第二次第二段视频在转场
+     * 开始瞬间短暂出现暂停，第四次直接出现在一半的位置静止，第七次占据5/7
+     * 画面，快结束转场时才动一下，且每次都带跳帧"): a replay seeks the
+     * playhead back to 0, but reconcileHead's hot-path early-out
+     * (`headSpec == active`) treats the unchanged spec as "still mounted,
+     * nothing to do" — the ENTIRE v1.5.5/v1.5.7 retarget hygiene (pre-stop
+     * sink scrub, flag re-arm, item reset to position 0) never runs, and
+     * the persistent head player carries the PREVIOUS pass's residue into
+     * the new playthrough:
+     *
+     *  - POSITION deep past the window (window end + tail extension): on
+     *    window entry the ahead-drift (= position − expected ≈ span +
+     *    extension) exceeds HeadSyncPolicy.AHEAD_PARK_US, so the head
+     *    PARKS ITSELF — no new frames for most of the window ("静止"),
+     *    and the unpark/ENDED corrections only land near the window end
+     *    ("快结束的时候再动一下"). The park window grows as the residue
+     *    position climbs toward the item end across passes — the monotone
+     *    degradation curve the field kept reporting;
+     *  - headFirstFrame=true surviving from the last pass defeats the
+     *    v1.5.6 first-frame alpha gate, so the REUSED TextureView reveals
+     *    its stale frame the instant the window opens ("第二段视频直接
+     *    出现"), until a post-seek frame finally repaints at whatever
+     *    progress the clock has reached (position ≈ "一半" / "5/7");
+     *  - headMountedAtMs is never re-armed, so every post-seek
+     *    onRenderedFirstFrame prints its latency against the FIRST mount's
+     *    wall-clock anchor — the pseudometric "+46984ms" that tracks total
+     *    session time (≈ plays × playthrough duration), NOT real
+     *    first-frame latency.
+     *
+     * [furthestPlayheadUs] is the current mount's monotonic high-water
+     * playhead mark: the mount has "passed" its window once that mark
+     * reaches the window end. [playheadUs] is the CURRENT playhead —
+     * anywhere before the window end (in front of it or back inside it)
+     * counts as a cross-back. The caller additionally requires isPlaying
+     * (a paused scrub-back keeps the legacy tight per-tick seek tracking,
+     * which has no residue problem to fix) and a video head (image heads
+     * carry no player residue).
+     */
+    fun replayCrossBackRetarget(
+        furthestPlayheadUs: Long,
+        mounted: CompositionBuilder.HeadOverlaySpec,
+        playheadUs: Long,
+    ): Boolean =
+        furthestPlayheadUs >= mounted.startUs + mounted.durationUs &&
+            playheadUs < mounted.startUs + mounted.durationUs
+
+    /**
      * True when the mounted head's spec has vanished from the CURRENT
      * spec list: the transition was deleted, or any identity field of the
      * window (style, length, speed, mute, volume) was edited while the

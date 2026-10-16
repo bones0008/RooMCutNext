@@ -502,6 +502,22 @@ class OverlayPreviewController(private val context: Context) {
     private var headItemEndMs = 0L
 
     /**
+     * v1.5.8: the furthest playhead position the CURRENT head mount has
+     * ever seen — a monotonic high-water mark in timeline microseconds.
+     * Once it reaches the mounted window's end, that mount has "played
+     * through" its window; a CURRENT playhead back below the window end
+     * (replay / loop / a backward seek while playing) is a REPLAY
+     * CROSS-BACK and forces the head through the full retarget (see
+     * [HeadEffectsPolicy.replayCrossBackRetarget] — the v1.5.7 field
+     * report's monotone per-play degradation traced to the hot-path
+     * early-out keeping the previous pass's residue mounted: parked-deep
+     * position, surviving headFirstFrame, stale mount clock). Re-armed at
+     * every mount flow entry and cleared by the stale detach and
+     * releaseHeadPlayer.
+     */
+    private var headFurthestPlayheadUs = Long.MIN_VALUE
+
+    /**
      * v1.5.7: look-effects memo ("clipId:lookSignature" → the built Effect
      * instances). clipLookEffects() builds FRESH instances per call and the
      * media3 effect classes do not reliably implement equals — a new list is
@@ -995,6 +1011,10 @@ class OverlayPreviewController(private val context: Context) {
     private fun reconcileHead(project: Project, mediaDir: File, playheadUs: Long, isPlaying: Boolean) {
         val host = layer ?: return
         val specs = headSpecsOf(project)
+        // v1.5.8: high-water mark — every tick the playhead has ever reached
+        // during this mount (scrub back-and-forth keeps the mark; only a
+        // fresh mount flow re-arms it). Feeds the replay cross-back below.
+        if (playheadUs > headFurthestPlayheadUs) headFurthestPlayheadUs = playheadUs
 
         val active = specs.firstOrNull { playheadUs >= it.startUs && playheadUs < it.startUs + it.durationUs }
             ?: specs.filter { playheadUs >= it.startUs - headPrerollUs && playheadUs < it.startUs + it.durationUs }
@@ -1052,6 +1072,9 @@ class OverlayPreviewController(private val context: Context) {
             // Only a byte-equal spec keeps the scrub optimization alive.
             if (HeadEffectsPolicy.staleSpec(mounted, specs)) {
                 headSpec = null
+                // v1.5.8: the high-water mark tracked THAT mount's pass; a
+                // detached spec must not arm a cross-back for the next one.
+                headFurthestPlayheadUs = Long.MIN_VALUE
             }
             setHeadViewAlpha(0f, smooth = false)
             headImageView?.let { if (it.visibility != View.INVISIBLE) it.visibility = View.INVISIBLE }
@@ -1066,7 +1089,29 @@ class OverlayPreviewController(private val context: Context) {
         // window — editing a text while the head is mounted now rebuilds the
         // player so the baked text overlay follows (see headTextEffectsFor).
         val effectsSig = headEffectsSignature(project, active)
-        if (!headNeedsRebuild && headSpec == active && headEffectsSig == effectsSig &&
+        // v1.5.8: REPLAY CROSS-BACK — the playhead crossed back over a
+        // window this very mount has already played through (replay /
+        // loop / a backward seek while playing). The early-out below
+        // would keep the head mounted with the PREVIOUS pass's residue:
+        // a player position parked deep past the window (which self-parks
+        // the head via the ahead-drift policy for most of the new pass —
+        // "B 直接出现然后静止，快结束才动一下", deeper every pass), a
+        // surviving headFirstFrame defeating the v1.5.6 first-frame alpha
+        // gate on the REUSED TextureView (the stale frame the instant the
+        // window opens), and a stale headMountedAtMs turning the DIAG
+        // first-frame readout into a session-length pseudometric (the
+        // "+46984ms" field read). Fall through to the mount flow below,
+        // which re-arms every flag and retargets the slot at position 0
+        // under the full v1.5.5/v1.5.7 hygiene. Paused scrub-backs
+        // deliberately stay on the legacy tight per-tick seek tracking
+        // (no flowing residue to flush); image heads carry no player
+        // residue.
+        val replayCrossBack = isPlaying && !headIsImage && headPlayer != null &&
+            headSpec == active &&
+            HeadEffectsPolicy.replayCrossBackRetarget(headFurthestPlayheadUs, active, playheadUs)
+        if (replayCrossBack) {
+            diag("head replay cross-back → retarget")
+        } else if (!headNeedsRebuild && headSpec == active && headEffectsSig == effectsSig &&
             (headPlayer != null || headImageView != null)
         ) {
             return
@@ -1132,6 +1177,10 @@ class OverlayPreviewController(private val context: Context) {
         headParked = false
         // v1.5.5: the alpha smoother restarts cold for every new window.
         headAlphaAnimRunning = false
+        // v1.5.8: the high-water mark re-arms for THIS mount's pass — the
+        // replay cross-back above can now only observe crossings this
+        // mount itself has played through.
+        headFurthestPlayheadUs = playheadUs
 
         if (asset.isImage) {
             // Image head: a fading still, canvas-fitted. The video slot (any
@@ -1925,6 +1974,8 @@ class OverlayPreviewController(private val context: Context) {
         // chain is value-stable from window one (see headTransitionEffect's
         // doc).
         headItemEndMs = 0L
+        // v1.5.8: the released mount's high-water mark dies with it.
+        headFurthestPlayheadUs = Long.MIN_VALUE
     }
 
     // ------------------------------------------------------------------

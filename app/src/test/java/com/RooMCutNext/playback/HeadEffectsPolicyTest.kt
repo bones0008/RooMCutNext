@@ -334,4 +334,80 @@ class HeadEffectsPolicyTest {
         assertTrue(HeadEffectsPolicy.shouldRecycleHead(max))
         assertTrue(HeadEffectsPolicy.shouldRecycleHead(max + 5))
     }
+
+    // ---------------- v1.5.8: replay cross-back ----------------
+
+    @Test
+    fun `replay cross-back fires when a played-through window is re-entered from before`() {
+        // THE FIELD CASE: the playhead played through the window (high-water
+        // 6.7s ≥ window end 1.8s), then a replay seeked it back to 0. The
+        // mounted head carries the previous pass's residue — the retarget
+        // MUST run even though the spec is byte-equal.
+        assertTrue(
+            HeadEffectsPolicy.replayCrossBackRetarget(
+                furthestPlayheadUs = 6_700_000L, mounted = spec(), playheadUs = 0L,
+            ),
+        )
+    }
+
+    @Test
+    fun `replay cross-back fires when the playhead lands back inside the window`() {
+        // A backward seek straight INTO the window (e.g. the user drags the
+        // playhead to mid-transition while playing): same residue, and the
+        // head must re-point immediately for correctness.
+        assertTrue(
+            HeadEffectsPolicy.replayCrossBackRetarget(
+                furthestPlayheadUs = 6_700_000L, mounted = spec(), playheadUs = 1_200_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `replay cross-back holds while the mount has not yet played through the window`() {
+        // Normal premount/preroll: the high-water mark is still ahead of the
+        // window (or inside it) — the hot-path early-out keeps its cheap
+        // scrub optimization. This is the guard against turning EVERY
+        // premount tick into a retarget storm.
+        assertFalse(
+            HeadEffectsPolicy.replayCrossBackRetarget(
+                furthestPlayheadUs = 900_000L, mounted = spec(), playheadUs = 900_000L,
+            ),
+        )
+        // Boundary: the mark exactly at the window START is still "not
+        // played through" (the pass has not reached the window END).
+        assertFalse(
+            HeadEffectsPolicy.replayCrossBackRetarget(
+                furthestPlayheadUs = 1_000_000L, mounted = spec(), playheadUs = 999_999L,
+            ),
+        )
+    }
+
+    @Test
+    fun `replay cross-back holds while the playhead is still past the window`() {
+        // Normal forward playback after the window: the mark and the
+        // playhead are both past the window end — nothing crossed BACK.
+        assertFalse(
+            HeadEffectsPolicy.replayCrossBackRetarget(
+                furthestPlayheadUs = 6_700_000L, mounted = spec(), playheadUs = 6_700_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `replay cross-back boundary is exactly the window end`() {
+        // The mark reaching the window END is what "played through" means
+        // (the tail is driveHead's business, not the cross-back's); the
+        // playhead at exactly the window end is still "inside" the outgoing
+        // coast — not a cross-back either.
+        assertTrue(
+            HeadEffectsPolicy.replayCrossBackRetarget(
+                furthestPlayheadUs = 1_800_000L, mounted = spec(), playheadUs = 1_799_999L,
+            ),
+        )
+        assertFalse(
+            HeadEffectsPolicy.replayCrossBackRetarget(
+                furthestPlayheadUs = 1_800_000L, mounted = spec(), playheadUs = 1_800_000L,
+            ),
+        )
+    }
 }
