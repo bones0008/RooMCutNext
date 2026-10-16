@@ -216,4 +216,122 @@ class HeadEffectsPolicyTest {
         // Typical spin-up on mid-range devices is 100-200ms.
         assertTrue(HeadEffectsPolicy.TAIL_MARGIN_US >= 200_000L)
     }
+
+    // ---------------- v1.5.7: capped extension / retarget gate / recycle ----------------
+
+    // media3 Player states (the policy stays Android-free; ints pinned here):
+    // 1=IDLE, 2=BUFFERING, 3=READY, 4=ENDED.
+    private val idle = 1
+    private val buffering = 2
+    private val ready = 3
+    private val ended = 4
+
+    @Test
+    fun `capped tail extension passes through when the gap to the next window is wide`() {
+        // window ends at 1.8s, the next window starts at 5s: the whole 850ms
+        // extension (600ms live tail + 250ms margin) fits with room to spare.
+        assertEquals(
+            850_000L,
+            HeadEffectsPolicy.cappedTailExtensionTimelineUs(
+                desiredTimelineUs = 850_000L, windowEndUs = 1_800_000L, nextWindowStartUs = 5_000_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `capped tail extension clamps to the settle budget on short clips`() {
+        // Next window 700ms after this one: budget = 700-100(settle) = 600ms,
+        // so the extension degrades to a 600ms PARTIALLY-live tail rather
+        // than overrunning the next window and forcing a mid-flight stop.
+        assertEquals(
+            600_000L,
+            HeadEffectsPolicy.cappedTailExtensionTimelineUs(
+                desiredTimelineUs = 850_000L, windowEndUs = 1_800_000L, nextWindowStartUs = 2_500_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `capped tail extension collapses to zero on degenerate gaps`() {
+        // The next window at or before this window's end: no safe extension
+        // exists — the tail falls back to the pre-v1.5.6 held-frame behavior
+        // (the correct trade against a wedged pipeline).
+        assertEquals(
+            0L,
+            HeadEffectsPolicy.cappedTailExtensionTimelineUs(
+                desiredTimelineUs = 850_000L, windowEndUs = 1_800_000L, nextWindowStartUs = 1_800_000L,
+            ),
+        )
+        assertEquals(
+            0L,
+            HeadEffectsPolicy.cappedTailExtensionTimelineUs(
+                desiredTimelineUs = 850_000L, windowEndUs = 1_800_000L, nextWindowStartUs = 1_500_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `retarget gate passes drained or never-started players`() {
+        // ENDED: the clipped item played out — the graph drained. IDLE:
+        // nothing was ever queued.
+        assertTrue(HeadEffectsPolicy.retargetSinkClearToProceed(ended, playWhenReady = true, positionMs = 999L, itemEndMs = 900L))
+        assertTrue(HeadEffectsPolicy.retargetSinkClearToProceed(idle, playWhenReady = true, positionMs = 0L, itemEndMs = 900L))
+    }
+
+    @Test
+    fun `retarget gate blocks a playing player before its item end (v1 5 6 wedge)`() {
+        // The live-stream case: stopping here strands the in-flight frames
+        // against the fresh clock — the 16474ms first-frame wedge. Defer.
+        assertFalse(
+            HeadEffectsPolicy.retargetSinkClearToProceed(
+                ready, playWhenReady = true, positionMs = 500L, itemEndMs = 900L,
+            ),
+        )
+    }
+
+    @Test
+    fun `retarget gate passes the parked player (paused short of the item end)`() {
+        // THE ROUTINE v1.5.6 path: driveHead pauses the out-of-window head
+        // ~250ms (the margin) short of the extended item end. Nothing is
+        // flowing; the pre-stop sink scrub flushes the parked stragglers, so
+        // the retarget must NOT wait for a drain that will never come.
+        assertTrue(
+            HeadEffectsPolicy.retargetSinkClearToProceed(
+                ready, playWhenReady = false, positionMs = 500L, itemEndMs = 900L,
+            ),
+        )
+    }
+
+    @Test
+    fun `retarget gate passes a playing player at or past its item end`() {
+        assertTrue(
+            HeadEffectsPolicy.retargetSinkClearToProceed(
+                ready, playWhenReady = true, positionMs = 900L, itemEndMs = 900L,
+            ),
+        )
+    }
+
+    @Test
+    fun `retarget gate blocks buffering players`() {
+        // Preparation or a mid-item stall — frames may be queued in flight.
+        assertFalse(
+            HeadEffectsPolicy.retargetSinkClearToProceed(
+                buffering, playWhenReady = false, positionMs = 0L, itemEndMs = 900L,
+            ),
+        )
+    }
+
+    @Test
+    fun `head recycle fires at the retarget budget`() {
+        // The accumulation bound: a persistent player serves at most
+        // MAX_HEAD_RETARGETS windows before it is retired and rebuilt. Pin
+        // the boundary and a sanity band (large enough that a normal edit
+        // session rarely pays a cold rebuild, small enough that a wedging
+        // session recovers within a couple of playthroughs).
+        val max = HeadEffectsPolicy.MAX_HEAD_RETARGETS
+        assertTrue(max in 8..24)
+        assertFalse(HeadEffectsPolicy.shouldRecycleHead(max - 1))
+        assertTrue(HeadEffectsPolicy.shouldRecycleHead(max))
+        assertTrue(HeadEffectsPolicy.shouldRecycleHead(max + 5))
+    }
 }

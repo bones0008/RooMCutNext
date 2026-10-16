@@ -148,6 +148,12 @@ object HeadEffectsPolicy {
      * tail ends. If the SOURCE is shorter than the extension (B barely longer
      * than its transition), the clip simply ends early and the tail's last
      * stretch degrades gracefully to the old held-frame behavior.
+     *
+     * v1.5.7 CAP: [cappedTailExtensionUs] additionally clips the extension to
+     * the NEXT window's geometry — an extension that runs past the next
+     * transition's start makes the premount retarget land MID-FLIGHT (the
+     * v1.5.6 wedge; see [retargetSinkClearToProceed]), and no amount of
+     * gating can wait past a window that has already opened.
      */
     fun previewTailExtensionSourceUs(
         speed: Float,
@@ -155,8 +161,134 @@ object HeadEffectsPolicy {
         marginUs: Long = TAIL_MARGIN_US,
     ): Long = ((tailUs + marginUs) * speed).toLong().coerceAtLeast(0L)
 
+    /**
+     * v1.5.7: the tail extension's TIMELINE length, CAPPED so the extended
+     * item never runs past [nextWindowStartUs] minus [RETARGET_SETTLE_US] of
+     * slack.
+     *
+     * The v1.5.6 field report ("播放次数多了，到了转场的时候，下一段素材的视频会
+     * 直接出现…然后静止" + DIAG head firstframe +16474ms) traced to, among
+     * other things, the extension OVERRUNNING the next window on short clips:
+     * the head item ends ~850ms past the window end, so a premount that fires
+     * less than 850ms+2.5s after the window end stops the player MID-PLAY —
+     * stranding in-flight frames in the sink (see
+     * [retargetSinkClearToProceed]). Capping the extension keeps the
+     * ENDED-gate's wait bounded by the timeline itself.
+     *
+     * DOMAIN: all arguments and the return are TIMELINE microseconds (the
+     * timeline length of the extension is speed-independent; the caller
+     * converts to SOURCE microseconds for the ClippingConfiguration via the
+     * clip's speed). [windowEndUs] and [nextWindowStartUs] are global
+     * timeline positions (nextWindowStartUs = the next transition window's
+     * start, or the timeline end when there is none). Degenerate caps
+     * (nextWindowStartUs at or before the window end) collapse the extension
+     * to zero — the tail degrades to the pre-v1.5.6 held-frame behavior,
+     * which is the correct trade against a wedged pipeline.
+     */
+    fun cappedTailExtensionTimelineUs(
+        desiredTimelineUs: Long,
+        windowEndUs: Long,
+        nextWindowStartUs: Long,
+        settleUs: Long = RETARGET_SETTLE_US,
+    ): Long {
+        val budgetUs = nextWindowStartUs - windowEndUs - settleUs
+        return desiredTimelineUs.coerceIn(0L, budgetUs.coerceAtLeast(0L))
+    }
+
+    /**
+     * v1.5.7: slack between the capped extension and the next window's start
+     * — room for the ENDED-gated retarget to observe ENDED and swap before
+     * the next window opens. 100ms: the gate polls at the sync rate (~33ms)
+     * and the stop itself is queued, not executed inline.
+     */
+    const val RETARGET_SETTLE_US = 100_000L
+
     /** Slack added to the tail extension; see [previewTailExtensionSourceUs]. */
     const val TAIL_MARGIN_US = 250_000L
+
+    /**
+     * v1.5.7: whether the persistent head player may be RETARGETED right now
+     * (v1.5.6 wedge fix).
+     *
+     * ROOT CAUSE this gates (source-verified against media3 1.11.1): stopping
+     * the head player while its current item still has frames in flight
+     * strands them in the video graph — the decoder's not-yet-rendered
+     * output parks in the final shader program wrapper's availableFrames
+     * queue, the fresh player starts a NEW clock at position ~0, the release
+     * control refuses to render "future" frames against that clock, and the
+     * EOS-gated pending input-stream registration never configures. First
+     * frame latency then grows with every stranded frame (the field read
+     * "head firstframe +16474ms") until a corrective seek happens to flush
+     * the sink — the user-visible "卡到快结束的时候再动一下".
+     *
+     * THE ROUTINE PATH this catches: driveHead pauses the out-of-window head
+     * ~[TAIL_MARGIN_US] short of the (v1.5.6-extended) item end — a PAUSED
+     * player sitting before its item end with decode-ahead frames parked in
+     * the graph. Paused players pass the gate (nothing is FLOWING; the
+     * controller's pre-stop sink scrub flushes the parked stragglers), so the
+     * gate only actually defers while the player is PLAYING or BUFFERING
+     * before its item end — i.e. a genuinely live stream.
+     *
+     * The controller ALSO issues a same-position seek immediately before
+     * stop() — that seek forces MediaCodecVideoRenderer.onPositionReset →
+     * videoSink.flush(true) which clears the queues outright — so even a
+     * gate-passing retarget carries no stragglers (belt AND braces: the seek
+     * covers the paused and scrub-retarget paths the gate deliberately does
+     * NOT block, because those must re-point the head immediately for
+     * correctness).
+     *
+     * REBUILD retargets (user edits: style/text/look changed while mounted)
+     * are user-initiated and latency-sensitive — the controller routes those
+     * through the seek-scrub WITHOUT this gate; only the automatic PREMOUNT
+     * retarget defers.
+     */
+    fun retargetSinkClearToProceed(
+        playbackState: Int,
+        playWhenReady: Boolean,
+        positionMs: Long,
+        itemEndMs: Long,
+    ): Boolean = when (playbackState) {
+        // IDLE: never prepared / already stopped — nothing in flight.
+        1 -> true // Player.STATE_IDLE
+        // ENDED: the clipped item played out fully — the graph drained.
+        4 -> true // Player.STATE_ENDED
+        // READY: paused (nothing flowing — the pre-stop scrub flushes the
+        // parked decode-ahead) or the playhead is at/past the item end.
+        3 -> !playWhenReady || positionMs >= itemEndMs - 1L // Player.STATE_READY
+        // BUFFERING (2): preparation or a mid-item stall — in flight.
+        else -> false
+    }
+
+    /**
+     * v1.5.7: retire the persistent head player after this many retargets
+     * and build a fresh one on the next mount.
+     *
+     * WHY: the accumulation the field kept reporting across three fix rounds
+     * ("播放次数越多转场越卡") lives in media3's input-stream switching
+     * machinery itself — every stream change releases and recreates the
+     * sampling shader program under a race the media3 team documents but has
+     * not fixed (media3 1.11.1 InputSwitcher, TODO b/417680219: "the texture
+     * manager may not receive onReadyToAcceptInputFrame from the previous
+     * sampling shader program as the order of calls to release() and
+     * releaseOutputFrame() on GlShaderProgram is non-deterministic"). Each
+     * retarget rolls those dice once more; a session that never rebuilds the
+     * player accumulates the fallout monotonically.
+     *
+     * A bounded recycle turns that unbounded accumulation into a bounded
+     * one: the fresh player re-proves the effects path from scratch (the
+     * controller resets the fallback latch and the cycle counter with it),
+     * paying one COLD mount inside the premount lead — worst case one
+     * degraded window per recycle, in exchange for a pipeline that can never
+     * wedge for more than MAX_HEAD_RETARGETS windows.
+     */
+    const val MAX_HEAD_RETARGETS = 12
+
+    /**
+     * v1.5.7: whether the persistent head slot should be RETIRED at this
+     * retarget boundary (see [MAX_HEAD_RETARGETS]).
+     */
+    fun shouldRecycleHead(retargetCount: Int): Boolean =
+        retargetCount >= MAX_HEAD_RETARGETS
 
     /**
      * True when the mounted head's spec has vanished from the CURRENT

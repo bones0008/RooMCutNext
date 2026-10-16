@@ -465,6 +465,60 @@ class OverlayPreviewController(private val context: Context) {
     private var headPlayerIsPersistent = false
 
     /**
+     * v1.5.7: the SESSION-STABLE transition shader effect (see
+     * TransitionEffect's v1.5.7 class-doc section). One instance serves
+     * every head window of the session: its window parameters (style /
+     * fadeUs / globalStartUs) are per-frame UNIFORMS, mutated in place at
+     * each retarget. Because [TransitionEffect.equals] between stable
+     * instances ignores those parameters, the effect list media3 compares
+     * stays VALUE-EQUAL across retargets — setVideoEffects becomes a no-op
+     * and DefaultVideoFrameProcessor.configure() keeps the compiled chain
+     * alive instead of release+recompiling it (twice) per window on the GL
+     * thread. Deliberately NOT cleared by releaseHeadPlayer: it is plain
+     * data, and surviving a bounded recycle (see [headRetargetCount]) keeps
+     * the NEXT player's chain value-stable from its very first window.
+     */
+    private var headTransitionEffect: TransitionEffect? = null
+
+    /**
+     * v1.5.7: retarget cycles the persistent head player has served since it
+     * was built. media3's input-stream switch rolls a documented release race
+     * each cycle (InputSwitcher TODO b/417680219 — the texture manager may
+     * never see onReadyToAcceptInputFrame from the previous sampling shader
+     * program); after [HeadEffectsPolicy.MAX_HEAD_RETARGETS] cycles the
+     * controller RETIRES the player at a safe boundary and builds a fresh
+     * one (see the recycle block in reconcileHead) — the field-reported
+     * "播放次数越多转场越卡" accumulation gets a hard bound instead of a
+     * session-long slope.
+     */
+    private var headRetargetCount = 0
+
+    /**
+     * v1.5.7: the clipped END (ms, player-position domain) of the currently
+     * mounted head item. Anchors the ENDED-gate ([HeadEffectsPolicy.
+     * retargetSinkClearToProceed]) and the pre-stop scrub seek — see
+     * retargetHeadPlayer.
+     */
+    private var headItemEndMs = 0L
+
+    /**
+     * v1.5.7: look-effects memo ("clipId:lookSignature" → the built Effect
+     * instances). clipLookEffects() builds FRESH instances per call and the
+     * media3 effect classes do not reliably implement equals — a new list is
+     * list-UNEQUAL by construction, re-arming the per-retarget registration
+     * storm the stable chain exists to kill. lookSignature() covers every
+     * field clipLookEffects reads (rotation/flip/crop/adjust/mosaics), so a
+     * memo hit is provably the same look. Bounded at 8 entries.
+     */
+    private val headLookMemo = LinkedHashMap<String, List<Effect>>()
+
+    /**
+     * v1.5.7: memoized canvas-fit Presentation (constant per project dims —
+     * another per-call instance that would break list equality).
+     */
+    private var headCanvasPresentation: Presentation? = null
+
+    /**
      * v1.5.5: vsync alpha smoother. The sync loop only re-targets the head's
      * view alpha every ~33ms poll tick, so a 400ms tail fade took ~12 visible
      * 8% alpha STEPS — with the shader path otherwise smooth, that staircase
@@ -1023,6 +1077,50 @@ class OverlayPreviewController(private val context: Context) {
         val file = File(mediaDir, asset.fileName)
         if (!file.exists()) return
 
+        // v1.5.7: BOUNDED RECYCLE — retire the persistent player at a safe
+        // window boundary once it has served its retarget budget. The fresh
+        // player re-proves the device's effects path from scratch: the
+        // session fallback latch and the warm/cold grace re-arm with it, and
+        // the next mount pays one COLD build inside the premount lead
+        // (PREMOUNT_US == COLD_GRACE_WALL_MS by design). Worst case one
+        // degraded window per recycle — the price of a pipeline that can
+        // never wedge for more than MAX_HEAD_RETARGETS windows.
+        if (headPlayerIsPersistent && headPlayer != null && !headEffectsFallback &&
+            HeadEffectsPolicy.shouldRecycleHead(headRetargetCount)
+        ) {
+            diag("head recycle after $headRetargetCount retargets")
+            releaseHeadPlayer()
+            headEffectsFallback = false
+            headEffectsEverRendered = false
+            headRetargetCount = 0
+            // releaseHeadPlayer cleared headSpec — fall through to the
+            // fresh-mount path below, which re-arms for [active].
+        }
+
+        // v1.5.7: ENDED-GATE for automatic premount retargets (the v1.5.6
+        // wedge fix — see HeadEffectsPolicy.retargetSinkClearToProceed's
+        // doc for the full in-flight-stranding mechanism). Only the PREMOUNT
+        // shape defers: a retarget the playhead is ALREADY inside (scrub
+        // jump, late premount, replay into window 1) must re-point the head
+        // immediately for correctness — the pre-stop seek-scrub in
+        // retargetHeadPlayer covers that path instead. Deferring costs one
+        // ~33ms sync tick; the wait is bounded by the capped tail extension
+        // (HeadEffectsPolicy.cappedTailExtensionTimelineUs), which guarantees
+        // the outgoing item ends before the next window opens.
+        if (headSpec != null && headSpec != active && isPlaying &&
+            active.startUs > playheadUs &&
+            headPlayerIsPersistent && headPlayer != null && !headEffectsFallback
+        ) {
+            val outgoing = headPlayer!!
+            if (!HeadEffectsPolicy.retargetSinkClearToProceed(
+                    outgoing.playbackState, outgoing.playWhenReady,
+                    outgoing.currentPosition, headItemEndMs,
+                )
+            ) {
+                return // re-tried on the next sync tick
+            }
+        }
+
         headNeedsRebuild = false
 
         headSpec = active
@@ -1090,7 +1188,13 @@ class OverlayPreviewController(private val context: Context) {
             // v1.5.5: RETARGET the persistent slot — no new player, no new
             // TextureView, no new EGL context; the media3 playlist-mode
             // re-registration (see retargetHeadPlayer) is the whole cost.
-            retargetHeadPlayer(project, clip, active, textEffects, canvasPresentationInChain, file)
+            // v1.5.7: with the session-stable effect chain (below) and the
+            // pre-stop sink scrub, that re-registration no longer releases /
+            // recompiles the shader chain for a typical window at all.
+            retargetHeadPlayer(
+                project, clip, active, textEffects, canvasPresentationInChain, file,
+                nextWindowStartUs = nextWindowStartUs(specs, active, project),
+            )
             return
         }
 
@@ -1125,7 +1229,9 @@ class OverlayPreviewController(private val context: Context) {
         }
         player.setPlaybackSpeed(active.speed)
         player.volume = if (active.muted) 0f else active.volume.coerceIn(0f, 1f)
-        player.setMediaItem(headMediaItemFor(active, file), 0L)
+        player.setMediaItem(
+            headMediaItemFor(active, file, nextWindowStartUs(specs, active, project)), 0L,
+        )
         player.playWhenReady = false
         player.prepare()
         headPlayer = player
@@ -1135,6 +1241,9 @@ class OverlayPreviewController(private val context: Context) {
         // only builds the video sink when effects were set before the first
         // enable), so fallback sessions keep the cheap fresh mounts.
         headPlayerIsPersistent = headEffectsActive && !headEffectsFallback
+        // v1.5.7: a fresh persistent player starts its recycle budget at 0
+        // (recycles and legacy rebuilds both come through here).
+        headRetargetCount = 0
         host.addView(tv, 0)
     }
 
@@ -1154,6 +1263,34 @@ class OverlayPreviewController(private val context: Context) {
      * main thread. A re-prepare on the same player + TextureView is exactly
      * what reclipPipPlayer has done in production since v1.2.4.
      *
+     * v1.5.7: TWO hygiene layers make the swap safe against the v1.5.6
+     * field failure ("下一段素材直接出现然后静止", DIAG head firstframe
+     * +16474ms):
+     *
+     *  1. SINK SCRUB — the same-position seek BEFORE stop(). The seek lands
+     *     as a position reset on the playback thread
+     *     (MediaCodecVideoRenderer.onPositionReset → videoSink.flush(true) →
+     *     videoGraph.flush() → FinalShaderProgramWrapper.flush()), which
+     *     DROPS every in-flight frame queued anywhere in the graph and
+     *     re-arms input acceptance. Without it, a stop() with frames in
+     *     flight strands them against the fresh clock (position ~0) — the
+     *     release control refuses to render "future" frames, the EOS-gated
+     *     pending input-stream registration never configures, and the next
+     *     window's first-frame latency grows with every stranded frame until
+     *     a corrective seek happens to flush. The seek and the stop are both
+     *     playback-thread messages, so the flush is guaranteed to land before
+     *     the teardown — belt AND braces with the ENDED-gate in reconcileHead
+     *     (the gate covers playing premounts; the scrub covers everything,
+     *     including paused scrub retargets the gate deliberately lets run).
+     *
+     *  2. SESSION-STABLE EFFECT CHAIN (headEffectsChainFor below) — the list
+     *     handed to setVideoEffects stays VALUE-EQUAL across retargets for a
+     *     typical window, so the sink's early-equals return skips the stale-
+     *     format re-registration entirely and configure() skips the
+     *     release+recompile of the whole intermediate chain. Per retarget the
+     *     media3 machinery now does ONE stream registration with NO shader
+     *     rebuild, instead of two registrations each rebuilding it.
+     *
      * Speed is set UNCONDITIONALLY: unlike a fresh player (default 1), the
      * persistent one inherits the previous window's speed AND any steering
      * trim the clock policy left on it.
@@ -1165,8 +1302,14 @@ class OverlayPreviewController(private val context: Context) {
         textEffects: List<Effect>,
         canvasPresentationInChain: Boolean,
         file: File,
+        nextWindowStartUs: Long,
     ) {
         val player = headPlayer ?: return
+        // v1.5.7 SINK SCRUB: flush the graph's in-flight frames before the
+        // stop tears the renderer down (see the function doc). Harmless on a
+        // drained ENDED player (nothing queued) and on IDLE (nothing ever
+        // queued); the seek and stop serialize on the playback thread.
+        runCatching { player.seekTo(player.currentPosition) }
         val effects: List<Effect> =
             headEffectsChainFor(project, clip, active, textEffects, canvasPresentationInChain)
         runCatching { player.stop() }
@@ -1185,10 +1328,11 @@ class OverlayPreviewController(private val context: Context) {
         headEffectsActive = effects.isNotEmpty() && !headNeedsRebuild
         player.setPlaybackSpeed(active.speed)
         player.volume = if (active.muted) 0f else active.volume.coerceIn(0f, 1f)
-        player.setMediaItem(headMediaItemFor(active, file), 0L)
+        player.setMediaItem(headMediaItemFor(active, file, nextWindowStartUs), 0L)
         player.playWhenReady = false
         player.prepare()
-        diag("head retarget (persistent)")
+        headRetargetCount++
+        diag("head retarget #$headRetargetCount (persistent)")
     }
 
     /**
@@ -1240,37 +1384,91 @@ class OverlayPreviewController(private val context: Context) {
         // Look effects (rotate/flip, crop, grading, LUT, mosaic) — the same
         // list the composition's head item carries. Positioning is the
         // TextureView's job (canvas-fit of the content aspect).
+        // v1.5.7: MEMOIZED per (clipId, lookSignature) — media3's configure()
+        // compares effect lists by EQUALS and the media3 effect classes do
+        // not reliably implement it, so fresh instances would re-arm the
+        // per-retarget chain rebuild the stable chain exists to kill.
         val lookEffects: List<Effect> = if (headEffectsFallback) {
             emptyList()
         } else {
-            CompositionBuilder.clipLookEffects(clip, stripEffects = false)
+            memoizedHeadLookEffects(clip)
         }
         return buildList {
             addAll(lookEffects)
             if (canvasPresentationInChain) {
-                add(
-                    Presentation.createForWidthAndHeight(
-                        project.width, project.height, Presentation.LAYOUT_SCALE_TO_FIT,
-                    )
-                )
+                // v1.5.7: memoized — same value-stability reasoning as the
+                // look effects (constant per project dims).
+                add(headCanvasPresentationFor(project))
             }
             addAll(textEffects)
             // The transition shader, same chain tail as the export head item.
             // premultipliedAlpha = TRUE on the preview path only (v1.5.1 —
             // HWUI composites this view's SurfaceTexture premultiplied; the
             // EXPORT item keeps straight alpha for DefaultVideoCompositor).
+            // v1.5.7: SESSION-STABLE instance, mutated in place — see
+            // headTransitionEffect's doc and TransitionEffect's v1.5.7
+            // class-doc section (the list stays value-equal across retargets
+            // ⇒ no re-registration, no chain rebuild).
             if (!headEffectsFallback) {
-                add(
-                    TransitionEffect(
-                        active.type,
-                        (active.sourceOutUs - active.sourceInUs).coerceAtLeast(1L),
-                        -1L,
-                        premultipliedAlpha = true,
-                    )
-                )
+                add(stableHeadTransitionEffectFor(active))
             }
         }
     }
+
+    /**
+     * v1.5.7: the memoized look-effects list for [clip] (see
+     * [headLookMemo]). Keyed by clip id + lookSignature — the signature
+     * covers every field clipLookEffects reads, so a hit is provably the
+     * same look.
+     */
+    private fun memoizedHeadLookEffects(clip: Clip): List<Effect> {
+        val key = "${clip.id}:${clip.lookSignature()}"
+        headLookMemo[key]?.let { return it }
+        val built = CompositionBuilder.clipLookEffects(clip, stripEffects = false)
+        headLookMemo[key] = built
+        while (headLookMemo.size > 8) headLookMemo.remove(headLookMemo.keys.first())
+        return built
+    }
+
+    /** v1.5.7: the memoized canvas-fit Presentation (see [headCanvasPresentation]). */
+    private fun headCanvasPresentationFor(project: Project): Presentation =
+        headCanvasPresentation ?: Presentation.createForWidthAndHeight(
+            project.width, project.height, Presentation.LAYOUT_SCALE_TO_FIT,
+        ).also { headCanvasPresentation = it }
+
+    /**
+     * v1.5.7: the session-stable transition effect, re-pointed at [active]'s
+     * window (see [headTransitionEffect]'s doc). The mutation happens before
+     * the new item's media is even prepared, so no frame of the outgoing
+     * window can observe the new parameters.
+     */
+    private fun stableHeadTransitionEffectFor(active: CompositionBuilder.HeadOverlaySpec): TransitionEffect {
+        val spanUs = (active.sourceOutUs - active.sourceInUs).coerceAtLeast(1L)
+        val existing = headTransitionEffect
+        if (existing == null) {
+            val created = TransitionEffect(
+                active.type, spanUs, -1L,
+                premultipliedAlpha = true, sessionStable = true,
+            )
+            headTransitionEffect = created
+            return created
+        }
+        existing.updateWindow(active.type, spanUs, -1L)
+        return existing
+    }
+
+    /**
+     * v1.5.7: the timeline position the extended head item must NOT overrun
+     * (the next transition window's start; the timeline end when there is
+     * none) — see HeadEffectsPolicy.cappedTailExtensionTimelineUs.
+     */
+    private fun nextWindowStartUs(
+        specs: List<CompositionBuilder.HeadOverlaySpec>,
+        active: CompositionBuilder.HeadOverlaySpec,
+        project: Project,
+    ): Long =
+        specs.filter { it.startUs > active.startUs }.minByOrNull { it.startUs }?.startUs
+            ?: project.totalDurationUs
 
     /**
      * The head player's clipped media item for [active].
@@ -1283,10 +1481,32 @@ class OverlayPreviewController(private val context: Context) {
      * shader clamps its progress at p=1 to fully-opaque B, so frames past the
      * window render as plain B; the EXPORT head item keeps the exact window
      * (only this PREVIEW player's clipping is extended).
+     *
+     * v1.5.7: CAP — the extension is additionally clipped so the item ends
+     * before the NEXT transition window's start (minus settle slack), via
+     * [HeadEffectsPolicy.cappedTailExtensionTimelineUs]. An uncapped
+     * extension on short clips overran the next window, forcing premount
+     * retargets to stop the player MID-FLIGHT — the in-flight stranding the
+     * ENDED-gate and the pre-stop sink scrub now defend against (see
+     * retargetHeadPlayer's doc). The cap runs in TIMELINE domain (the
+     * extension's timeline length is speed-independent) and converts to
+     * source microseconds here.
      */
-    private fun headMediaItemFor(active: CompositionBuilder.HeadOverlaySpec, file: File): MediaItem {
-        val extensionUs = HeadEffectsPolicy.previewTailExtensionSourceUs(active.speed, headHoldTailUs)
+    private fun headMediaItemFor(
+        active: CompositionBuilder.HeadOverlaySpec,
+        file: File,
+        nextWindowStartUs: Long,
+    ): MediaItem {
+        val windowEndUs = active.startUs + active.durationUs
+        val desiredTimelineUs = headHoldTailUs + HeadEffectsPolicy.TAIL_MARGIN_US
+        val extTimelineUs = HeadEffectsPolicy.cappedTailExtensionTimelineUs(
+            desiredTimelineUs, windowEndUs, nextWindowStartUs,
+        )
+        val extensionUs = (extTimelineUs * active.speed).toLong().coerceAtLeast(0L)
         val clipEndUs = (active.sourceOutUs + extensionUs).coerceAtLeast(active.sourceInUs + 1L)
+        // v1.5.7: the item's clipped END (ms, player-position domain) anchors
+        // the ENDED-gate and the pre-stop scrub seek.
+        headItemEndMs = clipEndUs / 1000L
         return MediaItem.Builder()
             .setUri(Uri.fromFile(file))
             .setClippingConfiguration(
@@ -1699,6 +1919,12 @@ class OverlayPreviewController(private val context: Context) {
         // comes through here).
         headPlayerIsPersistent = false
         headAlphaAnimRunning = false
+        // v1.5.7: the mounted item's end anchor dies with the mount. The
+        // session-stable transition effect and the look/presentation memos
+        // are plain data and deliberately SURVIVE — the next player's first
+        // chain is value-stable from window one (see headTransitionEffect's
+        // doc).
+        headItemEndMs = 0L
     }
 
     // ------------------------------------------------------------------

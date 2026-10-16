@@ -65,22 +65,84 @@ import com.RooMCutNext.core.util.TransitionMath
  *    collapses into the same ghosted crossfade; only slide/spin betrayed any
  *    motion. Correct output: vec4(rgb·alpha, alpha). → premultipliedAlpha =
  *    true, set by OverlayPreviewController's mount.
+ *
+ * v1.5.7 — SESSION-STABLE PREVIEW VARIANT (the "越播越卡" churn fix).
+ * media3's DefaultVideoFrameProcessor decides whether a new input stream
+ * must REBUILD the effect chain with `activeEffects.equals(newEffects)`
+ * (source-verified 1.11.1), and PlaybackVideoGraphWrapper.InputVideoSink
+ * re-registers the stream on every UNEQUAL setVideoEffects call — each
+ * rebuild releases and recompiles every intermediate GlShaderProgram on the
+ * GL thread, and each registration can park the playback thread on the GL
+ * thread's completion. A fresh TransitionEffect per window (the v1.5.5-
+ * v1.5.6 shape) made every list UNEQUAL by construction, so every retarget
+ * paid the full storm — twice. The preview now mounts ONE session-stable
+ * instance ([sessionStable] = true) whose window parameters (style, fadeUs,
+ * globalStartUs) are MUTATED in place instead: those parameters are already
+ * per-frame UNIFORMS in [TransitionShaderProgram] (uStyle / uProgress — no
+ * compile-time branching exists), so mutation is purely data. [equals]
+ * between session-stable instances ignores the mutable parameters — the
+ * effect list stays value-equal across retargets, setVideoEffects becomes a
+ * no-op, and configure() keeps the compiled chain alive. EXPORT instances
+ * (sessionStable = false, the default) keep IDENTITY equals — the Transformer
+ * pipeline's behavior is byte-identical to v1.5.6.
  */
 class TransitionEffect(
     styleId: String,
-    private val fadeUs: Long,
-    private val globalStartUs: Long,
+    fadeUs: Long,
+    globalStartUs: Long,
     /** Emit premultiplied alpha for TextureView-style consumers; see the
      * class doc's v1.5.1 section. Export = false (compositor blends straight). */
     private val premultipliedAlpha: Boolean = false,
+    /** v1.5.7: session-stable preview variant — param-blind [equals], mutable
+     * window parameters read per frame by the shader program. See the class
+     * doc's v1.5.7 section. Export keeps the default (false). */
+    internal val sessionStable: Boolean = false,
 ) : GlEffect {
 
-    private val styleOrdinal: Int = TransitionStyle.fromId(styleId).ordinal
+    /** Per-frame-read window parameters (see the v1.5.7 class-doc section):
+     * @Volatile because the main thread mutates them at retarget while the GL
+     * thread reads them per draw — a mutation always precedes the new item's
+     * first frame, so no torn window can reach the screen (the outgoing item
+     * has already drained before the controller retargets). */
+    @Volatile internal var styleOrdinal: Int = TransitionStyle.fromId(styleId).ordinal
+        private set
+
+    @Volatile internal var fadeUs: Long = fadeUs
+        private set
+
+    @Volatile internal var globalStartUs: Long = globalStartUs
+        private set
+
+    /** v1.5.7: re-point the stable preview instance at a new window (see the
+     * class doc's v1.5.7 section). No-op relevant fields change only between
+     * windows — never while frames of the previous window are still flowing. */
+    fun updateWindow(styleId: String, fadeUs: Long, globalStartUs: Long) {
+        this.styleOrdinal = TransitionStyle.fromId(styleId).ordinal
+        this.fadeUs = fadeUs
+        this.globalStartUs = globalStartUs
+    }
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram =
-        TransitionShaderProgram(useHdr, styleOrdinal, fadeUs, globalStartUs, premultipliedAlpha)
+        TransitionShaderProgram(useHdr, this, premultipliedAlpha)
 
     override fun isNoOp(inputWidth: Int, inputHeight: Int): Boolean = fadeUs <= 0L
+
+    /** v1.5.7: session-stable instances are param-blind equal (the list-equality
+     * media3 compares must survive retarget mutations — see the class doc);
+     * every other pairing falls back to identity, which is the v1.5.6 export
+     * behavior unchanged. */
+    override fun equals(other: Any?): Boolean = when {
+        other !is TransitionEffect -> false
+        sessionStable && other.sessionStable ->
+            other.premultipliedAlpha == premultipliedAlpha
+        else -> this === other
+    }
+
+    override fun hashCode(): Int = if (sessionStable) {
+        31 * (if (premultipliedAlpha) 1 else 0) + 7
+    } else {
+        System.identityHashCode(this)
+    }
 }
 
 /**
@@ -92,12 +154,16 @@ class TransitionEffect(
  * (sample-UV transform + alpha/color) for that style. The final write honors
  * the consumer's alpha convention: straight (compositor blending) or
  * premultiplied (TextureView) — see [TransitionEffect]'s v1.5.1 section.
+ *
+ * v1.5.7: the program holds the EFFECT REFERENCE and reads the window
+ * parameters per frame — style, fadeUs and globalStartUs are uniforms
+ * (uStyle / uProgress), so a session-stable effect mutated between windows
+ * needs no program rebuild. The export path (immutable effects) is
+ * unaffected: the reads simply never change.
  */
 internal class TransitionShaderProgram(
     useHdr: Boolean,
-    private val styleOrdinal: Int,
-    private val fadeUs: Long,
-    private val globalStartUs: Long,
+    private val effect: TransitionEffect,
     premultipliedAlpha: Boolean,
 ) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity = */ 1) {
 
@@ -109,7 +175,7 @@ internal class TransitionShaderProgram(
             val identity = GlUtil.create4x4IdentityMatrix()
             setFloatsUniform("uTransformationMatrix", identity)
             setFloatsUniform("uTexTransformationMatrix", identity)
-            setIntUniform("uStyle", styleOrdinal)
+            setIntUniform("uStyle", effect.styleOrdinal)
             setFloatUniform("uProgress", 1f)
             setFloatUniform("uAspect", 1f)
             setIntUniform("uPremult", premultInt)
@@ -128,6 +194,12 @@ internal class TransitionShaderProgram(
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
         try {
+            // v1.5.7: per-frame reads of the (possibly session-stable) effect's
+            // CURRENT window parameters — style and progress are uniforms, so
+            // a mutated window needs no program rebuild (see the class doc).
+            val styleOrdinal = effect.styleOrdinal
+            val fadeUs = effect.fadeUs
+            val globalStartUs = effect.globalStartUs
             glProgram.use()
             glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnit = */ 0)
             glProgram.setFloatUniform(
