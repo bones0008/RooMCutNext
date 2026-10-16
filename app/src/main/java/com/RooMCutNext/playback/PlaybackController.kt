@@ -92,6 +92,21 @@ class PlaybackController(
     var onEnded: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
 
+    /**
+     * v1.5.9: fires on every [Player.Listener.onRenderedFirstFrame] — the body
+     * renders a "first frame" after each POSITION DISCONTINUITY and after
+     * every ITEM-BOUNDARY crossing (the renderer marks the new period's first
+     * output frame; media3 1.11.1 source-verified through
+     * MediaCodecVideoRenderer.onProcessedStreamChange → sink
+     * renderFrame(isFirstFrame) → CompositionPlayer.onFirstFrameRendered →
+     * listener). OverlayPreviewController consumes it to gate the transition
+     * tail's reveal on the body actually DISPLAYING the incoming clip: during
+     * the crossing the codec re-init keeps the OUTGOING clip's last frame on
+     * the surface while the reported position already advances — the residual
+     * end-of-transition jump the position-scheduled tail could not mask.
+     */
+    var onBodyFirstFrame: (() -> Unit)? = null
+
     /** Fired once, right before the automatic compatibility-mode retry. */
     var onDegraded: (() -> Unit)? = null
 
@@ -180,6 +195,7 @@ class PlaybackController(
         override fun onRenderedFirstFrame() {
             firstFrameCount++
             diag("FIRSTFRAME #$firstFrameCount ✓")
+            onBodyFirstFrame?.invoke()
         }
 
         override fun onPlayerError(error: PlaybackException) {

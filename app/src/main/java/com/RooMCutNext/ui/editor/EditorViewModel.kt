@@ -237,6 +237,12 @@ class EditorViewModel(
         // first-frame milestones, effects→plain fallback) join the same DIAG
         // stream — silent overlay failures were undiagnosable in the field.
         overlays.onDiag = { line -> appendDiag(line) }
+        // v1.5.9: body first-frame events gate the transition tail's reveal —
+        // the body's onRenderedFirstFrame fires per ITEM-BOUNDARY crossing,
+        // telling the overlay engine the exact moment the incoming clip is
+        // actually DISPLAYING (see OverlayPreviewController.noteBodyFirstFrame
+        // and HeadWindowMath.gatedTailAlphaAt).
+        playback.onBodyFirstFrame = { overlays.noteBodyFirstFrame() }
         playback.onDegraded = {
             _state.update {
                 it.copy(

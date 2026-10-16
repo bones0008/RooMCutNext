@@ -297,6 +297,12 @@ class OverlayPreviewController(private val context: Context) {
      * no shear (the offset stays at the body's render lag), so the length is
      * pure coverage: 600ms hides body crossings that exceed 400ms (the field
      * report this version fixes — the boundary reveal read as "跳帧").
+     *
+     * v1.5.9: this constant is now the WAIT CAP of the body-live gate
+     * (HeadWindowMath.gatedTailAlphaAt) — the mask holds opaque for however
+     * long the crossing ACTUALLY takes (≤ this cap), then ramps over
+     * [HeadWindowMath.TAIL_REVEAL_US]; the extension formula below still
+     * reserves exactly cap + margin, which equals cap + reveal.
      */
     private val headHoldTailUs = 600_000L
 
@@ -518,6 +524,45 @@ class OverlayPreviewController(private val context: Context) {
     private var headFurthestPlayheadUs = Long.MIN_VALUE
 
     /**
+     * v1.5.9: BODY-LIVE GATE — the tail's reveal is gated on the body
+     * CompositionPlayer actually DISPLAYING the incoming clip's first frame
+     * (fed by [noteBodyFirstFrame] ← PlaybackController.onBodyFirstFrame ←
+     * Player.Listener.onRenderedFirstFrame, which fires per item-boundary
+     * crossing — media3 1.11.1 source-verified).
+     *
+     * WHY (the residual end-of-transition 跳帧 on EVERY pass, first included):
+     * the tail's fade used to be a pure POSITION schedule, but the body's
+     * surface keeps the OUTGOING clip's last frame through the crossing (codec
+     * re-init, commonly 100-400ms) while the REPORTED position — and with it
+     * the tail alpha — can advance seamlessly. The head faded live-B over a
+     * stale-A surface: stale content bled through as alpha dropped, and the
+     * body's first frame of B popped in mid-fade. The gate holds the mask
+     * FULLY OPAQUE until "body live", then ramps over
+     * [HeadWindowMath.TAIL_REVEAL_US] — always live-B over live-B.
+     *
+     * Latch lifecycle (re-armed in the mount flow, on window re-entry, and by
+     * releaseHeadPlayer; deliberately NOT on a mid-tail pause/resume — the
+     * tail is position-domain and pause-resumable by design):
+     *  - [bodyFirstFramePending]: set by the event callback, consumed by the
+     *    tail branch on the next sync tick (≤33ms later), cleared while
+     *    in-window so pre-window events (seeks, initial renders) never count;
+     *  - [tailBodyLiveLocalUs]: the sync tick's localUs where body-live was
+     *    observed — the reveal anchor; null while still waiting;
+     *  - [tailTimeoutLogged]: one-shot diag for the timeout path.
+     */
+    private var bodyFirstFramePending = false
+    private var tailBodyLiveLocalUs: Long? = null
+    private var tailTimeoutLogged = false
+
+    /**
+     * v1.5.9: true while the current sync tick sits inside the mounted
+     * window's window-or-tail cycle — edge-detects cycle re-entry for the
+     * body-live gate's re-arm (only when the entry is IN-WINDOW: a mid-tail
+     * resume keeps its latches, see the gate's doc).
+     */
+    private var headCycleActive = false
+
+    /**
      * v1.5.7: look-effects memo ("clipId:lookSignature" → the built Effect
      * instances). clipLookEffects() builds FRESH instances per call and the
      * media3 effect classes do not reliably implement equals — a new list is
@@ -690,6 +735,18 @@ class OverlayPreviewController(private val context: Context) {
         driveHead(playheadUs, isPlaying)
 
         layoutOverlays()
+    }
+
+    /**
+     * v1.5.9: the body CompositionPlayer just rendered a first frame — after
+     * a seek, a fresh prepare, or (the case that matters) an ITEM-BOUNDARY
+     * crossing: the incoming clip's first output frame just hit the surface.
+     * Latches the pending flag the tail branch of driveHead consumes to
+     * anchor its reveal ramp. Called on the main thread by the ViewModel
+     * wiring; the sync tick picks it up within one poll (~33ms).
+     */
+    fun noteBodyFirstFrame() {
+        bodyFirstFramePending = true
     }
 
     // ------------------------------------------------------------------
@@ -1034,7 +1091,8 @@ class OverlayPreviewController(private val context: Context) {
                 val mounted = headSpec
                 val inTailNow = mounted != null && isPlaying &&
                     HeadWindowMath.inTail(
-                        playheadUs - mounted.startUs, mounted.durationUs, headHoldTailUs, /* isPlaying = */ true,
+                        playheadUs - mounted.startUs, mounted.durationUs,
+                        HeadWindowMath.tailSpanUs(headHoldTailUs), /* isPlaying = */ true,
                     )
                 HeadEffectsPolicy.premountSpec(specs, playheadUs, isPlaying, inTailNow)
             }
@@ -1050,7 +1108,8 @@ class OverlayPreviewController(private val context: Context) {
             // hides via the path below.
             val mounted = headSpec
             if (mounted != null && playheadUs >= mounted.startUs + mounted.durationUs &&
-                playheadUs < mounted.startUs + mounted.durationUs + headHoldTailUs
+                playheadUs < mounted.startUs + mounted.durationUs +
+                HeadWindowMath.tailSpanUs(headHoldTailUs)
             ) {
                 return
             }
@@ -1181,6 +1240,12 @@ class OverlayPreviewController(private val context: Context) {
         // replay cross-back above can now only observe crossings this
         // mount itself has played through.
         headFurthestPlayheadUs = playheadUs
+        // v1.5.9: body-live gate state dies with the mount (a new window is a
+        // new boundary crossing to wait out).
+        bodyFirstFramePending = false
+        tailBodyLiveLocalUs = null
+        tailTimeoutLogged = false
+        headCycleActive = false
 
         if (asset.isImage) {
             // Image head: a fading still, canvas-fitted. The video slot (any
@@ -1715,10 +1780,35 @@ class OverlayPreviewController(private val context: Context) {
         val localUs = playheadUs - spec.startUs
         val inWindow = localUs in 0 until spec.durationUs
         // v1.2.8: forward fade-out tail (playing only) — see HeadWindowMath.
-        val inTail = HeadWindowMath.inTail(localUs, spec.durationUs, headHoldTailUs, isPlaying)
+        // v1.5.9: the span now extends past the wait cap by the reveal ramp so
+        // a late body-live never gets its head yanked mid-fade.
+        val inTail = HeadWindowMath.inTail(
+            localUs, spec.durationUs, HeadWindowMath.tailSpanUs(headHoldTailUs), isPlaying,
+        )
         // Alpha ramp 0→1 across the window — the crossfade itself.
         val ramp = if (spec.durationUs <= 0L) 1f
         else (localUs.toFloat() / spec.durationUs).coerceIn(0f, 1f)
+
+        // v1.5.9: body-live gate cycle bookkeeping. A cycle re-entry THROUGH
+        // THE WINDOW re-arms the gate (scrub back into the window and forward
+        // again = a fresh pass over the same boundary). A MID-TAIL resume
+        // deliberately keeps the latches: the tail is position-domain and
+        // pause-resumable — if the pause froze an in-progress crossing it
+        // completes (and fires) on resume, and if the crossing was already
+        // done the anchor survives so the reveal continues where it stood.
+        val cycleActive = inWindow || inTail
+        if (cycleActive && !headCycleActive && inWindow) {
+            bodyFirstFramePending = false
+            tailBodyLiveLocalUs = null
+            tailTimeoutLogged = false
+        }
+        headCycleActive = cycleActive
+        if (inWindow) {
+            // Events that fire in-window (a seek's re-render, the initial
+            // prepare) belong to the PREVIOUS boundary — never count them as
+            // live evidence for the upcoming one.
+            bodyFirstFramePending = false
+        }
 
         if (headIsImage) {
             headImageView?.let { iv ->
@@ -1726,8 +1816,14 @@ class OverlayPreviewController(private val context: Context) {
                 // v1.5.5: the still's ramp and tail smooth at vsync rate too
                 // (the 33ms staircase was just as visible on a fading still);
                 // out-of-window targets snap for sample-accurate scrub.
+                // v1.5.9: the tail follows the BODY-LIVE-GATED schedule (the
+                // body crosses a real decoder boundary under an image head
+                // too — the still is content-constant so the gate's wait is
+                // the only thing keeping the stale outgoing frame covered).
                 val target = if (inTail) {
-                    HeadWindowMath.alphaAt(localUs, spec.durationUs, headHoldTailUs, isPlaying)
+                    HeadWindowMath.gatedTailAlphaAt(
+                        localUs, spec.durationUs, headHoldTailUs, tailBodyLiveLocalUs,
+                    )
                 } else if (inWindow) ramp else 0f
                 setHeadViewAlpha(target, smooth = target > 0f)
             }
@@ -1776,8 +1872,41 @@ class OverlayPreviewController(private val context: Context) {
             // end-of-transition "跳帧" the v1.5.5 smoother could not remove:
             // smoothing WHEN the alpha steps fired cannot fix WHAT the two
             // layers' content offset was doing underneath).
-            val tailAlpha = HeadWindowMath.alphaAt(localUs, spec.durationUs, headHoldTailUs, isPlaying)
+            //
+            // v1.5.9: BODY-LIVE GATE. The v1.5.6 live tail fixed WHAT the head
+            // showed but the reveal still ran on the position clock — while
+            // the body's surface held the OUTGOING clip's last frame through
+            // the decoder re-init, the fading head blended live-B over stale-A
+            // and the body's first frame popped in mid-fade (the residual
+            // every-pass 跳帧). The reveal now WAITS, fully opaque, for the
+            // body's onRenderedFirstFrame (noteBodyFirstFrame latches the
+            // pending flag), then ramps over TAIL_REVEAL_US — live-B over
+            // live-B, with the anchor logged so the DIAG overlay reads the
+            // crossing's true cost ("tail body-live +Nms"). Timeout: if the
+            // body stays silent past the wait cap the anchor falls back to the
+            // cap — a graceful reveal instead of covering a broken body
+            // forever (one-shot diag so it can be told apart in the field).
+            if (tailBodyLiveLocalUs == null) {
+                if (bodyFirstFramePending) {
+                    tailBodyLiveLocalUs = localUs
+                    diag("tail body-live +${(localUs - spec.durationUs) / 1000}ms")
+                } else if (!tailTimeoutLogged && localUs >= spec.durationUs + headHoldTailUs) {
+                    tailTimeoutLogged = true
+                    diag("tail body-live TIMEOUT >${headHoldTailUs / 1000}ms")
+                }
+            }
+            val tailAlpha = HeadWindowMath.gatedTailAlphaAt(
+                localUs, spec.durationUs, headHoldTailUs, tailBodyLiveLocalUs,
+            )
             applyHeadAlphaForTick(tailAlpha, smooth = true)
+            // v1.5.9: a mid-tail PAUSE froze this player (the out-of-tail hide
+            // path pauses it); a resume must coast it again or the gate would
+            // hold a FROZEN B frame opaque through the whole wait. ENDED is
+            // left alone — an exhausted (capped-extension) item has nothing
+            // left to coast; that degradation is documented in headMediaItemFor.
+            if (isPlaying && !player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
+                player.playWhenReady = true
+            }
             // v1.5.6: HARD-MUTE the head's audio at the boundary. The body's
             // composition takes over clip B's own audio at the window end at
             // full volume; the head keeps a second copy that lags it by the
@@ -1976,6 +2105,11 @@ class OverlayPreviewController(private val context: Context) {
         headItemEndMs = 0L
         // v1.5.8: the released mount's high-water mark dies with it.
         headFurthestPlayheadUs = Long.MIN_VALUE
+        // v1.5.9: the body-live gate dies with the mount.
+        bodyFirstFramePending = false
+        tailBodyLiveLocalUs = null
+        tailTimeoutLogged = false
+        headCycleActive = false
     }
 
     // ------------------------------------------------------------------
