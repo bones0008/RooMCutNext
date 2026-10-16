@@ -9,12 +9,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -28,6 +31,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
@@ -70,16 +75,23 @@ import kotlin.math.sqrt
 // Layout constants + drag model
 // ---------------------------------------------------------------------------
 
-private const val RULER_HEIGHT_DP = 26f
-private const val TRACK_HEIGHT_DP = 56f
-private const val TEXT_LANE_HEIGHT_DP = 24f
-private const val AUDIO_LANE_HEIGHT_DP = 30f
-private const val PIP_LANE_HEIGHT_DP = 30f
-private const val TRACK_GAP_DP = 6f
+// v1.5.4: lane/track/ruler dimensions moved to TimelineVerticalMath — the
+// single source of truth shared with the vertical-layout unit tests. They
+// are referenced through the object below; values are UNCHANGED from
+// v1.5.3 so existing projects render with identical lane sizes.
 private const val TRIM_HIT_PX = 26f
 private const val BADGE_TEXT_DP = 8.5f
 /** Window in which two taps on the same text clip count as a double tap. */
 private const val TEXT_DOUBLE_TAP_MS = 400L
+
+/** v1.5.4: persists the vertical scroll across tool-panel swaps (the
+ *  TimelineView leaves composition while a panel owns its area) and across
+ *  process recreation. The draw pass re-clamps it against the current
+ *  content height, so a restored value is always legal. */
+private val ScrollYSaver = Saver<MutableFloatState, Float>(
+    save = { it.floatValue },
+    restore = { mutableFloatStateOf(it) },
+)
 
 /** One clip's screen layout. [gapLeft]/[gapWidth] describe the black hole in
  *  front of the clip (v1.0.8 gaps), zero-width when the clip is tight. */
@@ -145,6 +157,14 @@ private class GeometryHolder {
     var audioRegionTop: Float = 0f
     var audioRegionBottom: Float = 0f
     var playheadBottom: Float = 0f
+    // v1.5.4: vertical content scroll (px). Viewport Y = content Y - scrollY;
+    // hit-testing adds it back. NEGATIVE while the stack is bottom-anchored
+    // with room to spare (no overflow). Written by the draw pass
+    // (self-healing anchor — see TimelineVerticalMath.anchorScrollY), read
+    // by hitTest and the gesture loop.
+    var scrollY: Float = 0f
+    /** Max legal vertical scroll (px); > 0 only when the stack overflows. */
+    var maxScrollY: Float = 0f
     var textLaneStride: Float = 0f
     var pipLaneStride: Float = 0f
     var audioLaneStride: Float = 0f
@@ -181,6 +201,9 @@ private sealed class DragMode {
     /** Drag the timeline content under the fixed playhead (scrub). */
     data object Scrub : DragMode()
     data object Pinch : DragMode()
+    /** v1.5.4: vertical pan — scrolls the lane stack when it overflows the
+     *  viewport (finger up reveals lower content, standard list semantics). */
+    data object VScroll : DragMode()
     data class Trim(val clipId: String, val isLeft: Boolean) : DragMode()
     data class ClipMove(val clipId: String, val fromIndex: Int) : DragMode()
     data class TextMove(val textId: String) : DragMode()
@@ -227,6 +250,16 @@ fun TimelineView(
     val filesLabel = stringResource(R.string.timeline_import_files)
 
     val scrollXState = remember { mutableFloatStateOf(0f) }
+    // v1.5.4: vertical content scroll in px. Semantics live in
+    // TimelineVerticalMath: the lane stack is BOTTOM-ANCHORED (video/audio
+    // tracks pinned at the viewport bottom — adding text layers grows the
+    // stack upward and never pushes the video track off screen); when the
+    // stack is taller than the sub-ruler viewport it becomes scrollable.
+    // rememberSaveable so the position survives tool-panel swaps (the
+    // timeline leaves composition while a panel is open) — the draw pass
+    // re-clamps it on return.
+    val scrollYState = rememberSaveable(saver = ScrollYSaver) { mutableFloatStateOf(0f) }
+    val viewportHState = remember { mutableFloatStateOf(0f) }
     val dragState = remember { mutableStateOf<DragMode?>(null) }
     /** True while a Scrub drag owns the scroll (auto-sync disabled). */
     val scrubbingActive = remember { mutableStateOf(false) }
@@ -318,6 +351,64 @@ fun TimelineView(
         }
     }
 
+    // ---------------- v1.5.4: auto-reveal the selection vertically ----------------
+    // When a lane (or the video track) is selected while the stack overflows
+    // the viewport, scroll minimally so it becomes fully visible. This is
+    // what keeps "too many layers" usable: adding a text layer always brings
+    // its lane into view, and the bottom-anchored video/audio tracks are a
+    // flick away. No-op when everything fits (the draw pass owns anchoring).
+    LaunchedEffect(
+        snapshot?.selectedTextId,
+        snapshot?.selectedPipId,
+        snapshot?.selectedAudioId,
+        snapshot?.selectedClipId,
+        snapshot?.project?.texts?.size,
+        snapshot?.project?.pips?.size,
+        snapshot?.project?.audios?.size,
+        viewportHState.floatValue,
+        dp,
+    ) {
+        val snap = snapshot ?: return@LaunchedEffect
+        if (!snap.project.hasContent) return@LaunchedEffect
+        val viewportHdp = viewportHState.floatValue / dp
+        if (viewportHdp <= 0f) return@LaunchedEffect
+        val textLanes = TimelineOps.laneIndexes(snap.project.texts.map { it.startUs to it.endUs })
+        val textLaneCount = (textLanes.maxOrNull() ?: -1) + 1
+        val pipLanes = TimelineOps.laneIndexes(snap.project.pips.map { it.startUs to it.endUs })
+        val pipLaneCount = (pipLanes.maxOrNull() ?: -1) + 1
+        val audioLanes = TimelineOps.laneIndexes(snap.project.audios.map { it.startUs to it.endUs })
+        val audioLaneCount = (audioLanes.maxOrNull() ?: -1) + 1
+        val contentHdp = TimelineVerticalMath.contentHeightDp(textLaneCount, pipLaneCount, audioLaneCount)
+        if (contentHdp <= viewportHdp) return@LaunchedEffect // everything visible
+
+        var targetTop = -1f
+        var targetBottom = -1f
+        val selTextIdx = snap.project.texts.indexOfFirst { it.id == snap.selectedTextId }
+        if (snap.selectedTextId != null && selTextIdx >= 0) {
+            targetTop = TimelineVerticalMath.textLaneTopDp(textLanes[selTextIdx], textLaneCount)
+            targetBottom = targetTop + TimelineVerticalMath.TEXT_LANE_HEIGHT_DP
+        } else {
+            val selPipIdx = snap.project.pips.indexOfFirst { it.id == snap.selectedPipId }
+            if (snap.selectedPipId != null && selPipIdx >= 0) {
+                targetTop = TimelineVerticalMath.pipLaneTopDp(pipLanes[selPipIdx], textLaneCount, pipLaneCount)
+                targetBottom = targetTop + TimelineVerticalMath.PIP_LANE_HEIGHT_DP
+            } else {
+                val selAudioIdx = snap.project.audios.indexOfFirst { it.id == snap.selectedAudioId }
+                if (snap.selectedAudioId != null && selAudioIdx >= 0) {
+                    targetTop = TimelineVerticalMath.audioLaneTopDp(audioLanes[selAudioIdx], textLaneCount, pipLaneCount, audioLaneCount)
+                    targetBottom = targetTop + TimelineVerticalMath.AUDIO_LANE_HEIGHT_DP
+                } else if (snap.selectedClipId != null && snap.project.clips.isNotEmpty()) {
+                    targetTop = TimelineVerticalMath.trackTopDp(textLaneCount, pipLaneCount)
+                    targetBottom = TimelineVerticalMath.trackBottomDp(textLaneCount, pipLaneCount)
+                }
+            }
+        }
+        if (targetTop < 0f) return@LaunchedEffect
+        val anchored = TimelineVerticalMath.anchorScrollY(scrollYState.floatValue / dp, contentHdp, viewportHdp)
+        val revealed = TimelineVerticalMath.revealScrollY(anchored, targetTop, targetBottom, contentHdp, viewportHdp)
+        if (revealed != anchored) scrollYState.floatValue = revealed * dp
+    }
+
     // ---------------- hit testing ----------------
     fun hitTest(x: Float, y: Float): DragMode {
         val g = geom
@@ -331,11 +422,17 @@ fun TimelineView(
             return DragMode.TapGallery
         }
         if (y <= g.rulerBottom) return DragMode.Scrub
+        // v1.5.4: content regions live in content space — add the vertical
+        // scroll back to obtain the content-space Y. (The ruler is pinned to
+        // the viewport and never scrolls.) While the stack is bottom-anchored
+        // with room to spare, scrollY is negative and the dead space above
+        // the stack hits no region → Scrub, exactly like the old layout.
+        val cy = y + g.scrollY
         // v1.3.1: track mute chips win over everything in their rect
         // (they sit over blank pre-origin space anyway).
-        g.videoMuteRect?.let { if (it.contains(Offset(x, y))) return DragMode.TapVideoMute }
-        g.pipMuteRect?.let { if (it.contains(Offset(x, y))) return DragMode.TapPipMute }
-        if (g.pipRegionBottom > g.pipRegionTop && y in g.pipRegionTop..g.pipRegionBottom) {
+        g.videoMuteRect?.let { if (it.contains(Offset(x, cy))) return DragMode.TapVideoMute }
+        g.pipMuteRect?.let { if (it.contains(Offset(x, cy))) return DragMode.TapPipMute }
+        if (g.pipRegionBottom > g.pipRegionTop && cy in g.pipRegionTop..g.pipRegionBottom) {
             val selectedPip = snapshot?.selectedPipId
             if (selectedPip != null) {
                 val sel = g.pips.firstOrNull { it.pip.id == selectedPip }
@@ -344,14 +441,14 @@ fun TimelineView(
                     if (abs(x - (sel.left + sel.width)) <= TRIM_HIT_PX) return DragMode.PipTrim(selectedPip, false)
                 }
             }
-            val laneIdx = ((y - g.pipRegionTop) / g.pipLaneStride).toInt()
+            val laneIdx = ((cy - g.pipRegionTop) / g.pipLaneStride).toInt()
             val hit = g.pips.firstOrNull {
                 x >= it.left && x <= it.left + it.width && it.lane == laneIdx
             }
             if (hit != null) return DragMode.PipMove(hit.pip.id)
             return DragMode.Scrub
         }
-        if (y in g.trackTop..g.trackBottom) {
+        if (cy in g.trackTop..g.trackBottom) {
             // Empty video track (text/audio-only project) behaves like blank
             // space: tap deselects, press-and-drag scrubs.
             if (!g.hasClips) return DragMode.Scrub
@@ -367,7 +464,7 @@ fun TimelineView(
             if (hit != null) return DragMode.ClipMove(hit.clip.id, hit.index)
             return DragMode.Scrub
         }
-        if (g.textRegionBottom > g.textRegionTop && y in g.textRegionTop..g.textRegionBottom) {
+        if (g.textRegionBottom > g.textRegionTop && cy in g.textRegionTop..g.textRegionBottom) {
             val selectedText = snapshot?.selectedTextId
             if (selectedText != null) {
                 val sel = g.texts.firstOrNull { it.item.id == selectedText }
@@ -376,14 +473,14 @@ fun TimelineView(
                     if (abs(x - (sel.left + sel.width)) <= TRIM_HIT_PX) return DragMode.TextTrim(selectedText, false)
                 }
             }
-            val laneIdx = ((y - g.textRegionTop) / g.textLaneStride).toInt()
+            val laneIdx = ((cy - g.textRegionTop) / g.textLaneStride).toInt()
             val hit = g.texts.firstOrNull {
                 x >= it.left && x <= it.left + it.width && it.lane == laneIdx
             }
             if (hit != null) return DragMode.TextMove(hit.item.id)
             return DragMode.Scrub
         }
-        if (g.audioRegionBottom > g.audioRegionTop && y in g.audioRegionTop..g.audioRegionBottom) {
+        if (g.audioRegionBottom > g.audioRegionTop && cy in g.audioRegionTop..g.audioRegionBottom) {
             val selectedAudio = snapshot?.selectedAudioId
             if (selectedAudio != null) {
                 val sel = g.audios.firstOrNull { it.clip.id == selectedAudio }
@@ -392,7 +489,7 @@ fun TimelineView(
                     if (abs(x - (sel.left + sel.width)) <= TRIM_HIT_PX) return DragMode.AudioTrim(selectedAudio, false)
                 }
             }
-            val laneIdx = ((y - g.audioRegionTop) / g.audioLaneStride).toInt()
+            val laneIdx = ((cy - g.audioRegionTop) / g.audioLaneStride).toInt()
             val hit = g.audios.firstOrNull {
                 x >= it.left && x <= it.left + it.width && it.lane == laneIdx
             }
@@ -428,9 +525,18 @@ fun TimelineView(
         if (mode is DragMode.ClipMove) fingerX.floatValue = x
     }
 
-    fun onDragMove(mode: DragMode, dx: Float, x: Float) {
+    fun onDragMove(mode: DragMode, dx: Float, dy: Float, x: Float) {
         val v = currentVm
         when (mode) {
+            is DragMode.VScroll -> {
+                // Finger up (dy < 0) increases the scroll and reveals LOWER
+                // content; finger down scrolls back up toward the text lanes.
+                // Clamped every event so a mid-gesture geometry change
+                // (panel swap, resize) can never strand the scroll outside
+                // the legal range.
+                scrollYState.floatValue =
+                    (scrollYState.floatValue - dy).coerceIn(0f, geom.maxScrollY)
+            }
             is DragMode.Scrub -> {
                 // Content follows the finger; the fixed playhead scrubs over it.
                 val centerX = playheadScreenX()
@@ -591,6 +697,9 @@ fun TimelineView(
                 v.selectPip(mode.pipId)
             }
             is DragMode.Pinch -> Unit
+            // A vertical scroll always registers as a drag before release,
+            // so it can never arrive here — listed for exhaustiveness.
+            is DragMode.VScroll -> Unit
         }
     }
 
@@ -638,6 +747,7 @@ fun TimelineView(
                 geom.viewportW = size.width.toFloat()
                 geom.viewportH = size.height.toFloat()
                 viewportWState.floatValue = size.width.toFloat()
+                viewportHState.floatValue = size.height.toFloat()
                 currentVm.viewportWidthPx = size.width
             }
             .pointerInput(Unit) {
@@ -647,7 +757,9 @@ fun TimelineView(
                     var mode = hitTest(down.position.x, down.position.y)
                     var dragStarted = false
                     var lastX = down.position.x
+                    var lastY = down.position.y
                     var accumDx = 0f
+                    var accumDy = 0f
                     var pinchSpan = 0f
 
                     while (true) {
@@ -687,22 +799,42 @@ fun TimelineView(
                             mode = DragMode.Scrub
                             dragStarted = false
                             lastX = pressed[0].position.x
+                            lastY = pressed[0].position.y
                             accumDx = 0f
+                            accumDy = 0f
                         }
 
                         val change = pressed[0]
                         val x = change.position.x
+                        val y = change.position.y
                         val dx = x - lastX
+                        val dy = y - lastY
                         lastX = x
+                        lastY = y
                         accumDx += dx
+                        accumDy += dy
 
-                        if (!dragStarted && abs(accumDx) > touchSlop) {
+                        if (!dragStarted && (abs(accumDx) > touchSlop || abs(accumDy) > touchSlop)) {
+                            // v1.5.4: when the lane stack overflows the
+                            // viewport, a predominantly VERTICAL pan takes over
+                            // and scrolls the stack (finger up reveals lower
+                            // content — standard list semantics). Horizontal
+                            // pans keep the pre-existing behavior (scrub /
+                            // move / trim) for every mode, and when nothing
+                            // overflows the gesture model is bit-for-bit the
+                            // old one: the vertical branch simply cannot fire.
+                            if (mode != DragMode.Pinch &&
+                                geom.maxScrollY > 0f &&
+                                abs(accumDy) > abs(accumDx)
+                            ) {
+                                mode = DragMode.VScroll
+                            }
                             dragStarted = true
                             dragState.value = mode
                             onDragStart(mode, x)
                         }
                         if (dragStarted) {
-                            onDragMove(mode, dx, x)
+                            onDragMove(mode, dx, dy, x)
                         }
                         change.consume()
                     }
@@ -749,39 +881,42 @@ fun TimelineView(
             // lanes between text and video (closer to the picture they
             // overlay), audio lanes below it. Regions are disjoint;
             // zero-height when unused.
-            g.rulerBottom = RULER_HEIGHT_DP * dp
-            g.textLaneStride = TEXT_LANE_HEIGHT_DP * dp
-            g.pipLaneStride = PIP_LANE_HEIGHT_DP * dp
-            g.audioLaneStride = AUDIO_LANE_HEIGHT_DP * dp
-            var yCursor = g.rulerBottom
-            if (textLaneCount > 0) {
-                g.textRegionTop = yCursor + TRACK_GAP_DP * dp
-                g.textRegionBottom = g.textRegionTop + textLaneCount * g.textLaneStride
-                yCursor = g.textRegionBottom
-            } else {
-                g.textRegionTop = 0f
-                g.textRegionBottom = 0f
+            //
+            // v1.5.4: the geometry now comes from TimelineVerticalMath (the
+            // same dp-domain formulas the unit tests pin), and the stack is
+            // BOTTOM-ANCHORED — the whole content is translated vertically by
+            // -scrollY so the audio/video tracks sit at the viewport bottom
+            // no matter how many text lanes exist. Adding text layers grows
+            // the stack UPWARD (the video track never moves); when the stack
+            // is taller than the sub-ruler viewport it scrolls vertically.
+            val m = TimelineVerticalMath
+            g.rulerBottom = m.RULER_HEIGHT_DP * dp
+            g.textLaneStride = m.TEXT_LANE_HEIGHT_DP * dp
+            g.pipLaneStride = m.PIP_LANE_HEIGHT_DP * dp
+            g.audioLaneStride = m.AUDIO_LANE_HEIGHT_DP * dp
+            g.textRegionTop = m.textRegionTopDp(textLaneCount) * dp
+            g.textRegionBottom = m.textRegionBottomDp(textLaneCount) * dp
+            g.pipRegionTop = m.pipRegionTopDp(textLaneCount, pipLaneCount) * dp
+            g.pipRegionBottom = m.pipRegionBottomDp(textLaneCount, pipLaneCount) * dp
+            g.trackTop = m.trackTopDp(textLaneCount, pipLaneCount) * dp
+            g.trackBottom = m.trackBottomDp(textLaneCount, pipLaneCount) * dp
+            g.audioRegionTop = m.audioRegionTopDp(textLaneCount, pipLaneCount, audioLaneCount) * dp
+            g.audioRegionBottom = m.audioRegionBottomDp(textLaneCount, pipLaneCount, audioLaneCount) * dp
+            g.playheadBottom = g.audioRegionBottom
+
+            // Self-healing vertical anchor: re-clamp the scroll whenever the
+            // content or viewport height changed (lane added/removed, panel
+            // swap, resize, first layout). Converges in one frame — the
+            // target is a pure function of inputs that do not change on the
+            // redraw it triggers.
+            val contentHdp = m.contentHeightDp(textLaneCount, pipLaneCount, audioLaneCount)
+            val viewportHdp = g.viewportH / dp
+            val targetScrollDp = m.anchorScrollY(scrollYState.floatValue / dp, contentHdp, viewportHdp)
+            if (scrollYState.floatValue != targetScrollDp * dp) {
+                scrollYState.floatValue = targetScrollDp * dp
             }
-            if (pipLaneCount > 0) {
-                g.pipRegionTop = yCursor + TRACK_GAP_DP * dp
-                g.pipRegionBottom = g.pipRegionTop + pipLaneCount * g.pipLaneStride
-                yCursor = g.pipRegionBottom
-            } else {
-                g.pipRegionTop = 0f
-                g.pipRegionBottom = 0f
-            }
-            g.trackTop = yCursor + TRACK_GAP_DP * dp
-            g.trackBottom = g.trackTop + TRACK_HEIGHT_DP * dp
-            yCursor = g.trackBottom
-            if (audioLaneCount > 0) {
-                g.audioRegionTop = yCursor + TRACK_GAP_DP * dp
-                g.audioRegionBottom = g.audioRegionTop + audioLaneCount * g.audioLaneStride
-                yCursor = g.audioRegionBottom
-            } else {
-                g.audioRegionTop = 0f
-                g.audioRegionBottom = 0f
-            }
-            g.playheadBottom = yCursor
+            g.scrollY = targetScrollDp * dp
+            g.maxScrollY = m.maxScrollYDp(contentHdp, viewportHdp) * dp
 
             // v1.3.1: track-mute chips live in the PRE-ORIGIN zone — the empty
             // space left of the 00:00 ruler origin (x = timeToX(0)), one chip
@@ -804,6 +939,15 @@ fun TimelineView(
             g.clips = clips
 
             drawRuler(snap.project, g, textPaint, dp)
+
+            // v1.5.4: all lane content below the pinned ruler is drawn in
+            // CONTENT space — clipped to the sub-ruler viewport and shifted
+            // by the vertical scroll. Every existing draw helper keeps using
+            // content coordinates (g.trackTop, g.textRegionTop, …), so their
+            // bodies are untouched; the block body below intentionally keeps
+            // its original indentation — the lambda scope is mechanical.
+            clipRect(left = 0f, top = g.rulerBottom, right = g.viewportW, bottom = g.viewportH) {
+            translate(left = 0f, top = -g.scrollY) {
             drawTrackBackground(g, textLaneCount > 0, audioLaneCount > 0, dp)
             drawMuteButtons(snap.project, g, dp)
 
@@ -890,13 +1034,13 @@ fun TimelineView(
                             drawRoundRect(
                                 color = Color(0xAA000000),
                                 topLeft = Offset(gapL, g.trackTop + 2f * dp),
-                                size = Size(gapR - gapL, TRACK_HEIGHT_DP * dp - 8f * dp),
+                                size = Size(gapR - gapL, TimelineVerticalMath.TRACK_HEIGHT_DP * dp - 8f * dp),
                                 cornerRadius = CornerRadius(6f * dp),
                             )
                             drawRoundRect(
                                 color = Color(0x8037474F),
                                 topLeft = Offset(gapL, g.trackTop + 2f * dp),
-                                size = Size(gapR - gapL, TRACK_HEIGHT_DP * dp - 8f * dp),
+                                size = Size(gapR - gapL, TimelineVerticalMath.TRACK_HEIGHT_DP * dp - 8f * dp),
                                 cornerRadius = CornerRadius(6f * dp),
                                 style = Stroke(width = 1.dp.toPx()),
                             )
@@ -908,7 +1052,7 @@ fun TimelineView(
                     drawRoundRect(
                         color = AccentColor.copy(alpha = 0.9f),
                         topLeft = Offset(landL, g.trackTop + 2f * dp),
-                        size = Size(landW, TRACK_HEIGHT_DP * dp - 8f * dp),
+                        size = Size(landW, TimelineVerticalMath.TRACK_HEIGHT_DP * dp - 8f * dp),
                         cornerRadius = CornerRadius(6f * dp),
                         style = Stroke(width = 2.dp.toPx()),
                     )
@@ -938,6 +1082,8 @@ fun TimelineView(
                     )
                 }
             }
+            } // v1.5.4: end translate(0, -scrollY) — content space ends here
+            } // v1.5.4: end clipRect(below the pinned ruler)
         }
 
         // ---------------- fixed playhead overlay ----------------
@@ -946,10 +1092,15 @@ fun TimelineView(
             if (!snap.project.hasContent) return@Canvas
             val g = geom
             val x = playheadScreenX()
+            // v1.5.4: clamp the playhead to the visible viewport — scrolled,
+            // the content bottom sits beyond the viewport edge; with room to
+            // spare (negative scrollY) it rests above the bottom edge at the
+            // audio lanes' true end.
+            val endY = min(g.playheadBottom - g.scrollY, g.viewportH)
             drawLine(
                 color = Color(0xFFFF5C6E),
                 start = Offset(x, 0f),
-                end = Offset(x, g.playheadBottom),
+                end = Offset(x, endY),
                 strokeWidth = 2.dp.toPx(),
             )
             val w = 10.dp.toPx()
@@ -1233,7 +1384,7 @@ private fun DrawScope.drawGap(
 ) {
     if (gapWidth <= 1.5f * dp) return
     val top = trackTop
-    val height = TRACK_HEIGHT_DP * dp - 4f * dp
+    val height = TimelineVerticalMath.TRACK_HEIGHT_DP * dp - 4f * dp
     val corner = CornerRadius(6f * dp)
     drawRoundRect(
         color = Color(0xFF000000),
@@ -1282,7 +1433,7 @@ private fun DrawScope.drawClip(
     val clip = layout.clip
     if (layout.width <= 0.5f) return
     val top = trackTop
-    val height = TRACK_HEIGHT_DP * dp - 4f * dp
+    val height = TimelineVerticalMath.TRACK_HEIGHT_DP * dp - 4f * dp
     val corner = CornerRadius(6f * dp)
 
     if (elevated) {
@@ -1794,7 +1945,7 @@ private fun DrawScope.drawTransitionMarker(
 ) {
     val transitionPx = layout.transitionUs / 1_000_000f * ppsValue
     if (transitionPx <= 3f * dp) return
-    val height = TRACK_HEIGHT_DP * dp - 4f * dp
+    val height = TimelineVerticalMath.TRACK_HEIGHT_DP * dp - 4f * dp
     val top = trackTop
     val cx = layout.left + transitionPx / 2f
     val cy = top + height / 2f
