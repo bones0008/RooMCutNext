@@ -15,8 +15,8 @@ android {
         applicationId = "com.RooMCutNext"
         minSdk = 31
         targetSdk = 35
-        versionCode = 45
-        versionName = "1.5.9"
+        versionCode = 46
+        versionName = "1.6.0"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -50,8 +50,12 @@ android {
 
     buildTypes {
         release {
-            // V1 keeps minify off for maximum stability; enable later with proper keep rules.
-            isMinifyEnabled = false
+            // v1.6.0: R8 ON — 此前体积 56MB 的 89% 是未裁剪的 dex（Compose +
+            // material-icons-extended + Media3 整包）。keep 策略：业务包
+            // （@Serializable 项目模型 + 手写序列化边界）整体保留，裁剪只
+            // 发生在库代码 —— 体积收益全部来自库侧，反射风险≈0。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
                 ?: signingConfigs.getByName("debug")
@@ -104,6 +108,8 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.coil.compose)
+    // v1.6.0: AI agent 的 LLM HTTP 客户端（Coil 已传递引入，显式声明使用面）。
+    implementation(libs.okhttp)
 
     testImplementation(libs.junit)
     debugImplementation(libs.androidx.compose.ui.tooling)

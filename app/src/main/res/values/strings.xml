@@ -317,4 +317,33 @@
     <string name="clip_badge_muted">静音</string>
     <string name="clip_badge_missing">缺失</string>
     <string name="dialog_save">保存</string>
+    <!-- v1.6.0: AI agent editing (BYOK, OpenAI-compatible endpoints) -->
+    <string name="action_ai">AI 剪辑</string>
+    <string name="panel_ai_title">AI 剪辑</string>
+    <string name="ai_hint_title">对话式 AI 剪辑</string>
+    <string name="ai_hint_body">用一句话描述想要的剪辑，AI 会直接在时间线上完成分割、删除、变速、转场、滤镜、字幕等操作。修改先进入草稿，确认后一键应用（整组可撤销）。\n\n使用前请配置一个大模型 API Key（自带密钥，仅保存在本机，只访问你配置的模型服务）。</string>
+    <string name="ai_hint_config">配置模型</string>
+    <string name="ai_input_hint">描述你想要的剪辑…</string>
+    <string name="ai_send">发送</string>
+    <string name="ai_busy_thinking">AI 正在思考…</string>
+    <string name="ai_busy_tool_fmt">正在执行：%1$s</string>
+    <string name="ai_proposal_title">AI 修改方案（%1$d 项）</string>
+    <string name="ai_proposal_apply">应用</string>
+    <string name="ai_proposal_discard">放弃</string>
+    <string name="ai_proposal_seek_fmt">应用后跳到 %1$s 秒</string>
+    <string name="ai_project_changed_warn">对话期间时间线被手动修改过，应用将覆盖这些修改</string>
+    <string name="ai_provider_zai">智谱 GLM</string>
+    <string name="ai_provider_deepseek">DeepSeek</string>
+    <string name="ai_provider_moonshot">Kimi 月之暗面</string>
+    <string name="ai_provider_openai">OpenAI</string>
+    <string name="ai_provider_custom">自定义</string>
+    <string name="ai_settings_title">AI 模型设置</string>
+    <string name="ai_settings_provider">提供方（OpenAI 兼容）</string>
+    <string name="ai_settings_base_url">API 地址（如 http://192.168.1.2:11434/v1）</string>
+    <string name="ai_settings_api_key">API Key</string>
+    <string name="ai_settings_model">模型名称</string>
+    <string name="ai_settings_save">保存</string>
+    <string name="ai_settings_cancel">取消</string>
+    <string name="ai_settings_key_hint">获取 Key：%1$s</string>
+    <string name="ai_settings_privacy">密钥仅保存在本机；对话只发送时间线结构（素材名、时长、轨道），不发送媒体内容。</string>
 </resources>

@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CompareArrows
@@ -606,6 +607,8 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         ActionToolbar(
             state = state,
             onAddMedia = { launchMediaPicker() },
+            // v1.6.0: AI 剪辑 — 对话式 agent（不要求选中目标，agent 自己读项目）。
+            onAi = { vm.openPanel(PanelKind.AI_CHAT) },
             onSpeed = { vm.openPanel(PanelKind.SPEED) },
             onRotate = { vm.openPanel(PanelKind.ROTATE) },
             onCrop = { vm.openPanel(PanelKind.CROP) },
@@ -785,6 +788,7 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
 private fun ActionToolbar(
     state: EditorUiState,
     onAddMedia: () -> Unit,
+    onAi: () -> Unit,
     onSpeed: () -> Unit,
     onRotate: () -> Unit,
     onCrop: () -> Unit,
@@ -814,6 +818,8 @@ private fun ActionToolbar(
     ) {
         Spacer(Modifier.width(8.dp))
         ToolbarButton(Icons.Filled.Add, stringResource(R.string.timeline_add_media), enabled = true, active = false, onClick = onAddMedia)
+        // v1.6.0: AI 剪辑放在最前面 — 对话即剪辑的入口。
+        ToolbarButton(Icons.Filled.AutoAwesome, stringResource(R.string.action_ai), enabled = true, active = active == PanelKind.AI_CHAT, onClick = onAi)
         ToolbarButton(Icons.Filled.TextFields, stringResource(R.string.action_text), enabled = true, active = active == PanelKind.TEXT, onClick = onText)
         ToolbarButton(Icons.Filled.PictureInPictureAlt, stringResource(R.string.action_pip), enabled = true, active = active == PanelKind.PIP, onClick = onPip)
         ToolbarButton(Icons.Filled.MusicNote, stringResource(R.string.action_audio), enabled = true, active = active == PanelKind.AUDIO, onClick = onAudio)
@@ -920,6 +926,7 @@ private fun ToolPanelHost(
         PanelKind.GOTO -> R.string.panel_goto_title
         PanelKind.TRANSITION -> R.string.panel_transition_title
         PanelKind.MOSAIC -> R.string.panel_mosaic_title
+        PanelKind.AI_CHAT -> R.string.panel_ai_title
     }
     // The timeline is hidden while the panel is open, so the header shows
     // WHICH clip the clip-targeted tools are editing.
@@ -978,6 +985,18 @@ private fun ToolPanelHost(
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
+        // v1.6.0: AI 对话面板自管滚动（消息 LazyColumn + 固定输入行），
+        // 不能进共享 verticalScroll 容器（同向嵌套滚动会被无限高度约束炸掉）。
+        if (panel == PanelKind.AI_CHAT) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .imePadding()
+            ) {
+                AiChatPanel(vm = vm)
+            }
+        } else {
         // ---- scrollable body: the ONE vertical scroller shared by every
         // panel. Sheets emit plain ColumnScope content, so they stack
         // vertically and scroll together; sliders keep their horizontal
@@ -995,6 +1014,8 @@ private fun ToolPanelHost(
                 panel == PanelKind.TEXT && state.selectedText == null ->
                     PanelEmptyHint(stringResource(R.string.panel_text_gone))
                 else -> when (panel) {
+                    // AI_CHAT 不可达（已在上方自管滚动分支处理），仅为枚举完备。
+                    PanelKind.AI_CHAT -> Unit
                     PanelKind.SPEED -> SpeedSheet(vm, state)
                     PanelKind.ROTATE -> RotateSheet(vm, state)
                     PanelKind.CROP -> CropSheet(vm, state)
@@ -1015,6 +1036,7 @@ private fun ToolPanelHost(
             }
             Spacer(Modifier.height(12.dp))
         }
+        }  // ← else（非 AI 面板）分支闭合
         }
     }
 }

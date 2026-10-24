@@ -1,0 +1,339 @@
+package com.RooMCutNext.ai
+
+import com.RooMCutNext.core.model.AudioClip
+import com.RooMCutNext.core.model.Clip
+import com.RooMCutNext.core.model.MediaAsset
+import com.RooMCutNext.core.model.MediaType
+import com.RooMCutNext.core.model.Project
+import com.RooMCutNext.core.model.TextOverlayItem
+import kotlin.math.abs
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * v1.6.0: AI 编辑工具执行器测试 —— 每个 agent 工具都必须严格落到
+ * TimelineOps 语义上（与手动编辑同构），错误信息可指导模型自纠。
+ */
+class EditToolsTest {
+
+    private fun asset(
+        id: String,
+        durUs: Long = 10_000_000L,
+        type: MediaType = MediaType.VIDEO,
+        fps: Float = 30f,
+    ) = MediaAsset(
+        id = id, fileName = "$id.mp4", displayName = "Asset $id", type = type,
+        durationUs = durUs, width = 1920, height = 1080, fps = fps, hasAudio = true,
+    )
+
+    private fun clip(id: String, assetId: String, inUs: Long = 0L, outUs: Long = 10_000_000L) =
+        Clip(id = id, assetId = assetId, sourceInUs = inUs, sourceOutUs = outUs)
+
+    private fun project(
+        clips: List<Clip>,
+        assets: List<MediaAsset>,
+        texts: List<TextOverlayItem> = emptyList(),
+        audios: List<AudioClip> = emptyList(),
+    ) = Project(id = "p", name = "P", assets = assets, clips = clips, texts = texts, audios = audios)
+
+    private val tools = EditTools(
+        fonts = listOf("system" to "系统", "font_kai" to "楷体"),
+        luts = listOf("builtin:warm" to "暖阳", "builtin:mono" to "黑白"),
+        idFactory = { "ai-x" },
+    )
+
+    private fun args(vararg pairs: Pair<String, Any?>): JsonObject = buildJsonObject {
+        pairs.forEach { (k, v) ->
+            when (v) {
+                null -> put(k, JsonNull)
+                is String -> put(k, v)
+                is Boolean -> put(k, v)
+                is Number -> put(k, v.toDouble())
+            }
+        }
+    }
+
+    private fun JsonObject.flag(): Boolean = this["ok"]?.jsonPrimitive?.doubleOrNull == 1.0 ||
+        this["ok"]?.jsonPrimitive?.contentOrNull == "true"
+
+    private fun JsonObject.num(key: String): Double? = this[key]?.jsonPrimitive?.doubleOrNull
+
+    // ------------------------------------------------------------------
+
+    @Test
+    fun overviewListsClipsTextsAndPlayhead() {
+        val p = project(
+            clips = listOf(clip("c1", "a1"), clip("c2", "a2")),
+            assets = listOf(asset("a1"), asset("a2")),
+            texts = listOf(TextOverlayItem(id = "t1", text = "标题", startUs = 1_000_000L, endUs = 4_000_000L)),
+        )
+        val d = EditTools.Draft(p)
+        val json = tools.overviewJson(d, playheadUs = 2_500_000L)
+        assertEquals(2, json["clips"]!!.jsonArray.size)
+        assertEquals(1, json["texts"]!!.jsonArray.size)
+        assertEquals(2.5, json["playhead_sec"]!!.jsonPrimitive.doubleOrNull!!, 1e-9)
+        assertEquals(20.0, json["duration_sec"]!!.jsonPrimitive.doubleOrNull!!, 1e-9)
+        val luts = json["available_luts"]!!.jsonArray
+        assertTrue(luts.toString().contains("builtin:warm"))
+    }
+
+    @Test
+    fun splitAtMiddleProducesTwoClips() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "split_clip", args("clip_id" to "c1", "timeline_sec" to 5.0))
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals(2, d.project.clips.size)
+        assertEquals("ai-x", d.project.clips[1].id)
+        // 帧网格对齐：两半源跨度之和严格等于原跨度（snap-once 不变量）。
+        val left = d.project.clips[0].sourceSpanUs
+        val right = d.project.clips[1].sourceSpanUs
+        assertEquals(10_000_000L, left + right)
+        assertEquals(1, d.changeCount)
+        assertTrue(d.journal.single().startsWith("split_clip"))
+    }
+
+    @Test
+    fun splitOutsideClipIsError() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "split_clip", args("clip_id" to "c1", "timeline_sec" to 15.0))
+        assertFalse(r.ok)
+        assertTrue(r.json.toString().contains("不在片段"))
+        assertEquals(1, d.project.clips.size)
+        assertEquals(0, d.changeCount)
+    }
+
+    @Test
+    fun trimBothEdgesTimelineDomain() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "trim_clip",
+            args("clip_id" to "c1", "new_start_sec" to 1.0, "new_end_sec" to 8.0),
+        )
+        assertTrue(r.json.toString(), r.ok)
+        val start = r.json.num("timeline_start_sec")!!
+        val dur = r.json.num("duration_sec")!!
+        // 无缝胶片条：掐头 1s 后片段仍锚在 0s，时长 10→7s（含帧对齐容差）。
+        assertTrue("start=$start", abs(start - 0.0) < 0.002)
+        assertTrue("dur=$dur", abs(dur - 7.0) < 0.004)
+    }
+
+    @Test
+    fun deleteClipRemovesAndKeepsOthers() {
+        val p = project(
+            listOf(clip("c1", "a1"), clip("c2", "a2"), clip("c3", "a1")),
+            listOf(asset("a1"), asset("a2")),
+        )
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "delete_clip", args("clip_id" to "c2"))
+        assertTrue(r.ok)
+        assertEquals(listOf("c1", "c3"), d.project.clips.map { it.id })
+    }
+
+    @Test
+    fun setTransitionAppliesStyleAndDuration() {
+        val p = project(listOf(clip("c1", "a1"), clip("c2", "a2")), listOf(asset("a1"), asset("a2")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "set_transition",
+            args("clip_id" to "c2", "style_id" to "slide_left", "duration_sec" to 0.6),
+        )
+        assertTrue(r.json.toString(), r.ok)
+        val c2 = d.project.clips[1]
+        assertEquals("slide_left", c2.transitionType)
+        assertEquals(600_000L, c2.transitionInUs)
+    }
+
+    @Test
+    fun setTransitionRejectsUnknownStyleAndFirstClip() {
+        val p = project(listOf(clip("c1", "a1"), clip("c2", "a2")), listOf(asset("a1"), asset("a2")))
+        val d = EditTools.Draft(p)
+        assertFalse(tools.execute(d, "set_transition", args("clip_id" to "c2", "style_id" to "turbo_fade")).ok)
+        assertFalse(tools.execute(d, "set_transition", args("clip_id" to "c1", "style_id" to "dissolve")).ok)
+    }
+
+    @Test
+    fun removeTransitionZeroesDuration() {
+        val p = project(
+            listOf(clip("c1", "a1"), clip("c2", "a2").copy(transitionInUs = 500_000L)),
+            listOf(asset("a1"), asset("a2")),
+        )
+        val d = EditTools.Draft(p)
+        assertTrue(tools.execute(d, "remove_transition", args("clip_id" to "c2")).ok)
+        assertEquals(0L, d.project.clips[1].transitionInUs)
+    }
+
+    @Test
+    fun addTextCreatesOverlayWithDefaults() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "add_text",
+            args(
+                "text" to "开场标题", "start_sec" to 1.0, "duration_sec" to 3.0,
+                "color_hex" to "#FFCC00", "font_id" to "font_kai",
+                "font_size_ratio" to 0.1, "x_ratio" to 0.25, "y_ratio" to 0.75,
+            ),
+        )
+        assertTrue(r.json.toString(), r.ok)
+        val t = d.project.texts.single()
+        assertEquals("ai-x", t.id)
+        assertEquals(1_000_000L, t.startUs)
+        assertEquals(4_000_000L, t.endUs)
+        assertEquals(0xFFFFCC00L, t.style.color)
+        assertEquals("font_kai", t.style.fontId)
+        assertEquals(0.1f, t.style.fontSizeRatio)
+        assertEquals(0.25f, t.xRatio)
+        assertEquals(0.75f, t.yRatio)
+    }
+
+    @Test
+    fun updateTextMovesWindow() {
+        val p = project(
+            listOf(clip("c1", "a1")), listOf(asset("a1")),
+            texts = listOf(TextOverlayItem(id = "t1", text = "旧", startUs = 1_000_000L, endUs = 4_000_000L)),
+        )
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "update_text",
+            args("text_id" to "t1", "start_sec" to 0.5, "duration_sec" to 1.0, "text" to "新"),
+        )
+        assertTrue(r.json.toString(), r.ok)
+        val t = d.project.texts.single()
+        assertEquals("新", t.text)
+        assertEquals(500_000L, t.startUs)
+        assertEquals(1_500_000L, t.endUs)
+    }
+
+    @Test
+    fun deleteText() {
+        val p = project(
+            listOf(clip("c1", "a1")), listOf(asset("a1")),
+            texts = listOf(TextOverlayItem(id = "t1", text = "A"), TextOverlayItem(id = "t2", text = "B")),
+        )
+        val d = EditTools.Draft(p)
+        assertTrue(tools.execute(d, "delete_text", args("text_id" to "t1")).ok)
+        assertEquals(listOf("t2"), d.project.texts.map { it.id })
+    }
+
+    @Test
+    fun speedClampsToBounds() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        tools.execute(d, "set_clip_speed", args("clip_id" to "c1", "speed" to 10.0))
+        assertEquals(4.0f, d.project.clips[0].speed)
+        tools.execute(d, "set_clip_speed", args("clip_id" to "c1", "speed" to 0.05))
+        assertEquals(0.25f, d.project.clips[0].speed)
+    }
+
+    @Test
+    fun lookRejectsUnknownLutAndClears() {
+        val p = project(
+            listOf(clip("c1", "a1").copy(sourceInUs = 0, sourceOutUs = 10_000_000L)),
+            listOf(asset("a1")),
+        )
+        val d = EditTools.Draft(p)
+        assertFalse(tools.execute(d, "set_clip_look", args("clip_id" to "c1", "lut_id" to "nope")).ok)
+        assertTrue(tools.execute(d, "set_clip_look", args("clip_id" to "c1", "lut_id" to "builtin:warm", "strength" to 0.5)).ok)
+        assertEquals("builtin:warm", d.project.clips[0].adjust.lutId)
+        assertEquals(0.5f, d.project.clips[0].adjust.lutStrength)
+        assertTrue(tools.execute(d, "set_clip_look", args("clip_id" to "c1", "lut_id" to null)).ok)
+        assertNull(d.project.clips[0].adjust.lutId)
+    }
+
+    @Test
+    fun seekRecordsTargetWithoutStructuralChange() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "seek", args("sec" to 3.5))
+        assertTrue(r.ok)
+        assertEquals(3_500_000L, d.seekUs)
+        assertFalse(d.changed)
+    }
+
+    @Test
+    fun volumeClampAndMute() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        tools.execute(d, "set_clip_volume", args("clip_id" to "c1", "volume" to 5.0))
+        assertEquals(2.0f, d.project.clips[0].volume)
+        tools.execute(d, "set_clip_volume", args("clip_id" to "c1", "mute" to true))
+        assertTrue(d.project.clips[0].muted)
+    }
+
+    @Test
+    fun moveClipReorders() {
+        val p = project(
+            listOf(clip("c1", "a1"), clip("c2", "a2"), clip("c3", "a1")),
+            listOf(asset("a1"), asset("a2")),
+        )
+        val d = EditTools.Draft(p)
+        assertTrue(tools.execute(d, "move_clip", args("clip_id" to "c3", "to_index" to 0)).ok)
+        assertEquals(listOf("c3", "c1", "c2"), d.project.clips.map { it.id })
+    }
+
+    @Test
+    fun trimAudioClampsToAsset() {
+        val a = asset("a3", durUs = 30_000_000L, type = MediaType.AUDIO)
+        val p = project(
+            emptyList(), listOf(a),
+            audios = listOf(AudioClip(id = "x1", assetId = "a3", sourceInUs = 0, sourceOutUs = 30_000_000L)),
+        )
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "trim_audio",
+            args("audio_id" to "x1", "start_sec" to 2.0, "duration_sec" to 60.0),
+        )
+        assertTrue(r.json.toString(), r.ok)
+        val audio = d.project.audios.single()
+        assertEquals(2_000_000L, audio.startUs)
+        assertEquals(30_000_000L, audio.durationUs)
+    }
+
+    @Test
+    fun unknownToolReturnsError() {
+        val p = project(emptyList(), emptyList())
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "make_coffee", args())
+        assertFalse(r.ok)
+        assertTrue(r.json.toString().contains("未知工具"))
+    }
+
+    @Test
+    fun systemPromptContainsOverview() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val prompt = tools.systemPrompt(d, playheadUs = 0L)
+        assertTrue(prompt.contains("get_draft_overview"))
+        assertTrue(prompt.contains("\"c1\""))
+        assertTrue(prompt.contains("RooMCutNext"))
+    }
+
+    @Test
+    fun toolSchemasExposeAllTools() {
+        val names = tools.toolSchemas().toString()
+        listOf(
+            "get_draft_overview", "split_clip", "delete_clip", "trim_clip", "move_clip",
+            "set_clip_speed", "set_clip_volume", "set_clip_look", "set_transition",
+            "remove_transition", "add_text", "update_text", "delete_text",
+            "set_audio_volume", "trim_audio", "delete_audio", "seek",
+        ).forEach { assertTrue("missing $names", names.contains("\"$it\"")) }
+        // zoom 转场 v1.5.5 已移除，不应对 agent 开放。
+        assertFalse(names.contains("\"zoom_in\""))
+        assertFalse(names.contains("\"zoom_out\""))
+    }
+}

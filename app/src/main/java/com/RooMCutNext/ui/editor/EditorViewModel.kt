@@ -6,6 +6,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.RooMCutNext.ai.AiChatController
+import com.RooMCutNext.ai.AiProjectContext
+import com.RooMCutNext.ai.AiSettings
+import com.RooMCutNext.ai.AiSettingsStore
+import com.RooMCutNext.ai.HttpLlmTransport
 import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.ColorAdjust
@@ -20,6 +25,7 @@ import com.RooMCutNext.core.ops.TimelineOps
 import com.RooMCutNext.core.undo.SnapshotHistory
 import com.RooMCutNext.core.util.IdGen
 import com.RooMCutNext.data.ProjectRepository
+import com.RooMCutNext.data.SettingsRepository
 import com.RooMCutNext.export.ExportBus
 import com.RooMCutNext.export.ExportService
 import com.RooMCutNext.media.FontRegistry
@@ -39,7 +45,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP, TRANSITION, MOSAIC }
+enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP, TRANSITION, MOSAIC, AI_CHAT }
 
 data class ImportingState(val done: Int, val total: Int, val current: String)
 
@@ -127,6 +133,7 @@ class EditorViewModel(
 
     private val repo = ProjectRepository(application)
     private val importer = MediaImporter(application)
+    private val settingsRepo = SettingsRepository(application)
     val thumbnails = ThumbnailStore()
 
     private val history = SnapshotHistory<Project>(capacity = 100)
@@ -176,6 +183,35 @@ class EditorViewModel(
      * it follows play/pause/scrub/slider drags at the state-update rate.
      */
     val overlays = OverlayPreviewController(application)
+
+    /**
+     * v1.6.0: AI 剪辑会话（OpenChatCut 模式复刻）。
+     *
+     * agent 工具直接落到 TimelineOps 纯函数 —— 与手动编辑、撤销栈、导出
+     * 管线共享同一套核心命令；修改先进入草稿，用户确认后由
+     * [aiApplyDraftInternal] 以单条撤销记录提交。密钥经
+     * [SettingsRepository] 只存本机。
+     */
+    val aiChat: AiChatController = AiChatController(
+        scope = viewModelScope,
+        transport = HttpLlmTransport(),
+        contextProvider = {
+            val s = _state.value
+            AiProjectContext(
+                project = s.project,
+                playheadUs = s.playheadUs,
+                fonts = s.availableFonts.map { it.id to it.nameZh },
+                luts = s.availableLuts.map { it.id to it.nameZh },
+                structureVersion = _structureVersion.value.toLong(),
+            )
+        },
+        applyDraft = ::aiApplyDraftInternal,
+        settingsStore = object : AiSettingsStore {
+            override fun load(): AiSettings = settingsRepo.aiSettings()
+            override fun save(settings: AiSettings) = settingsRepo.setAiSettings(settings)
+        },
+        projectChangedSince = { v -> _structureVersion.value.toLong() != v },
+    )
 
     init {
         // v1.3.0: LIVE TEXT SOURCE — both preview engines' baked text overlays
@@ -301,6 +337,33 @@ class EditorViewModel(
 
     /** State captured when a live-preview drag starts (for a correct undo step). */
     private var dragOriginProject: Project? = null
+
+    /**
+     * v1.6.0: AI 草稿提交入口 —— 整组 AI 修改作为单条撤销记录写入
+     * （等价于 OpenChatCut 的 apply edit session），可选把播放头跳到 agent
+     * 指定的观察位置。清空选择避免悬空 id。
+     */
+    fun aiApplyDraftInternal(after: Project, label: String, seekUs: Long?) {
+        dragOriginProject = null
+        val before = _state.value.project
+        if (after != before) {
+            history.record(label, before, after)
+            _state.update {
+                it.copy(
+                    project = after,
+                    selectedClipId = null,
+                    selectedTextId = null,
+                    selectedAudioId = null,
+                    selectedPipId = null,
+                    selectedMosaicId = null,
+                )
+            }
+            _structureVersion.value += 1
+            refreshPlayback()
+            scheduleAutosave()
+        }
+        seekUs?.let { seekTo(it.coerceIn(0L, _state.value.project.totalDurationUs)) }
+    }
 
     /** Preview-only state change (no undo record, no autosave) — used while sliders drag. */
     private fun previewTransform(transform: (Project) -> Project) {

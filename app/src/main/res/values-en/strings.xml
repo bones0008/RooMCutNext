@@ -317,4 +317,33 @@
     <string name="clip_badge_muted">Muted</string>
     <string name="clip_badge_missing">Missing</string>
     <string name="dialog_save">Save</string>
+    <!-- v1.6.0: AI agent editing (BYOK, OpenAI-compatible endpoints) -->
+    <string name="action_ai">AI Edit</string>
+    <string name="panel_ai_title">AI Edit</string>
+    <string name="ai_hint_title">Conversational AI editing</string>
+    <string name="ai_hint_body">Describe the edit you want in one sentence and the AI performs it on the real timeline: split, delete, reorder, speed, transitions, LUT looks, captions. Changes go to a draft you review and apply as one undoable step.\n\nConfigure a model API key first (BYOK — the key stays on this device and only your chosen endpoint is contacted).</string>
+    <string name="ai_hint_config">Configure model</string>
+    <string name="ai_input_hint">Describe the edit you want…</string>
+    <string name="ai_send">Send</string>
+    <string name="ai_busy_thinking">AI is thinking…</string>
+    <string name="ai_busy_tool_fmt">Running: %1$s</string>
+    <string name="ai_proposal_title">AI changes (%1$d)</string>
+    <string name="ai_proposal_apply">Apply</string>
+    <string name="ai_proposal_discard">Discard</string>
+    <string name="ai_proposal_seek_fmt">Jumps to %1$s s after applying</string>
+    <string name="ai_project_changed_warn">The timeline was edited manually during the chat; applying will overwrite those edits</string>
+    <string name="ai_provider_zai">Zhipu GLM</string>
+    <string name="ai_provider_deepseek">DeepSeek</string>
+    <string name="ai_provider_moonshot">Moonshot Kimi</string>
+    <string name="ai_provider_openai">OpenAI</string>
+    <string name="ai_provider_custom">Custom</string>
+    <string name="ai_settings_title">AI model settings</string>
+    <string name="ai_settings_provider">Provider (OpenAI-compatible)</string>
+    <string name="ai_settings_base_url">Base URL (e.g. http://192.168.1.2:11434/v1)</string>
+    <string name="ai_settings_api_key">API key</string>
+    <string name="ai_settings_model">Model name</string>
+    <string name="ai_settings_save">Save</string>
+    <string name="ai_settings_cancel">Cancel</string>
+    <string name="ai_settings_key_hint">Get a key: %1$s</string>
+    <string name="ai_settings_privacy">The key never leaves this device; chats send only timeline structure (asset names, durations, tracks), never your media.</string>
 </resources>

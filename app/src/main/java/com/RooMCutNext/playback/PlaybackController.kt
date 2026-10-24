@@ -439,6 +439,9 @@ class PlaybackController(
                     // frame-step / playhead jumps set by the ViewModel.
                     if (p.isPlaying) {
                         onPositionUs?.invoke(posMs * 1000L)
+                        watchdogTick(p, posMs)
+                    } else {
+                        resetStallWindow()
                     }
                 } catch (e: Exception) {
                     // player released concurrently; exit quietly
@@ -446,6 +449,79 @@ class PlaybackController(
                 delay(33)
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // v1.6.0: stuck-playback watchdog（自愈式）
+    //
+    // 用户现场报告：播放中偶尔卡住不动，必须手动拖一下时间线（= 一次
+    // seek，刷新解码器/sink 队列）才能继续。这与 media3 官方
+    // StuckPlayerDetector 针对的 “stuck playing”（isPlaying=true 但位置
+    // 不再推进）失败模式一致 —— 渲染器/音频管线在片段边界或帧释放控制
+    // 里卡住时，position 冻结而播放器自认为在播放。
+    //
+    // 处理策略：把用户手动拖时间线的“解围”自动化 —— 位置冻结超过
+    // [STALL_WINDOW_MS] 即发一次同位置 seek（与手动拖动等价），两发无效
+    // 则升级为 pause→seek→play 全管道复位。全部事件进 DIAG 以便定位。
+    // 阈值安全性：0.25x 慢放每秒仍推进 250ms，1.5s 窗口内 375ms，远高于
+    // 5ms 判定线；seek 处理期位置短暂静止由窗口+冷却时间吸收。
+    // -----------------------------------------------------------------
+
+    private var stallWindowStartMs = 0L
+    private var stallRefPosMs = 0L
+    private var stallLastNudgeMs = 0L
+    private var stallNudgeCount = 0
+
+    private fun resetStallWindow() {
+        stallWindowStartMs = 0L
+        stallNudgeCount = 0
+    }
+
+    private fun watchdogTick(p: CompositionPlayer, posMs: Long) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (kotlin.math.abs(posMs - stallRefPosMs) > STALL_PROGRESS_EPSILON_MS) {
+            // 正常推进：滑动参考点，重置窗口。
+            stallRefPosMs = posMs
+            stallWindowStartMs = 0L
+            stallNudgeCount = 0
+            return
+        }
+        if (stallWindowStartMs == 0L) {
+            stallWindowStartMs = now
+            stallRefPosMs = posMs
+            return
+        }
+        val frozenMs = now - stallWindowStartMs
+        if (frozenMs < STALL_WINDOW_MS) return
+        if (now - stallLastNudgeMs < STALL_NUDGE_COOLDOWN_MS) return
+
+        val durMs = runCatching { p.duration }.getOrDefault(0L)
+        val nearEnd = durMs > 0 && posMs > durMs - 400
+        if (nearEnd) {
+            // 播放到尾部：ENDED 交接的正常静止，不干预。
+            resetStallWindow()
+            return
+        }
+
+        val state = p.playbackState
+        diag("STALL playing frozen ${frozenMs}ms pos=${posMs}ms state=${stateName(state)} nudge#${stallNudgeCount + 1}")
+        stallLastNudgeMs = now
+        stallNudgeCount++
+        if (stallNudgeCount <= STALL_NUDGES_BEFORE_ESCALATE) {
+            // 与“手动拖时间线”等价的解围：同位置 seek 刷新管道。
+            runCatching { p.seekTo(posMs) }
+        } else {
+            // 升级：全管道复位（pause → seek → play）。
+            diag("STALL escalate → pause/seek/play")
+            runCatching {
+                p.pause()
+                p.seekTo(posMs)
+                p.play()
+            }
+            stallNudgeCount = 0
+        }
+        // 重开窗口观察恢复情况。
+        stallWindowStartMs = now
     }
 
     // Per-clip volume / fades / mute are applied inside the composition via
@@ -620,5 +696,14 @@ class PlaybackController(
 
     private companion object {
         const val TAG = "RooMCutNextPlayback"
+
+        /** 位置冻结多久判定卡死（毫秒）。 */
+        const val STALL_WINDOW_MS = 1500L
+        /** 两次自愈干预之间的冷却（毫秒），避免与恢复中的管道打架。 */
+        const val STALL_NUDGE_COOLDOWN_MS = 4000L
+        /** 视为“仍在推进”的最小位置变化（毫秒）。 */
+        const val STALL_PROGRESS_EPSILON_MS = 1L
+        /** 升级为全复位前的同位置 seek 尝试次数。 */
+        const val STALL_NUDGES_BEFORE_ESCALATE = 2
     }
 }

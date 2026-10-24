@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- v1.6.0: AI 剪辑 — 用户自带密钥访问自己配置的大模型端点（BYOK）。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:name=".RooMCutNextApp"
