@@ -83,6 +83,12 @@ data class AiSettings(
     val baseUrlOverride: String = "",
     val apiKey: String = "",
     val model: String = "",
+    /**
+     * v1.6.6 画面感知：auto = 模型名像多模态才发帧；on = 有帧就发；
+     * off = 从不发。纯文本模型收到图会报错，控制器会自动降级重试，
+     * 但 auto 启发式先把大多数情况挡在外面。
+     */
+    val visionMode: String = VISION_AUTO,
 ) {
     val preset: AiProviderPreset get() = AiProvider.byId(providerId) ?: AiProvider.PRESETS.first()
 
@@ -101,6 +107,31 @@ data class AiSettings(
     /** 可以发起请求的最小配置。 */
     val ready: Boolean
         get() = effectiveBaseUrl.isNotBlank() && effectiveModel.isNotBlank() && apiKey.isNotBlank()
+
+    /** 是否应把帧发给该模型（framesAvailable = 宿主是否提到了画面）。 */
+    fun wantFrames(framesAvailable: Boolean): Boolean = when (visionMode) {
+        VISION_ON -> framesAvailable
+        VISION_OFF -> false
+        else -> framesAvailable && modelLooksMultimodal(effectiveModel)
+    }
+
+    companion object {
+        const val VISION_AUTO = "auto"
+        const val VISION_ON = "on"
+        const val VISION_OFF = "off"
+
+        /**
+         * 模型名启发式：长得像多模态才敢发图。
+         * 覆盖：gpt-4o / gpt-4.1 全系、glm-4v / glm-4.5v、
+         * moonshot-v1-*-vision、qwen-vl / intern-vl / llava / qvq、
+         * gemini / omni 系。deepseek-chat / kimi-k2 / glm-4.6 等
+         * 纯文本模型不匹配（正确不发）。
+         */
+        fun modelLooksMultimodal(model: String): Boolean {
+            val m = model.trim().lowercase()
+            return Regex("(4o|4\\.1|vision|4v|4\\.5v|-vl|vl-|gemini|omni|llava|qvq)").containsMatchIn(m)
+        }
+    }
 }
 
 /** 设置持久化（由 data/SettingsRepository 适配实现）。 */

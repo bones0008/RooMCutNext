@@ -40,6 +40,7 @@ class SettingsRepository(context: Context) {
         baseUrlOverride = prefs.getString(KEY_AI_BASE_URL, "") ?: "",
         apiKey = prefs.getString(KEY_AI_API_KEY, "") ?: "",
         model = prefs.getString(KEY_AI_MODEL, "") ?: "",
+        visionMode = prefs.getString(KEY_AI_VISION, AiSettings.VISION_AUTO) ?: AiSettings.VISION_AUTO,
     )
 
     fun setAiSettings(settings: AiSettings) {
@@ -48,6 +49,7 @@ class SettingsRepository(context: Context) {
             .putString(KEY_AI_BASE_URL, settings.baseUrlOverride)
             .putString(KEY_AI_API_KEY, settings.apiKey)
             .putString(KEY_AI_MODEL, settings.model)
+            .putString(KEY_AI_VISION, settings.visionMode)
             .apply()
     }
 
@@ -68,5 +70,6 @@ class SettingsRepository(context: Context) {
         private const val KEY_AI_BASE_URL = "ai_base_url"
         private const val KEY_AI_API_KEY = "ai_api_key"
         private const val KEY_AI_MODEL = "ai_model"
+        private const val KEY_AI_VISION = "ai_vision"
     }
 }

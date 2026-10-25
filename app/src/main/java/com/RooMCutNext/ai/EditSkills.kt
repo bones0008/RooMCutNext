@@ -60,7 +60,8 @@ object EditSkills {
             oneLinerZh = "删掉镜头里的停顿和废话，节奏立刻变紧凑",
             oneLinerEn = "Cut dead air and filler inside clips to tighten pacing.",
             steps = listOf(
-                "Call get_draft_overview and locate clips that feel long or contain pauses/filler.",
+                "Call get_draft_overview and locate clips that feel long or contain pauses/filler. "+
+                    "WITH frames judge visually; WITHOUT frames and no user hint, ASK where the dead parts are instead of guessing.",
                 "For each dead segment INSIDE a clip, split_clip at its start and end points.",
                 "delete_clip the dead pieces - neighbors ripple closed automatically.",
                 "Optionally finish with one seek to the first edit so the user sees the change.",
@@ -73,7 +74,8 @@ object EditSkills {
             oneLinerZh = "关键动作放慢、前后铺垫加速，重点瞬间更有冲击",
             oneLinerEn = "Slow down the key action, speed up the lead-in/out around it.",
             steps = listOf(
-                "get_draft_overview and find the key action clip.",
+                "get_draft_overview and find the key action clip - WITH frames pick it visually; "+
+                    "WITHOUT frames, use the user's wording if they named the moment, else ASK which moment to slow down.",
                 "split_clip just before and just after the key moment.",
                 "set_clip_speed around 0.5 on the key moment, 1.5-2.0 on the lead-in and tail.",
                 "get_draft_overview again to verify the new total duration, then seek to the ramp.",
@@ -98,7 +100,8 @@ object EditSkills {
             oneLinerZh = "在情绪点前后插一秒黑场，让观众喘口气",
             oneLinerEn = "Insert a short black pause before/after an emotional beat.",
             steps = listOf(
-                "get_draft_overview and pick the beat the user described (or the strongest moment).",
+                "get_draft_overview and pick the beat the user described; if they did not say "+
+                    "and no frames are provided, ASK which moment needs breathing room.",
                 "add_black_clip with anchor_clip_id = the beat clip, position before/after, duration_sec 0.5-1.0.",
                 "Optionally set_transition fade INTO the black clip for a fade-to-black feel.",
             ),
@@ -111,7 +114,8 @@ object EditSkills {
             oneLinerZh = "章节之间垫一小段黑屏，换场干净不突兀",
             oneLinerEn = "A short black gap between chapters for clean scene breaks.",
             steps = listOf(
-                "get_draft_overview and identify the chapter/topic boundaries.",
+                "get_draft_overview and identify the chapter/topic boundaries - WITH frames from "+
+                    "visual context shifts; WITHOUT frames or a user hint, ASK where the chapters split.",
                 "At each boundary add_black_clip with duration_sec 0.3-0.8 (anchor = clip before the boundary, position after).",
                 "Optionally set_transition fade into the black clip at the strongest boundary only.",
             ),
@@ -123,7 +127,8 @@ object EditSkills {
             oneLinerZh = "场景切换处加叠化，过渡丝滑不生硬",
             oneLinerEn = "Dissolve transitions at scene changes for smooth flow.",
             steps = listOf(
-                "get_draft_overview and find scene-change boundaries (content or location jumps).",
+                "get_draft_overview and find scene-change boundaries (content or location jumps) - "+
+                    "WITH frames spot them visually; WITHOUT frames rely on names or the user, and ASK if unclear.",
                 "At each boundary set_transition on the RIGHT clip with a dissolve/fade style, duration_sec 0.5-0.8.",
                 "Do NOT put transitions everywhere - only real scene changes; keep hard cuts inside a scene.",
             ),
@@ -135,7 +140,8 @@ object EditSkills {
             oneLinerZh = "每段掐到半秒一秒，纯硬切连打，冲击力拉满",
             oneLinerEn = "Punchy sub-second clips back to back, hard cuts only.",
             steps = listOf(
-                "get_draft_overview and delete_clip the weakest material first.",
+                "get_draft_overview and delete_clip the weakest material first - judge from "+
+                    "frames or the user's words; when blind, ASK which clips to drop.",
                 "trim_clip each remaining clip to 0.5-1.5s keeping only its best frame range.",
                 "remove_transition on every clip so all cuts are hard.",
                 "seek to the start when done.",
@@ -161,7 +167,8 @@ object EditSkills {
             oneLinerZh = "把最炸的一段挪到开头当钩子，前三秒留住人",
             oneLinerEn = "Move the strongest moment to the front as a hook.",
             steps = listOf(
-                "get_draft_overview and pick the most striking clip (action/emotion/visual).",
+                "get_draft_overview and pick the most striking clip - WITH frames choose visually; "+
+                    "WITHOUT frames, if the user did not name it, ASK which clip is the highlight.",
                 "move_clip that clip to to_index 0.",
                 "Optionally add_text a 1.5s hook title over the new opening.",
                 "seek to 0 so the user immediately sees the new opening.",
@@ -175,7 +182,8 @@ object EditSkills {
             oneLinerEn = "Cut secondary segments to hit a target duration.",
             steps = listOf(
                 "get_draft_overview and ask/decide the target duration if the user did not give one.",
-                "delete_clip segments that repeat or drift from the main thread.",
+                "delete_clip segments that repeat or drift from the main thread - identified from "+
+                    "frames or the user; when blind, ASK which segments matter most before deleting.",
                 "trim_clip what remains; keep the story spine: opening - action - payoff.",
                 "get_draft_overview to check the new total, then report the duration in plain words.",
             ),
@@ -260,13 +268,26 @@ object EditSkills {
     /**
      * 注入 system prompt 的紧凑技能块（英文指令 + 双语匹配名）。
      * 全量 15 技能约 1k tokens，相对概览 JSON 可忽略。
+     *
+     * v1.6.6 content-blind 规则（用户问“看不到画面怎么高潮前置”）：
+     * 对话里可能带、也可能不带每段一帧的 vision 消息。带帧 → 用眼睛
+     * 判断内容；不带帧 → 只能靠名字/时长/用户描述，需要内容判断时
+     * 先问一句，禁止默默瞎猜。
      */
     fun promptBlock(): String = buildString {
         append("Skill library - named techniques the user may ask for by name ")
         append("(match the names/aliases below in Chinese OR English). When a request ")
         append("matches a skill, follow its recipe with your tools, adapting the numbers ")
         append("to the actual draft; when it only partially matches, take the relevant ")
-        append("steps and stay honest about the rest.\n")
+        append("steps and stay honest about the rest.\n\n")
+        append("CONTENT-BLIND RULE: this conversation may or may not include one ")
+        append("frame per clip (a vision user message right after the system prompt). ")
+        append("WITH frames, judge content from them - which clip is the highlight, ")
+        append("where scenes change, where a pause drags. WITHOUT frames you CANNOT ")
+        append("see the footage at all: rely on names, durations and the user's words; ")
+        append("when a choice needs content judgment (highlight clip, dead segments, ")
+        append("chapter boundaries), ASK ONE short question in the user's language ")
+        append("instead of guessing silently.\n")
         byCategory().forEach { (cat, skills) ->
             append("\n[${cat.zh} ${cat.en}]\n")
             skills.forEach { s ->

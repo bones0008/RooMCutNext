@@ -553,6 +553,8 @@ private fun AiSettingsDialog(
     var baseUrl by remember { mutableStateOf(initial.baseUrlOverride) }
     var apiKey by remember { mutableStateOf(initial.apiKey) }
     var model by remember { mutableStateOf(initial.model) }
+    // v1.6.6 画面感知：auto=识别到多模态模型才发帧 / on=始终 / off=从不。
+    var visionMode by remember { mutableStateOf(initial.visionMode) }
     val preset = AiProvider.byId(providerId) ?: AiProvider.PRESETS.first()
 
     // 局部 @Composable：stringResource 必须在可组合上下文中调用。
@@ -575,6 +577,7 @@ private fun AiSettingsDialog(
                         baseUrlOverride = if (providerId == AiProvider.CUSTOM) baseUrl.trim() else "",
                         apiKey = apiKey.trim(),
                         model = model.trim(),
+                        visionMode = visionMode,
                     ),
                 )
             }) { Text(stringResource(R.string.ai_settings_save)) }
@@ -687,6 +690,36 @@ private fun AiSettingsDialog(
                         }
                     }
                 }
+
+                // ---- v1.6.6 画面感知（多模态开关）----
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    stringResource(R.string.ai_settings_vision),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    listOf(
+                        AiSettings.VISION_AUTO to R.string.ai_vision_auto,
+                        AiSettings.VISION_ON to R.string.ai_vision_on,
+                        AiSettings.VISION_OFF to R.string.ai_vision_off,
+                    ).forEach { (mode, res) ->
+                        FilterChip(
+                            selected = visionMode == mode,
+                            onClick = { visionMode = mode },
+                            label = { Text(stringResource(res), style = MaterialTheme.typography.labelSmall) },
+                        )
+                    }
+                }
+                Text(
+                    stringResource(R.string.ai_settings_vision_hint),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
                 Spacer(Modifier.height(6.dp))
                 Text(
                     stringResource(R.string.ai_settings_privacy),

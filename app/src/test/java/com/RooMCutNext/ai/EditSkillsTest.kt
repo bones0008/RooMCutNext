@@ -110,4 +110,32 @@ class EditSkillsTest {
         assertTrue(prompt.contains("跳剪"))
         assertTrue(prompt.contains("jump cut"))
     }
+
+    // ------------------------------------------------------------------
+    // v1.6.6 画面感知：content-blind 规则（无帧时先问，不瞎猜）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun contentBlindRuleInPromptBlock() {
+        val block = EditSkills.promptBlock()
+        assertTrue(block.contains("CONTENT-BLIND RULE"))
+        assertTrue(block.contains("WITHOUT frames you CANNOT"))
+        assertTrue(block.contains("ASK ONE short question"))
+    }
+
+    /** 需要内容判断的技能：盲态（无帧/无用户提示）时必须含“先问”步骤。 */
+    @Test
+    fun judgementSkillsAskWhenBlind() {
+        val judgementIds = setOf(
+            "jump_cut", "speed_ramp", "breathing_room", "black_separator",
+            "soft_mix", "hard_beats", "hook_first", "tight_cut",
+            "mute_noise", "highlight_caption",
+        )
+        EditSkills.ALL.filter { it.id in judgementIds }.forEach { s ->
+            assertTrue(
+                "skill ${s.id}: judgement recipe lacks ask-first fallback",
+                s.steps.any { it.contains(Regex("(?i)ask")) },
+            )
+        }
+    }
 }

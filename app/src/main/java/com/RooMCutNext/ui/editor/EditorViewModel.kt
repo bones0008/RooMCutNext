@@ -1,12 +1,17 @@
 package com.RooMCutNext.ui.editor
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.RooMCutNext.ai.AiChatController
+import com.RooMCutNext.ai.AiClipFrame
 import com.RooMCutNext.ai.AiProjectContext
 import com.RooMCutNext.ai.AiSettings
 import com.RooMCutNext.ai.AiSettingsStore
@@ -20,6 +25,7 @@ import com.RooMCutNext.core.model.BLACK_DEFAULT_DURATION_US
 import com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID
 import com.RooMCutNext.core.model.BLACK_FRAME_FILE_NAME
 import com.RooMCutNext.core.model.MediaAsset
+import com.RooMCutNext.core.model.MediaType
 import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.model.TextOverlayItem
@@ -37,7 +43,10 @@ import com.RooMCutNext.media.MediaImporter
 import com.RooMCutNext.media.ThumbnailStore
 import com.RooMCutNext.playback.OverlayPreviewController
 import com.RooMCutNext.playback.PlaybackController
+import java.io.ByteArrayOutputStream
 import java.io.File
+import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,6 +56,12 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** v1.6.6 画面感知：单轮最多发的帧数与帧尺寸（token 成本护栏）。 */
+private const val AI_MAX_FRAMES = 10
+private const val AI_FRAME_EDGE = 384
+private const val AI_FRAME_CACHE_MAX = 64
 
 enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP, TRANSITION, MOSAIC, AI_CHAT }
 
@@ -212,7 +227,78 @@ class EditorViewModel(
             override fun load(): AiSettings = settingsRepo.aiSettings()
             override fun save(settings: AiSettings) = settingsRepo.setAiSettings(settings)
         },
+        // v1.6.6 画面感知：多模态模型由帧真正“看到”内容（高潮前置/
+        // 整片精简等判断型技能的前提）；提取失败返回空 = 退回先问模式。
+        framesProvider = { project -> aiCollectFrames(project) },
     )
+
+    /** v1.6.6 画面感知：帧缓存（assetId+窗口位置 → base64），避免每轮重复解码。 */
+    private val aiFrameCache = mutableMapOf<String, String>()
+
+    /**
+     * v1.6.6 画面感知 — 为时间线每段提取中间帧小图（≤384px JPEG base64）。
+     *
+     * 视频：MediaMetadataRetriever 取内容窗口中间的最近同步帧（判断
+     * 内容足够，精确边界仍靠模型工具）；图片：直接解码整图；黑场与
+     * 音频跳过（无画面信息）。段数超过 [AI_MAX_FRAMES] 时均匀采样，
+     * 保持时间线分布。单段失败不阻塞整轮（缓存空串 = 该段无帧）。
+     */
+    private suspend fun aiCollectFrames(project: Project): List<AiClipFrame> =
+        withContext(Dispatchers.IO) {
+            val dir = repo.mediaDir(project.id)
+            val assets = project.assets.associateBy { it.id }
+            val candidates = project.clips.mapNotNull { clip ->
+                val asset = assets[clip.assetId] ?: return@mapNotNull null
+                if (asset.id == BLACK_FRAME_ASSET_ID || asset.type == MediaType.AUDIO) return@mapNotNull null
+                clip to asset
+            }
+            if (candidates.isEmpty()) return@withContext emptyList()
+            val selected = if (candidates.size <= AI_MAX_FRAMES) candidates else {
+                (0 until AI_MAX_FRAMES).map { i -> candidates[i * candidates.size / AI_MAX_FRAMES] }
+            }
+            selected.mapNotNull { (clip, asset) ->
+                val midUs = (clip.sourceInUs + clip.sourceOutUs) / 2
+                val key = "${asset.id}:${midUs / 100_000}"
+                val b64 = aiFrameCache.getOrPut(key) {
+                    if (aiFrameCache.size > AI_FRAME_CACHE_MAX) aiFrameCache.clear()
+                    extractFrameB64(File(dir, asset.fileName), asset, midUs).orEmpty()
+                }
+                if (b64.isEmpty()) null else AiClipFrame(
+                    clipId = clip.id,
+                    assetName = asset.displayName,
+                    midSec = midUs / 1_000_000.0,
+                    b64Jpeg = b64,
+                )
+            }
+        }
+
+    /** 解码一帧并压到 ≤[AI_FRAME_EDGE] 边长的 JPEG base64（失败 null）。 */
+    private fun extractFrameB64(source: File, asset: MediaAsset, midUs: Long): String? {
+        val raw = when (asset.type) {
+            MediaType.VIDEO -> runCatching {
+                MediaMetadataRetriever().use { r ->
+                    r.setDataSource(source.absolutePath)
+                    r.getFrameAtTime(midUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                }
+            }.getOrNull()
+            MediaType.IMAGE -> runCatching { BitmapFactory.decodeFile(source.absolutePath) }.getOrNull()
+            else -> null
+        } ?: return null
+        val edge = maxOf(raw.width, raw.height)
+        val scaled = if (edge > AI_FRAME_EDGE) {
+            val ratio = AI_FRAME_EDGE.toFloat() / edge
+            Bitmap.createScaledBitmap(
+                raw,
+                (raw.width * ratio).roundToInt().coerceAtLeast(1),
+                (raw.height * ratio).roundToInt().coerceAtLeast(1),
+                true,
+            )
+        } else raw
+        if (scaled !== raw) raw.recycle()
+        val bos = ByteArrayOutputStream()
+        if (!scaled.compress(Bitmap.CompressFormat.JPEG, 60, bos)) return null
+        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+    }
 
     init {
         // v1.3.0: LIVE TEXT SOURCE — both preview engines' baked text overlays

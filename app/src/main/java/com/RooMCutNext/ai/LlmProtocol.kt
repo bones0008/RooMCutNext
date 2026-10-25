@@ -47,10 +47,32 @@ data class WireMessage(
     val toolCalls: List<LlmToolCall> = emptyList(),
     val toolCallId: String? = null,
     val name: String? = null,
+    /** v1.6.6 画面感知：base64 JPEG（无 data: 前缀）。仅 user 消息使用。 */
+    val images: List<String> = emptyList(),
 ) {
     fun toJson(): JsonObject = buildJsonObject {
         put("role", role)
-        if (content != null) put("content", content) else put("content", JsonPrimitive(null as String?))
+        if (images.isNotEmpty()) {
+            // OpenAI 兼容 vision 格式：content = 部件数组（text + image_url）。
+            put("content", JsonArray(buildList {
+                if (!content.isNullOrBlank()) {
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put("text", content)
+                    })
+                }
+                images.forEach { b64 ->
+                    add(buildJsonObject {
+                        put("type", "image_url")
+                        put("image_url", buildJsonObject {
+                            put("url", "data:image/jpeg;base64,$b64")
+                        })
+                    })
+                }
+            }))
+        } else {
+            if (content != null) put("content", content) else put("content", JsonPrimitive(null as String?))
+        }
         if (toolCalls.isNotEmpty()) {
             put("tool_calls", JsonArray(toolCalls.map { call ->
                 buildJsonObject {

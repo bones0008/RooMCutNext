@@ -24,6 +24,8 @@ class AiChatControllerTest {
     private class FakeTransport(val script: MutableList<LlmReply>) : LlmTransport {
         val requests = mutableListOf<List<WireMessage>>()
         var failWith: LlmException? = null
+        /** v1.6.6: 只失败一次（降级重试测试用），首次抛出后自动清除。 */
+        var failFirstWith: LlmException? = null
         override suspend fun chatCompletion(
             baseUrl: String,
             apiKey: String,
@@ -32,6 +34,7 @@ class AiChatControllerTest {
             tools: kotlinx.serialization.json.JsonArray,
         ): LlmReply {
             requests.add(messages)
+            failFirstWith?.let { val e = it; failFirstWith = null; throw e }
             failWith?.let { throw it }
             return if (script.isEmpty()) LlmReply(null, emptyList()) else script.removeAt(0)
         }
@@ -67,6 +70,7 @@ class AiChatControllerTest {
         transport: FakeTransport,
         settings: AiSettings = AiSettings(apiKey = "k"),
         applied: MutableList<Triple<Project, String, Long?>> = mutableListOf(),
+        frames: List<AiClipFrame> = emptyList(),
     ): AiChatController {
         val ctxProject = twoClipProject()
         return AiChatController(
@@ -82,6 +86,7 @@ class AiChatControllerTest {
             },
             applyDraft = { p, label, seek -> applied.add(Triple(p, label, seek)) },
             settingsStore = MemSettings(settings),
+            framesProvider = { frames },
         )
     }
 
@@ -235,5 +240,124 @@ class AiChatControllerTest {
         assertTrue(toolResult.content!!.contains("\"ok\":true"))
         // system prompt 含项目概览。
         assertTrue((transport.requests[0].first() as WireMessage).content!!.contains("\"c1\""))
+    }
+
+    // ------------------------------------------------------------------
+    // v1.6.6 画面感知（多模态模型看帧判断内容；纯文本模型退回先问模式）
+    // ------------------------------------------------------------------
+
+    private fun oneFrame() = listOf(
+        AiClipFrame(clipId = "c1", assetName = "Asset a1", midSec = 5.0, b64Jpeg = "QUJD"),
+    )
+
+    @Test
+    fun visionFramesSentForMultimodalModel() {
+        val transport = FakeTransport(mutableListOf(LlmReply("看到了", emptyList())))
+        val c = controller(
+            transport,
+            settings = AiSettings(apiKey = "k", model = "gpt-4o"),
+            frames = oneFrame(),
+        )
+
+        c.send("高潮前置")
+
+        // auto 模式 + 多模态模型名 → system 后紧跟一条带图的 user 消息。
+        assertEquals(1, transport.requests.size)
+        val first = transport.requests[0]
+        assertEquals("system", first[0].role)
+        val vision = first[1]
+        assertEquals("user", vision.role)
+        assertEquals(1, vision.images.size)
+        assertEquals("QUJD", vision.images.single())
+        assertTrue(vision.content!!.contains("c1"))
+        assertTrue(vision.content!!.contains("Asset a1"))
+    }
+
+    @Test
+    fun textModelSkipsFramesInAutoMode() {
+        val transport = FakeTransport(mutableListOf(LlmReply("没图", emptyList())))
+        val c = controller(
+            transport,
+            settings = AiSettings(apiKey = "k", model = "deepseek-chat"),
+            frames = oneFrame(),
+        )
+
+        c.send("高潮前置")
+
+        // 纯文本模型：有帧也不发（启发式未命中）。
+        val first = transport.requests[0]
+        assertTrue(first.none { it.images.isNotEmpty() })
+        assertEquals("user", first[1].role) // system 后直接是用户消息
+    }
+
+    @Test
+    fun visionOnForcesFramesEvenForTextModelName() {
+        val transport = FakeTransport(mutableListOf(LlmReply("好", emptyList())))
+        val c = controller(
+            transport,
+            settings = AiSettings(apiKey = "k", model = "deepseek-chat", visionMode = AiSettings.VISION_ON),
+            frames = oneFrame(),
+        )
+
+        c.send("看看")
+
+        // 始终发送：无视启发式（用户知道自己接的是什么网关）。
+        assertTrue(transport.requests[0].any { it.images.isNotEmpty() })
+    }
+
+    @Test
+    fun visionOffNeverSendsFrames() {
+        val transport = FakeTransport(mutableListOf(LlmReply("好", emptyList())))
+        val c = controller(
+            transport,
+            settings = AiSettings(apiKey = "k", model = "gpt-4o", visionMode = AiSettings.VISION_OFF),
+            frames = oneFrame(),
+        )
+
+        c.send("看看")
+
+        assertTrue(transport.requests[0].none { it.images.isNotEmpty() })
+    }
+
+    @Test
+    fun visionRejectionFallsBackToTextOnce() {
+        // 第一次请求被拒（模型不收图）→ 降级纯文字重试 → 成功。
+        val transport = FakeTransport(mutableListOf(LlmReply("纯文字模式完成了", emptyList())))
+        transport.failFirstWith = LlmException("HTTP 400: image content is not supported by this model")
+        val c = controller(
+            transport,
+            settings = AiSettings(apiKey = "k", model = "gpt-4o"),
+            frames = oneFrame(),
+        )
+
+        c.send("高潮前置")
+
+        // 两次请求：第一次带图失败，第二次纯文字成功。
+        assertEquals(2, transport.requests.size)
+        assertTrue(transport.requests[0].any { it.images.isNotEmpty() })
+        assertTrue(transport.requests[1].none { it.images.isNotEmpty() })
+        // 降级提示出现在消息流里。
+        val notes = c.state.value.entries.filterIsInstance<AiChatEntry.Note>().map { it.text }
+        assertTrue(notes.any { it.contains("看不了图") })
+        assertTrue(c.state.value.entries.filterIsInstance<AiChatEntry.Assistant>().single().text.contains("纯文字"))
+    }
+
+    @Test
+    fun nonVisionErrorDoesNotTriggerFallback() {
+        // 与图无关的错误（如 401）→ 不降级，直接报错。
+        val transport = FakeTransport(mutableListOf())
+        transport.failWith = LlmException("HTTP 401: invalid key")
+        val c = controller(
+            transport,
+            settings = AiSettings(apiKey = "k", model = "gpt-4o"),
+            frames = oneFrame(),
+        )
+
+        c.send("做点什么")
+
+        assertEquals(1, transport.requests.size)
+        val note = c.state.value.entries.last() as AiChatEntry.Note
+        assertTrue(note.isError)
+        assertTrue(note.text.contains("HTTP 401"))
     }
 }
