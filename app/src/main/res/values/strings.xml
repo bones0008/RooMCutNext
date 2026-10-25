@@ -345,6 +345,11 @@
     <string name="ai_settings_cancel">取消</string>
     <string name="ai_settings_key_hint">获取 Key：%1$s</string>
     <string name="ai_settings_privacy">密钥仅保存在本机；对话只发送时间线结构（素材名、时长、轨道），不发送媒体内容。</string>
+    <!-- v1.6.5: 剪辑技能库（命名技巧配方注入 system prompt，用户口语点名即可） -->
+    <string name="ai_skills_title">剪辑技能库</string>
+    <string name="ai_skills_open">技能库</string>
+    <string name="ai_skills_close">关闭</string>
+    <string name="ai_skills_footer">点一个技能填进输入框，可以再补细节；用自己的话描述也一样管用。</string>
     <!-- v1.6.1: 黑场素材（可拉伸的纯黑图片，替代"删除留洞"的隐式黑场） -->
     <string name="black_frame_name">黑场</string>
     <string name="action_black_gap">黑场</string>

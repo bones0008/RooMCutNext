@@ -345,6 +345,11 @@
     <string name="ai_settings_cancel">Cancel</string>
     <string name="ai_settings_key_hint">Get a key: %1$s</string>
     <string name="ai_settings_privacy">The key never leaves this device; chats send only timeline structure (asset names, durations, tracks), never your media.</string>
+    <!-- v1.6.5: editing skill library (named technique recipes injected into the system prompt) -->
+    <string name="ai_skills_title">Editing skills</string>
+    <string name="ai_skills_open">Skills</string>
+    <string name="ai_skills_close">Close</string>
+    <string name="ai_skills_footer">Tap a skill to drop it into the input box, then add details if you like. Describing it in your own words works just as well.</string>
     <!-- v1.6.1: black frame clip (stretchable solid black, replaces implicit delete-holes) -->
     <string name="black_frame_name">Black</string>
     <string name="action_black_gap">Black</string>

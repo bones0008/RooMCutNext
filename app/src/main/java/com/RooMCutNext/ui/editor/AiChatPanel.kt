@@ -17,11 +17,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Send
@@ -47,14 +50,17 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -64,6 +70,7 @@ import com.RooMCutNext.ai.AiChatEntry
 import com.RooMCutNext.ai.AiProvider
 import com.RooMCutNext.ai.AiSettings
 import com.RooMCutNext.ai.AiChatUiState
+import com.RooMCutNext.ai.EditSkills
 
 // ===========================================================================
 // AI 剪辑（v1.6.0）— v1.6.3 微信式布局。
@@ -83,6 +90,11 @@ import com.RooMCutNext.ai.AiChatUiState
 //    重画暂停帧机制照旧处理恢复时的重画）；
 //  - 播放栏（播放/快进/快退/到头/到尾）保持在视频下方不动；
 //  - “配置模型”引导从大卡缩成单行小条（浮层最顶、最旧位置）。
+//
+// v1.6.5 技能库：输入框左端内嵌闪电按钮（leadingIcon，不占行宽 —
+//  v1.6.3 刚验证过输入行宽度敏感，五个 48dp 按钮会把输入框挤到
+//  140dp），弹出 [EditSkills] 技能列表（分类 + 一句话），点选即填入
+//  输入框。技能本体随 system prompt 注入模型 —— 用户口语点名即可。
 // ===========================================================================
 
 /**
@@ -163,6 +175,9 @@ fun AiBottomBar(
         keyboard?.hide()
         onClose()
     }
+    // v1.6.5: 输入文本提升到底栏层 —— 技能面板点选后能直接填进来。
+    var inputText by rememberSaveable { mutableStateOf("") }
+    var skillsOpen by remember { mutableStateOf(false) }
     Column(
         modifier
             .fillMaxWidth()
@@ -203,7 +218,13 @@ fun AiBottomBar(
             enabled = !aiState.busy,
             overlayVisible = overlayVisible,
             onToggleOverlay = onToggleOverlay,
-            onSend = { vm.aiChat.send(it) },
+            text = inputText,
+            onTextChange = { inputText = it },
+            onOpenSkills = { skillsOpen = true },
+            onSend = {
+                vm.aiChat.send(it)
+                inputText = ""
+            },
             onClose = ::closePanel,
         )
 
@@ -213,6 +234,18 @@ fun AiBottomBar(
                 initial = aiState.settings,
                 onDismiss = { vm.aiChat.openSettings(false) },
                 onSave = { vm.aiChat.updateSettings(it) },
+            )
+        }
+
+        // ---- v1.6.5 技能库（窗口级）----
+        if (skillsOpen) {
+            AiSkillsSheet(
+                onDismiss = { skillsOpen = false },
+                onPick = { name ->
+                    // 追加而非覆盖 —— 用户可能已打了半句细节，别替他删。
+                    inputText = if (inputText.isBlank()) name else "$inputText，$name"
+                    skillsOpen = false
+                },
             )
         }
     }
@@ -348,14 +381,17 @@ private fun AiInputRow(
     enabled: Boolean,
     overlayVisible: Boolean,
     onToggleOverlay: () -> Unit,
+    text: String,
+    onTextChange: (String) -> Unit,
+    onOpenSkills: () -> Unit,
     onSend: (String) -> Unit,
     onClose: () -> Unit,
 ) {
-    var text by remember { mutableStateOf("") }
     val keyboard = LocalSoftwareKeyboardController.current
     fun trySend() {
         if (text.isNotBlank() && enabled) {
-            onSend(text); text = ""; keyboard?.hide()
+            onSend(text)
+            keyboard?.hide()
         }
     }
     Row(
@@ -377,11 +413,29 @@ private fun AiInputRow(
         }
         OutlinedTextField(
             value = text,
-            onValueChange = { text = it },
+            onValueChange = onTextChange,
             modifier = Modifier.weight(1f),
             placeholder = { Text(stringResource(R.string.ai_input_hint)) },
             singleLine = true,
             enabled = enabled,
+            // v1.6.5: 技能库入口内嵌输入框左端（leadingIcon 不占行宽 —
+            // 行内已有眼睛/发送/关闭三个 48dp 按钮，再加独立按钮会把
+            // 输入框挤到 ~140dp，v1.6.3 刚验证过行宽敏感）。
+            leadingIcon = {
+                Box(
+                    Modifier
+                        .size(28.dp)
+                        .clickable(enabled = enabled, onClick = onOpenSkills),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.Bolt,
+                        stringResource(R.string.ai_skills_open),
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { trySend() }),
         )
@@ -406,6 +460,83 @@ private fun AiInputRow(
             )
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// v1.6.5 技能库面板
+// ---------------------------------------------------------------------
+
+/**
+ * 技能库弹窗：分类列出 [EditSkills] 全部技能（名称 + 一句话），
+ * 点选即把技能名填入输入框（用户可继续补细节再发送）。
+ * 中文名为主，英语环境自动切英文字段。
+ */
+@Composable
+private fun AiSkillsSheet(
+    onDismiss: () -> Unit,
+    onPick: (String) -> Unit,
+) {
+    val zh = LocalConfiguration.current.locale.language.startsWith("zh")
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.ai_skills_close)) }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.Bolt, null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.width(18.dp).height(18.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(stringResource(R.string.ai_skills_title))
+            }
+        },
+        text = {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                EditSkills.byCategory().forEach { (cat, skills) ->
+                    Text(
+                        if (zh) cat.zh else cat.en,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
+                    )
+                    skills.forEach { s ->
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { onPick(if (zh) s.nameZh else s.nameEn) }
+                                .padding(vertical = 6.dp),
+                        ) {
+                            Text(
+                                if (zh) s.nameZh else s.nameEn,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Text(
+                                if (zh) s.oneLinerZh else s.oneLinerEn,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Text(
+                    stringResource(R.string.ai_skills_footer),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+    )
 }
 
 // ---------------------------------------------------------------------

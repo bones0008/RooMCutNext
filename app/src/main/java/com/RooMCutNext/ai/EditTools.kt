@@ -862,7 +862,12 @@ class EditTools(
                     "5. If the request needs a capability you have no tool for (importing new media, " +
                     "generating audio/video, keyframes, PiP geometry), say so plainly.\n" +
                     "6. Reply in the user's language (Chinese in, Chinese out; English in, English out).\n\n" +
-                    "Current draft overview (JSON):\n",
+                    // v1.6.5: 技能库 —— 命名剪辑技巧配方，用户可点名调用。
+                    "7. The skill library below names editing techniques you know how to execute. " +
+                    "When the user names one (or describes it), follow its recipe; when the user asks " +
+                    "\"what can you do\", mention a few skill names in the user's language.\n\n" +
+                    EditSkills.promptBlock() +
+                    "\nCurrent draft overview (JSON):\n",
             )
             append(overview)
         }
