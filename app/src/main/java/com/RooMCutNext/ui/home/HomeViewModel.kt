@@ -117,6 +117,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun languageMode(): String = settings.languageMode()
 
+    // ------------------------------------------------------------------
+    // v1.6.7: AI 模型设置 — 首页顶栏齿轮入口的读写透传。一次配置本机
+    // 持久化，进编辑器的 AI 面板直接可用（AiChatController init 即装载），
+    // 想换模型/换 Key 随时回来改。
+    // ------------------------------------------------------------------
+
+    fun aiSettings(): com.RooMCutNext.ai.AiSettings = settings.aiSettings()
+
+    fun setAiSettings(value: com.RooMCutNext.ai.AiSettings) = settings.setAiSettings(value)
+
     companion object {
         fun factory(app: Application): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {

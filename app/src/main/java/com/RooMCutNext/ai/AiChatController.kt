@@ -98,6 +98,15 @@ class AiChatController(
     private val _state = MutableStateFlow(AiChatUiState())
     val state: StateFlow<AiChatUiState> = _state.asStateFlow()
 
+    init {
+        // v1.6.7: 创建时即装载已保存配置。此前 state.settings 一直是空默认
+        // 值、只在 send/openSettings 时才读盘 —— 面板每次打开都按"未配置"
+        // 显示引导条，即使 key 早已存好（真机反馈"每次都要确认一遍配置"）。
+        // 编辑器 VM 退出编辑即销毁（AppRoot EditorStoreOwner），因此每次
+        // 进编辑器都会重建本控制器 = 每次都读到最新保存的配置。
+        _state.update { it.copy(settings = settingsStore.load()) }
+    }
+
     // -------------------------------------------------------------
     // 公共 API（面板调用）
     // -------------------------------------------------------------

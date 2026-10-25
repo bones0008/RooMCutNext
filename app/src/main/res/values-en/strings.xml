@@ -4,6 +4,7 @@
 
     <!-- Home -->
     <string name="home_new_project">New project</string>
+    <string name="home_ai_settings">AI model settings</string>
     <string name="home_orientation_title">Choose aspect ratio</string>
     <string name="home_orientation_landscape">Landscape 16:9</string>
     <string name="home_orientation_portrait">Portrait 9:16</string>

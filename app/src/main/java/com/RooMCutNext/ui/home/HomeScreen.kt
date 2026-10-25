@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -62,6 +63,7 @@ import coil.compose.AsyncImage
 import com.RooMCutNext.R
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.util.TimeCode
+import com.RooMCutNext.ui.settings.AiSettingsDialog
 import com.RooMCutNext.ui.theme.AccentColor
 import java.io.File
 import java.text.SimpleDateFormat
@@ -87,6 +89,8 @@ private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
     var renameFor by remember { mutableStateOf<String?>(null) }
     var deleteFor by remember { mutableStateOf<String?>(null) }
     var showOrientationDialog by remember { mutableStateOf(false) }
+    // v1.6.7: 首页顶栏齿轮 — AI 模型设置入口（一次配置好，编辑器 AI 面板零打扰）。
+    var showAiSettings by remember { mutableStateOf(false) }
     // v1.0.11: orientation picked, waiting for the name dialog to confirm.
     var pendingPortrait by remember { mutableStateOf<Boolean?>(null) }
 
@@ -108,6 +112,14 @@ private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
                     )
                 },
                 actions = {
+                    // v1.6.7: AI 模型设置齿轮 — 首页就能配好/改配置，不必进编辑器找。
+                    IconButton(onClick = { showAiSettings = true }) {
+                        Icon(
+                            Icons.Filled.Settings,
+                            contentDescription = stringResource(R.string.home_ai_settings),
+                            tint = MaterialTheme.colorScheme.onBackground,
+                        )
+                    }
                     TextButton(onClick = { vm.toggleLanguage() }) {
                         Text(
                             stringResource(R.string.home_language_toggle),
@@ -240,6 +252,19 @@ private fun HomeContent(vm: HomeViewModel, onOpenProject: (String) -> Unit) {
             onConfirm = { name ->
                 pendingPortrait = null
                 vm.createProject(onOpenProject, portrait = portrait, customName = name)
+            },
+        )
+    }
+
+    // v1.6.7: AI 模型设置 — 首页一次配置（保存即本机持久化），之后进
+    // 任何项目的 AI 面板都不再询问；要换模型/换 Key 随时点齿轮回来改。
+    if (showAiSettings) {
+        AiSettingsDialog(
+            initial = vm.aiSettings(),
+            onDismiss = { showAiSettings = false },
+            onSave = { settings ->
+                vm.setAiSettings(settings)
+                showAiSettings = false
             },
         )
     }

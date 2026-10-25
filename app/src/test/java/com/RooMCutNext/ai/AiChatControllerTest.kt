@@ -92,6 +92,34 @@ class AiChatControllerTest {
 
     // ------------------------------------------------------------------
 
+    /**
+     * v1.6.7 回归：创建控制器即装载已保存配置 —— 此前面板首次打开时
+     * state.settings 是空默认值（只在 send/openSettings 才读盘），导致
+     * "请先配置模型"引导条对已配置用户每次都出现（真机反馈"每次都要
+     * 确认一遍配置"）。编辑器 VM 退出即销毁、进编辑器即重建控制器，
+     * 因此 init 读盘 = 每次进编辑器都拿到最新配置。
+     */
+    @Test
+    fun initLoadsSavedSettingsSoConfiguredUsersSeeReadyState() {
+        val transport = FakeTransport(mutableListOf())
+        val saved = AiSettings(apiKey = "sk-abc", model = "glm-4.6")
+        val c = controller(transport, settings = saved)
+
+        assertTrue(c.state.value.settings.ready)
+        assertEquals("sk-abc", c.state.value.settings.apiKey)
+        assertEquals("glm-4.6", c.state.value.settings.effectiveModel)
+    }
+
+    /** v1.6.7 回归：未配置时 init 保持未就绪状态（引导条只该给真没配置的人看）。 */
+    @Test
+    fun initKeepsUnconfiguredDefaultsSoOnboardingBarStillShows() {
+        val transport = FakeTransport(mutableListOf())
+        val c = controller(transport, settings = AiSettings())
+
+        assertFalse(c.state.value.settings.ready)
+        assertEquals("", c.state.value.settings.apiKey)
+    }
+
     @Test
     fun fullFlowExecutesToolsAndAutoApplies() {
         val transport = FakeTransport(

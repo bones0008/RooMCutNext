@@ -4,6 +4,7 @@
 
     <!-- Home -->
     <string name="home_new_project">新建项目</string>
+    <string name="home_ai_settings">AI 模型设置</string>
     <string name="home_orientation_title">选择画面方向</string>
     <string name="home_orientation_landscape">横屏 16:9</string>
     <string name="home_orientation_portrait">竖屏 9:16</string>
