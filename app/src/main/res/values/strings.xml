@@ -323,6 +323,10 @@
     <string name="ai_hint_title">对话式 AI 剪辑</string>
     <string name="ai_hint_body">用一句话描述想要的剪辑，AI 会直接在时间线上完成分割、删除、变速、转场、滤镜、字幕等操作。修改先进入草稿，确认后一键应用（整组可撤销）。\n\n使用前请配置一个大模型 API Key（自带密钥，仅保存在本机，只访问你配置的模型服务）。</string>
     <string name="ai_hint_config">配置模型</string>
+    <!-- v1.6.3: 微信式 AI 布局 — 浮层开关 + 单行未配置小条 -->
+    <string name="ai_onboarding_short">AI 未配置 · 点此设置模型 API Key</string>
+    <string name="ai_overlay_show">显示对话内容</string>
+    <string name="ai_overlay_hide">隐藏对话内容</string>
     <string name="ai_input_hint">描述你想要的剪辑…</string>
     <string name="ai_send">发送</string>
     <string name="ai_busy_thinking">AI 正在思考…</string>

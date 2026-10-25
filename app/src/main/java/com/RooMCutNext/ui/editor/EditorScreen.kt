@@ -18,21 +18,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
@@ -88,6 +83,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontFamily
@@ -130,6 +126,10 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
 
     // ---- v1.6.1: 黑场插入对话框（时长 + 前/后/末尾） ----
     var showBlackGapDialog by remember { mutableStateOf(false) }
+
+    // ---- v1.6.3: AI 对话浮层开关（真机反馈：想看剪辑效果时关掉对话，
+    // 得到完整视频画面）。rememberSaveable — 配置旋转后保持。 ----
+    var aiOverlayVisible by rememberSaveable { mutableStateOf(true) }
 
     // ---- media pickers ----
     // "添加素材" accepts ALL media types (video / image / audio): audio files
@@ -255,14 +255,14 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             // the inline tool panel (文字/精确定位) stay visible while typing.
             // Kept AFTER background() so the background still paints edge to
             // edge; when no keyboard is showing this is a no-op.
-            // v1.6.2: NOT in AI-chat mode — the chat panel handles the IME
-            // itself (ToolPanelHost AI branch), so the video preview keeps
-            // its full size while typing instead of being squashed by the
-            // keyboard.
-            .then(
-                if (state.activePanel == PanelKind.AI_CHAT) Modifier
-                else Modifier.imePadding()
-            )
+            // v1.6.3: unconditional — AI-chat mode too. WeChat-style IME
+            // avoidance: the keyboard compresses the whole column (the video
+            // included), which keeps the input row directly above the IME.
+            // v1.6.2 tried to keep the preview full-size and pad only the
+            // chat area, but that area (timeline weight(1f) ≈ 1/3 screen)
+            // cannot absorb an ~800dp IME — the negative available height
+            // squeezed the input row clean off screen (real-device report).
+            .imePadding()
     ) {
 
         // ---------------- top bar ----------------
@@ -446,6 +446,19 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             // layer.
             PreviewGestureLayer(vm = vm, state = state)
 
+            // v1.6.3: AI 对话浮层 — 半透明叠在视频显示区上（真机反馈
+            // “对话内容做成透明浮层放在显示区域上面”）。reverseLayout
+            // 底部对齐：最新气泡/提案卡贴播放栏上沿，视频上部完整露出；
+            // 渐变 scrim 底深顶浅。浮层显示期间消费手势（滚动对话），
+            // 想直接操作视频/看完整画面时用输入行左端的眼睛开关关掉。
+            // 渲染顺序在手势层之上、拍照按钮之下 — 按钮永远可点。
+            if (state.activePanel == PanelKind.AI_CHAT && aiOverlayVisible) {
+                AiChatOverlay(
+                    vm = vm,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+
             // v1.1.4: save the current frame (WYSIWYG — includes grading,
             // crops and text overlays exactly as previewed) into the gallery.
             IconButton(
@@ -589,7 +602,20 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         // — the preview above is NEVER covered, so sliders can be dragged
         // with the grading effect fully visible. Every panel scrolls inside
         // this bounded region; closing it brings the timeline back.
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        // v1.6.3: in AI-chat mode the chat content lives ON the video as a
+        // translucent overlay (AiChatOverlay above) — the timeline box no
+        // longer claims the weighted block; it shrinks to a wrap-content
+        // input bar (AiBottomBar), giving the reclaimed height back to the
+        // preview. Landscape keeps the weight (fixed 16:9 preview) so the
+        // input bar still sits at the bottom edge.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .then(
+                    if (state.activePanel == PanelKind.AI_CHAT && portrait) Modifier
+                    else Modifier.weight(1f)
+                )
+        ) {
             val panel = state.activePanel
             if (panel == null) {
                 TimelineView(
@@ -598,6 +624,17 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                     onImportFromFileManager = {
                         openDocuments.launch(mediaMimeTypes)
                     },
+                )
+            } else if (panel == PanelKind.AI_CHAT) {
+                // v1.6.3: 微信式输入底栏（忙碌行 + 输入行 + 浮层开关）。
+                // portrait：本 Box 已 wrap-content，底栏即全部高度；
+                // landscape：Box 仍是 weight(1f)，底栏沉到 Box 底部。
+                AiBottomBar(
+                    vm = vm,
+                    overlayVisible = aiOverlayVisible,
+                    onToggleOverlay = { aiOverlayVisible = !aiOverlayVisible },
+                    onClose = { vm.openPanel(null) },
+                    modifier = Modifier.align(Alignment.BottomCenter),
                 )
             } else {
                 ToolPanelHost(
@@ -1007,23 +1044,10 @@ private fun ToolPanelHost(
         color = MaterialTheme.colorScheme.surface,
         modifier = Modifier.fillMaxSize(),
     ) {
-        // v1.6.2: AI 对话面板独立分支 —— 真机反馈“AI 剪辑+叉的头部行占一排
-        // 毫无用处”：不再渲染头部行（关闭键已收进面板自己的输入行，
-        // 由 AiChatPanel 的 onClose 传入 openPanel(null)）。键盘避让也改由
-        // 这里统一处理（ime ∪ navigationBars 取大者）：宿主主列在 AI 模式
-        // 下不再整体 imePadding，预览保持原尺寸，键盘只压缩对话区；
-        // 旧版的三层叠加 imePadding 会把输入行直接推出屏幕。
-        if (panel == PanelKind.AI_CHAT) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .windowInsetsPadding(
-                        WindowInsets.ime.union(WindowInsets.navigationBars)
-                    )
-            ) {
-                AiChatPanel(vm = vm, onClose = { vm.openPanel(null) })
-            }
-        } else {
+        // v1.6.3: AI_CHAT no longer renders here — the conversation moved
+        // ONTO the preview (AiChatOverlay) and the input row became a
+        // wrap-content bottom bar in the timeline box. This host only serves
+        // the regular tool panels now.
         Column(Modifier.fillMaxSize()) {
         // ---- pinned header: title + target clip + close ----
         Row(
@@ -1099,7 +1123,6 @@ private fun ToolPanelHost(
             }
             Spacer(Modifier.height(12.dp))
         }
-        }  // ← else（非 AI 面板）分支闭合
         }
     }
 }

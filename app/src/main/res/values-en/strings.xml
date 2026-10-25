@@ -323,6 +323,10 @@
     <string name="ai_hint_title">Conversational AI editing</string>
     <string name="ai_hint_body">Describe the edit you want in one sentence and the AI performs it on the real timeline: split, delete, reorder, speed, transitions, LUT looks, captions. Changes go to a draft you review and apply as one undoable step.\n\nConfigure a model API key first (BYOK — the key stays on this device and only your chosen endpoint is contacted).</string>
     <string name="ai_hint_config">Configure model</string>
+    <!-- v1.6.3: WeChat-style AI layout — overlay toggle + one-line onboarding -->
+    <string name="ai_onboarding_short">AI not configured · tap to set up a model API key</string>
+    <string name="ai_overlay_show">Show conversation</string>
+    <string name="ai_overlay_hide">Hide conversation</string>
     <string name="ai_input_hint">Describe the edit you want…</string>
     <string name="ai_send">Send</string>
     <string name="ai_busy_thinking">AI is thinking…</string>
