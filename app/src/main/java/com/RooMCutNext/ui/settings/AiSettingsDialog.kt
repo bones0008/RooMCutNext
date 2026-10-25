@@ -54,6 +54,9 @@ internal fun AiSettingsDialog(
     var model by remember { mutableStateOf(initial.model) }
     // v1.6.6 画面感知：auto=识别到多模态模型才发帧 / on=始终 / off=从不。
     var visionMode by remember { mutableStateOf(initial.visionMode) }
+    // v1.6.9 画面方式：关键帧 / 整段视频直传（原生视频模型）。
+    var visionStyle by remember { mutableStateOf(initial.visionStyle) }
+    var videoPartStyle by remember { mutableStateOf(initial.videoPartStyle) }
     val preset = AiProvider.byId(providerId) ?: AiProvider.PRESETS.first()
 
     // 局部 @Composable：stringResource 必须在可组合上下文中调用。
@@ -77,6 +80,8 @@ internal fun AiSettingsDialog(
                         apiKey = apiKey.trim(),
                         model = model.trim(),
                         visionMode = visionMode,
+                        visionStyle = visionStyle,
+                        videoPartStyle = videoPartStyle,
                     ),
                 )
             }) { Text(stringResource(R.string.ai_settings_save)) }
@@ -218,6 +223,64 @@ internal fun AiSettingsDialog(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+
+                // ---- v1.6.9 画面方式（关键帧 / 整段视频）----
+                if (visionMode != AiSettings.VISION_OFF) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        stringResource(R.string.ai_settings_vision_style),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        listOf(
+                            AiSettings.VISION_STYLE_FRAMES to R.string.ai_vision_style_frames,
+                            AiSettings.VISION_STYLE_VIDEO to R.string.ai_vision_style_video,
+                        ).forEach { (style, res) ->
+                            FilterChip(
+                                selected = visionStyle == style,
+                                onClick = { visionStyle = style },
+                                label = { Text(stringResource(res), style = MaterialTheme.typography.labelSmall) },
+                            )
+                        }
+                    }
+                    if (visionStyle == AiSettings.VISION_STYLE_VIDEO) {
+                        Text(
+                            stringResource(R.string.ai_settings_video_format),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            listOf(
+                                AiSettings.VIDEO_PART_INPUT_VIDEO,
+                                AiSettings.VIDEO_PART_VIDEO_URL,
+                            ).forEach { part ->
+                                FilterChip(
+                                    selected = videoPartStyle == part,
+                                    onClick = { videoPartStyle = part },
+                                    label = {
+                                        Text(
+                                            part,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        stringResource(R.string.ai_settings_video_hint),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
 
                 Spacer(Modifier.height(6.dp))
                 Text(

@@ -345,13 +345,19 @@
     <string name="ai_settings_save">保存</string>
     <string name="ai_settings_cancel">取消</string>
     <string name="ai_settings_key_hint">获取 Key：%1$s</string>
-    <string name="ai_settings_privacy">密钥仅保存在本机；对话只发送时间线结构（素材名、时长、轨道）与每段画面小图（开启画面理解时），不发送完整媒体。</string>
+    <string name="ai_settings_privacy">密钥仅保存在本机；对话只发送时间线结构（素材名、时长、轨道）与每段画面小图，开启“整段视频”时另发压缩后的 480p 小视频，不发送原始媒体文件。</string>
     <!-- v1.6.6: 画面感知（多模态模型看帧判断内容：高潮前置/整片精简等） -->
     <string name="ai_settings_vision">画面理解（需多模态模型）</string>
     <string name="ai_vision_auto">自动</string>
     <string name="ai_vision_on">始终发送</string>
     <string name="ai_vision_off">关闭</string>
     <string name="ai_settings_vision_hint">自动＝模型名看着支持看图才发送（gpt-4o、GLM-4V、Kimi-vision 等）；开启后 AI 能看到每段画面，判断哪段更精彩；纯文字模型会自动退回先问再做的模式。</string>
+    <!-- v1.6.9: 画面方式（关键帧 / 整段视频直传） -->
+    <string name="ai_settings_vision_style">画面内容</string>
+    <string name="ai_vision_style_frames">关键帧</string>
+    <string name="ai_vision_style_video">整段视频</string>
+    <string name="ai_settings_video_format">视频格式（报错可换一种）</string>
+    <string name="ai_settings_video_hint">整段视频＝把每段压成 480p 小视频直接发给模型看（更费流量，时长/总量有上限）；需原生支持视频的模型（Qwen-VL、GLM-4V+、MiniMax-VL 等）。input_video＝Qwen 系，video_url＝GLM/MiniMax 系；不合适会自动退回关键帧。</string>
     <!-- v1.6.5: 剪辑技能库（命名技巧配方注入 system prompt，用户口语点名即可） -->
     <string name="ai_skills_title">剪辑技能库</string>
     <string name="ai_skills_open">技能库</string>

@@ -345,13 +345,19 @@
     <string name="ai_settings_save">Save</string>
     <string name="ai_settings_cancel">Cancel</string>
     <string name="ai_settings_key_hint">Get a key: %1$s</string>
-    <string name="ai_settings_privacy">The key never leaves this device; chats send only timeline structure (asset names, durations, tracks) plus one small frame per clip when vision is enabled - never full media.</string>
+    <string name="ai_settings_privacy">The key never leaves this device; chats send only timeline structure (asset names, durations, tracks) plus one small frame per clip - or, with full-video mode on, a compressed 480p proxy clip - never the original media files.</string>
     <!-- v1.6.6: vision (multimodal models judge content from per-clip frames) -->
     <string name="ai_settings_vision">Vision (needs a multimodal model)</string>
     <string name="ai_vision_auto">Auto</string>
     <string name="ai_vision_on">Always send</string>
     <string name="ai_vision_off">Off</string>
     <string name="ai_settings_vision_hint">Auto = send frames only when the model name looks multimodal (gpt-4o, GLM-4V, Kimi-vision...). With frames the AI can SEE each clip to judge highlights; text-only models fall back to ask-first mode.</string>
+    <!-- v1.6.9: vision payload style (keyframes / full-clip video upload) -->
+    <string name="ai_settings_vision_style">Visual payload</string>
+    <string name="ai_vision_style_frames">Keyframes</string>
+    <string name="ai_vision_style_video">Full clips</string>
+    <string name="ai_settings_video_format">Video part format (switch if rejected)</string>
+    <string name="ai_settings_video_hint">Full clips = each clip is compressed to a small 480p proxy and sent for the model to watch (heavier data; per-clip and total caps apply). Needs a video-native model (Qwen-VL, GLM-4V+, MiniMax-VL...). input_video = Qwen-family, video_url = GLM/MiniMax; on rejection it falls back to keyframes automatically.</string>
     <!-- v1.6.5: editing skill library (named technique recipes injected into the system prompt) -->
     <string name="ai_skills_title">Editing skills</string>
     <string name="ai_skills_open">Skills</string>

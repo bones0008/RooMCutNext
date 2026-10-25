@@ -287,9 +287,10 @@ object EditSkills {
      * 全量 15 技能约 1k tokens，相对概览 JSON 可忽略。
      *
      * v1.6.6 content-blind 规则（用户问“看不到画面怎么高潮前置”）：
-     * 对话里可能带、也可能不带每段一帧的 vision 消息。带帧 → 用眼睛
-     * 判断内容；不带帧 → 只能靠名字/时长/用户描述，需要内容判断时
-     * 先问一句，禁止默默瞎猜。
+     * 对话里可能带、也可能不带视觉消息。v1.6.9 起视觉消息可能是
+     * 每段一帧、也可能是整段视频代理（原生视频模型）、或两者混合。
+     * 带视觉 → 用眼睛判断内容；不带 → 只能靠名字/时长/用户描述，
+     * 需要内容判断时先问一句，禁止默默瞎猜。
      */
     fun promptBlock(custom: List<EditSkill> = emptyList()): String = buildString {
         append("Skill library - named techniques the user may ask for by name ")
@@ -297,14 +298,15 @@ object EditSkills {
         append("matches a skill, follow its recipe with your tools, adapting the numbers ")
         append("to the actual draft; when it only partially matches, take the relevant ")
         append("steps and stay honest about the rest.\n\n")
-        append("CONTENT-BLIND RULE: this conversation may or may not include one ")
-        append("frame per clip (a vision user message right after the system prompt). ")
-        append("WITH frames, judge content from them - which clip is the highlight, ")
-        append("where scenes change, where a pause drags. WITHOUT frames you CANNOT ")
-        append("see the footage at all: rely on names, durations and the user's words; ")
-        append("when a choice needs content judgment (highlight clip, dead segments, ")
-        append("chapter boundaries), ASK ONE short question in the user's language ")
-        append("instead of guessing silently.\n")
+        append("CONTENT-BLIND RULE: this conversation may or may not include a vision ")
+        append("user message right after the system prompt - either one midpoint FRAME ")
+        append("per clip, or full-clip VIDEO proxies (video-native models), or both mixed. ")
+        append("WITH them, judge content from what you actually see - which clip is the ")
+        append("highlight, where scenes change, where a pause drags, how motion and ")
+        append("rhythm flow. WITHOUT them you CANNOT see the footage at all: rely on ")
+        append("names, durations and the user's words; when a choice needs content ")
+        append("judgment (highlight clip, dead segments, chapter boundaries), ASK ONE ")
+        append("short question in the user's language instead of guessing silently.\n")
         byCategory(custom).forEach { (cat, skills) ->
             append("\n[${cat.zh} ${cat.en}]\n")
             skills.forEach { s ->

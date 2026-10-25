@@ -136,7 +136,9 @@ class EditSkillsTest {
     fun contentBlindRuleInPromptBlock() {
         val block = EditSkills.promptBlock()
         assertTrue(block.contains("CONTENT-BLIND RULE"))
-        assertTrue(block.contains("WITHOUT frames you CANNOT"))
+        // v1.6.9: 规则覆盖帧与整段视频两种视觉载荷。
+        assertTrue(block.contains("VIDEO proxies"))
+        assertTrue(block.contains("WITHOUT them you CANNOT"))
         assertTrue(block.contains("ASK ONE short question"))
     }
 

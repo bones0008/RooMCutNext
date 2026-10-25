@@ -26,6 +26,8 @@ class AiChatControllerTest {
         var failWith: LlmException? = null
         /** v1.6.6: 只失败一次（降级重试测试用），首次抛出后自动清除。 */
         var failFirstWith: LlmException? = null
+        /** v1.6.9: 依次抛出的错误队列（两级降级测试：视频拒→帧拒→纯文字）。 */
+        val failQueue = ArrayDeque<LlmException>()
         override suspend fun chatCompletion(
             baseUrl: String,
             apiKey: String,
@@ -34,6 +36,7 @@ class AiChatControllerTest {
             tools: kotlinx.serialization.json.JsonArray,
         ): LlmReply {
             requests.add(messages)
+            failQueue.removeFirstOrNull()?.let { throw it }
             failFirstWith?.let { val e = it; failFirstWith = null; throw e }
             failWith?.let { throw it }
             return if (script.isEmpty()) LlmReply(null, emptyList()) else script.removeAt(0)
@@ -72,6 +75,8 @@ class AiChatControllerTest {
         applied: MutableList<Triple<Project, String, Long?>> = mutableListOf(),
         frames: List<AiClipFrame> = emptyList(),
         customSkills: List<EditSkill> = emptyList(),
+        videos: List<AiClipVideo> = emptyList(),
+        videoProviderCalls: MutableList<Int> = mutableListOf(),
     ): AiChatController {
         val ctxProject = twoClipProject()
         return AiChatController(
@@ -89,6 +94,10 @@ class AiChatControllerTest {
             settingsStore = MemSettings(settings),
             framesProvider = { frames },
             customSkillsProvider = { customSkills },
+            videosProvider = {
+                videoProviderCalls.add(1)
+                videos
+            },
         )
     }
 
@@ -414,5 +423,186 @@ class AiChatControllerTest {
         val note = c.state.value.entries.last() as AiChatEntry.Note
         assertTrue(note.isError)
         assertTrue(note.text.contains("HTTP 401"))
+    }
+
+    // ------------------------------------------------------------------
+    // v1.6.9 整段视频（原生视频模型看整段素材；被拒自动逐级降级）
+    // ------------------------------------------------------------------
+
+    private fun oneVideo(clipId: String = "c1") = AiClipVideo(
+        clipId = clipId,
+        assetName = "Asset a1",
+        startSec = 0.0,
+        sentSec = 10.0,
+        windowSec = 10.0,
+        b64Mp4 = "QUJD",
+        style = VideoPartStyle.INPUT_VIDEO,
+    )
+
+    private fun twoFrames() = listOf(
+        AiClipFrame(clipId = "c1", assetName = "Asset a1", midSec = 5.0, b64Jpeg = "QUJD"),
+        AiClipFrame(clipId = "c2", assetName = "Asset a2", midSec = 5.0, b64Jpeg = "WFla"),
+    )
+
+    @Test
+    fun videoSentForVideoNativeModelInAutoMode() {
+        val transport = FakeTransport(mutableListOf(LlmReply("看完了", emptyList())))
+        val calls = mutableListOf<Int>()
+        val c = controller(
+            transport,
+            settings = AiSettings(
+                apiKey = "k",
+                model = "qwen3-vl-plus",
+                visionStyle = AiSettings.VISION_STYLE_VIDEO,
+            ),
+            frames = oneFrame(),
+            videos = listOf(oneVideo()),
+            videoProviderCalls = calls,
+        )
+
+        c.send("帮我看看整段素材")
+
+        // auto + 原生视频模型名 + 整段视频档 → videosProvider 被调用。
+        assertEquals(1, calls.size)
+        assertEquals(1, transport.requests.size)
+        val vision = transport.requests[0][1]
+        assertEquals("user", vision.role)
+        assertEquals(1, vision.videos.size)
+        assertEquals("QUJD", vision.videos.single().b64Mp4)
+        assertEquals(VideoPartStyle.INPUT_VIDEO, vision.videos.single().style)
+        // c1 已被视频覆盖 → 不再重复发帧。
+        assertTrue(vision.images.isEmpty())
+        assertTrue(vision.content!!.contains("video c1"))
+    }
+
+    @Test
+    fun mixedVideoAndFramesInOneVisionMessage() {
+        val transport = FakeTransport(mutableListOf(LlmReply("都看到了", emptyList())))
+        val c = controller(
+            transport,
+            settings = AiSettings(
+                apiKey = "k",
+                model = "qwen3-vl-plus",
+                visionStyle = AiSettings.VISION_STYLE_VIDEO,
+            ),
+            frames = twoFrames(),
+            videos = listOf(oneVideo("c1")),
+        )
+
+        c.send("看素材")
+
+        val vision = transport.requests[0][1]
+        // 一条消息里：c1 整段视频 + c2 中间帧。
+        assertEquals(1, vision.videos.size)
+        assertEquals(1, vision.images.size)
+        assertEquals("WFla", vision.images.single())
+        assertTrue(vision.content!!.contains("c2"))
+    }
+
+    @Test
+    fun videoStyleFramesNeverCallsVideosProvider() {
+        val transport = FakeTransport(mutableListOf(LlmReply("好", emptyList())))
+        val calls = mutableListOf<Int>()
+        val c = controller(
+            transport,
+            settings = AiSettings(apiKey = "k", model = "qwen3-vl-plus"), // 默认关键帧档
+            frames = oneFrame(),
+            videos = listOf(oneVideo()),
+            videoProviderCalls = calls,
+        )
+
+        c.send("看看")
+
+        // 关键帧档：模型再像视频模型也不走整段直传。
+        assertTrue(calls.isEmpty())
+        val vision = transport.requests[0][1]
+        assertTrue(vision.videos.isEmpty())
+        assertEquals(1, vision.images.size)
+    }
+
+    @Test
+    fun nonVideoNativeAutoWithVideoStyleFallsBackToFrames() {
+        val transport = FakeTransport(mutableListOf(LlmReply("帧看完了", emptyList())))
+        val calls = mutableListOf<Int>()
+        val c = controller(
+            transport,
+            settings = AiSettings(
+                apiKey = "k",
+                model = "gpt-4o", // 多模态但非原生视频
+                visionStyle = AiSettings.VISION_STYLE_VIDEO,
+            ),
+            frames = oneFrame(),
+            videos = listOf(oneVideo()),
+            videoProviderCalls = calls,
+        )
+
+        c.send("看看")
+
+        // auto 启发式挡住整段视频 → 回落 v1.6.6 帧路径。
+        assertTrue(calls.isEmpty())
+        val vision = transport.requests[0][1]
+        assertTrue(vision.videos.isEmpty())
+        assertEquals(1, vision.images.size)
+    }
+
+    @Test
+    fun videoRejectedFallsBackToFrames() {
+        // 第一次整段视频被拒 → 关键帧重试成功。
+        val transport = FakeTransport(mutableListOf(LlmReply("关键帧看完了", emptyList())))
+        transport.failFirstWith = LlmException("HTTP 400: input_video is not supported for this model")
+        val c = controller(
+            transport,
+            settings = AiSettings(
+                apiKey = "k",
+                model = "qwen3-vl-plus",
+                visionStyle = AiSettings.VISION_STYLE_VIDEO,
+            ),
+            frames = oneFrame(),
+            videos = listOf(oneVideo()),
+        )
+
+        c.send("看看")
+
+        assertEquals(2, transport.requests.size)
+        assertTrue(transport.requests[0][1].videos.isNotEmpty())
+        assertTrue(transport.requests[1][1].videos.isEmpty())
+        // 降级后用全量帧（video 覆盖的 c1 也回到帧）。
+        assertEquals(1, transport.requests[1][1].images.size)
+        val notes = c.state.value.entries.filterIsInstance<AiChatEntry.Note>().map { it.text }
+        assertTrue(notes.any { it.contains("收不了整段视频") })
+    }
+
+    @Test
+    fun videoAndFramesBothRejectedFallsBackToText() {
+        // 两级降级：视频拒 → 帧拒 → 纯文字成功。
+        val transport = FakeTransport(mutableListOf(LlmReply("纯文字完成了", emptyList())))
+        transport.failQueue.addAll(
+            listOf(
+                LlmException("HTTP 400: input_video not supported"),
+                LlmException("HTTP 400: image content type is not supported"),
+            ),
+        )
+        val c = controller(
+            transport,
+            settings = AiSettings(
+                apiKey = "k",
+                model = "qwen3-vl-plus",
+                visionStyle = AiSettings.VISION_STYLE_VIDEO,
+            ),
+            frames = oneFrame(),
+            videos = listOf(oneVideo()),
+        )
+
+        c.send("看看")
+
+        assertEquals(3, transport.requests.size)
+        assertTrue(transport.requests[0][1].videos.isNotEmpty())
+        assertTrue(transport.requests[1][1].images.isNotEmpty())
+        assertTrue(
+            transport.requests[2].none { it.images.isNotEmpty() || it.videos.isNotEmpty() },
+        )
+        val notes = c.state.value.entries.filterIsInstance<AiChatEntry.Note>().map { it.text }
+        assertTrue(notes.any { it.contains("收不了整段视频") })
+        assertTrue(notes.any { it.contains("看不了图") })
     }
 }

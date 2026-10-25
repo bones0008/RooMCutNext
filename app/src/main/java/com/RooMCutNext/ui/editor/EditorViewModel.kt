@@ -12,12 +12,28 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.RooMCutNext.ai.AiChatController
 import com.RooMCutNext.ai.AiClipFrame
+import com.RooMCutNext.ai.AiClipVideo
 import com.RooMCutNext.ai.AiProjectContext
 import com.RooMCutNext.ai.AiSettings
 import com.RooMCutNext.ai.AiSettingsStore
 import com.RooMCutNext.ai.CustomSkillCodec
 import com.RooMCutNext.ai.EditSkill
 import com.RooMCutNext.ai.HttpLlmTransport
+import com.RooMCutNext.ai.VideoPartStyle
+import androidx.media3.common.Effect
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.effect.Presentation
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.DefaultEncoderFactory
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.VideoEncoderSettings
+import androidx.media3.transformer.Effects
 import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.ColorAdjust
@@ -60,12 +76,34 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** v1.6.6 画面感知：单轮最多发的帧数与帧尺寸（token 成本护栏）。 */
 private const val AI_MAX_FRAMES = 10
 private const val AI_FRAME_EDGE = 384
 private const val AI_FRAME_CACHE_MAX = 64
+
+/**
+ * v1.6.9 整段视频直传：代理规格与流量护栏。
+ *
+ * 480p/700kbps 的可辨认代理（视频理解模型只采样帧，对低分辨率很
+ * 鲁棒）；单条与总量的 base64 预算对齐主流端点的请求体上限
+ * （DashScope/Qwen 系最大，OpenAI 兼容网关普遍 ≥10MB）。
+ */
+private const val AI_VIDEO_PROXY_HEIGHT = 480
+private const val AI_VIDEO_PROXY_BITRATE = 700_000
+/** 单条内容窗口发送上限（更长只附开头，消息里标注）。 */
+private const val AI_VIDEO_MAX_SEND_US = 60_000_000L
+/** 太短的窗口不值得走视频（中间帧已够）。 */
+private const val AI_VIDEO_MIN_WINDOW_US = 1_000_000L
+/** 单条 base64 上限（≈4.5MB 原始视频）。 */
+private const val AI_VIDEO_MAX_B64 = 6_000_000
+/** 单轮总 base64 预算（超出的段退回关键帧）。 */
+private const val AI_VIDEO_TOTAL_B64 = 12_000_000
+private const val AI_VIDEO_CACHE_MAX = 6
+private const val AI_VIDEO_PROXY_TIMEOUT_MS = 120_000L
 
 enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP, TRANSITION, MOSAIC, AI_CHAT }
 
@@ -234,6 +272,9 @@ class EditorViewModel(
         // v1.6.6 画面感知：多模态模型由帧真正“看到”内容（高潮前置/
         // 整片精简等判断型技能的前提）；提取失败返回空 = 退回先问模式。
         framesProvider = { project -> aiCollectFrames(project) },
+        // v1.6.9 整段视频：原生视频模型直接“看”整段素材（对齐电脑上
+        // 附文件的体验）；转码失败返回空 = 退回关键帧。
+        videosProvider = { project -> aiCollectVideos(project) },
         // v1.6.8 自定义技能：每轮 send 现取 —— 技能面板里刚导入的下一句即生效。
         customSkillsProvider = { _customSkills.value },
     )
@@ -353,6 +394,131 @@ class EditorViewModel(
         val bos = ByteArrayOutputStream()
         if (!scaled.compress(Bitmap.CompressFormat.JPEG, 60, bos)) return null
         return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+    }
+
+    // -------------------------------------------------------------
+    // v1.6.9 整段视频直传（原生视频理解模型）
+    // -------------------------------------------------------------
+
+    /**
+     * v1.6.9 整段视频 — 为时间线每个视频片段压一个 480p 小代理并
+     * base64 直传（Media3 Transformer，与导出同一引擎）。
+     *
+     * 护栏：窗口超 [AI_VIDEO_MAX_SEND_US] 只附开头（消息里标注）；
+     * 单条/总量 base64 预算超限或转码失败的段自动缺席 —— 控制器用
+     * 该段的中间帧补齐。代理文件落盘缓存（同窗口重对话不重压）。
+     */
+    private suspend fun aiCollectVideos(project: Project): List<AiClipVideo> =
+        withContext(Dispatchers.IO) {
+            val dir = repo.mediaDir(project.id)
+            val assets = project.assets.associateBy { it.id }
+            val style = settingsRepo.aiSettings().effectiveVideoPartStyle
+            var budget = AI_VIDEO_TOTAL_B64
+            val out = mutableListOf<AiClipVideo>()
+            for (clip in project.clips) {
+                if (budget <= 0) break
+                val asset = assets[clip.assetId] ?: continue
+                if (asset.type != MediaType.VIDEO) continue
+                val windowUs = (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(0L)
+                if (windowUs < AI_VIDEO_MIN_WINDOW_US) continue
+                val sendUs = minOf(windowUs, AI_VIDEO_MAX_SEND_US)
+                val proxy = runCatching {
+                    transcodeVideoProxy(File(dir, asset.fileName), clip.sourceInUs, clip.sourceInUs + sendUs)
+                }.getOrNull() ?: continue
+                val bytes = runCatching { proxy.readBytes() }.getOrNull() ?: continue
+                if (bytes.isEmpty()) continue
+                val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                if (b64.length > AI_VIDEO_MAX_B64) continue
+                budget -= b64.length
+                out.add(
+                    AiClipVideo(
+                        clipId = clip.id,
+                        assetName = asset.displayName,
+                        startSec = clip.sourceInUs / 1_000_000.0,
+                        sentSec = sendUs / 1_000_000.0,
+                        windowSec = windowUs / 1_000_000.0,
+                        b64Mp4 = b64,
+                        style = style,
+                    ),
+                )
+            }
+            out
+        }
+
+    /**
+     * 把源文件 [startUs, endUs) 窗口转成 480p/低码率 H264+AAC 代理，
+     * 结果落盘缓存（cacheDir/ai_video，[AI_VIDEO_CACHE_MAX] 条 LRU）。
+     * 失败/超时返回 null。
+     */
+    private suspend fun transcodeVideoProxy(source: File, startUs: Long, endUs: Long): File? {
+        val cacheDir = File(app.cacheDir, "ai_video").apply { mkdirs() }
+        val key = "${source.nameWithoutExtension}-${startUs / 1000}-${endUs / 1000}"
+        val out = File(cacheDir, "$key.mp4")
+        if (out.exists() && out.length() > 0L) {
+            out.setLastModified(System.currentTimeMillis())
+            return out
+        }
+        // LRU：腾出空位再压。
+        cacheDir.listFiles()?.let { files ->
+            val excess = files.size - (AI_VIDEO_CACHE_MAX - 1)
+            if (excess > 0) {
+                files.sortedBy { it.lastModified() }.take(excess).forEach { runCatching { it.delete() } }
+            }
+        }
+        if (out.exists()) out.delete()
+
+        val mediaItem = MediaItem.Builder()
+            .setUri(Uri.fromFile(source))
+            .setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(startUs / 1000)
+                    .setEndPositionMs(endUs / 1000)
+                    .build(),
+            )
+            .build()
+        val effects = Effects(
+            emptyList<AudioProcessor>(),
+            listOf<Effect>(Presentation.createForHeight(AI_VIDEO_PROXY_HEIGHT)),
+        )
+        val item = EditedMediaItem.Builder(mediaItem).setEffects(effects).build()
+        val composition = Composition.Builder(
+            EditedMediaItemSequence.Builder(listOf(item)).build(),
+        ).build()
+
+        val done = withTimeoutOrNull(AI_VIDEO_PROXY_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                val transformer = Transformer.Builder(app)
+                    .setVideoMimeType(MimeTypes.VIDEO_H264)
+                    .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                    .setEncoderFactory(
+                        DefaultEncoderFactory.Builder(app)
+                            .setRequestedVideoEncoderSettings(
+                                VideoEncoderSettings.Builder()
+                                    .setBitrate(AI_VIDEO_PROXY_BITRATE)
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .addListener(object : Transformer.Listener {
+                        override fun onCompleted(c: Composition, exportResult: ExportResult) {
+                            if (cont.isActive) cont.resume(out, null)
+                        }
+
+                        override fun onError(
+                            c: Composition,
+                            exportResult: ExportResult,
+                            exportException: ExportException,
+                        ) {
+                            runCatching { out.delete() }
+                            if (cont.isActive) cont.resume(null, null)
+                        }
+                    })
+                    .build()
+                transformer.start(composition, out.absolutePath)
+                cont.invokeOnCancellation { runCatching { transformer.cancel() } }
+            }
+        }
+        return done?.takeIf { it.exists() && it.length() > 0L }
     }
 
     init {

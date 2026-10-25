@@ -24,6 +24,10 @@ import java.util.concurrent.TimeUnit
  * 手写 JSON（JsonObject）而非 @Serializable DTO：tool_calls / content 可空
  * 且各家字段有差异，动态构建最稳。协议面刻意保持最小：
  * messages(system/user/assistant/tool) + tools + tool_choice=auto。
+ *
+ * v1.6.9：user 消息支持视频部件（[WireVideo]），把整段素材压成小代理
+ * 直传给原生视频理解模型 —— 对齐用户在电脑 web/编码 Agent 里“附文件”
+ * 的体验；帧与视频可混合在同一条消息里。
  */
 
 /** 一次模型发起的工具调用。 */
@@ -40,6 +44,30 @@ data class LlmReply(
     val toolCalls: List<LlmToolCall>,
 )
 
+/**
+ * v1.6.9 整段视频：视频部件的线上方言（各家 OpenAI 兼容端点不一致）。
+ *
+ * - [INPUT_VIDEO]：Qwen 系（DashScope 兼容模式 / vLLM / Ollama 网关等），
+ *   content part type = "input_video"，视频放在 input_video.url；
+ * - [VIDEO_URL]：GLM-4V-Plus / MiniMax-VL 系，content part type =
+ *   "video_url"，视频放在 video_url.url。
+ *
+ * 两种都支持 data:video/mp4;base64 内联；选错方言会被端点拒，
+ * 控制器捕获后自动降级关键帧重试（用户也可在设置里直接换）。
+ */
+enum class VideoPartStyle(val wireType: String) {
+    INPUT_VIDEO("input_video"),
+    VIDEO_URL("video_url"),
+}
+
+/** v1.6.9 整段视频：一条内联视频部件（本地已压小的 480p 代理）。 */
+data class WireVideo(
+    /** base64 MP4（无 data: 前缀）。 */
+    val b64Mp4: String,
+    val mime: String = "video/mp4",
+    val style: VideoPartStyle = VideoPartStyle.INPUT_VIDEO,
+)
+
 /** 线上消息（含 role=tool 的结果回传）。 */
 data class WireMessage(
     val role: String,
@@ -49,11 +77,13 @@ data class WireMessage(
     val name: String? = null,
     /** v1.6.6 画面感知：base64 JPEG（无 data: 前缀）。仅 user 消息使用。 */
     val images: List<String> = emptyList(),
+    /** v1.6.9 整段视频：base64 MP4 代理。仅 user 消息使用。 */
+    val videos: List<WireVideo> = emptyList(),
 ) {
     fun toJson(): JsonObject = buildJsonObject {
         put("role", role)
-        if (images.isNotEmpty()) {
-            // OpenAI 兼容 vision 格式：content = 部件数组（text + image_url）。
+        if (images.isNotEmpty() || videos.isNotEmpty()) {
+            // OpenAI 兼容多模态格式：content = 部件数组，顺序 text → 图 → 视频。
             put("content", JsonArray(buildList {
                 if (!content.isNullOrBlank()) {
                     add(buildJsonObject {
@@ -66,6 +96,14 @@ data class WireMessage(
                         put("type", "image_url")
                         put("image_url", buildJsonObject {
                             put("url", "data:image/jpeg;base64,$b64")
+                        })
+                    })
+                }
+                videos.forEach { v ->
+                    add(buildJsonObject {
+                        put("type", v.style.wireType)
+                        put(v.style.wireType, buildJsonObject {
+                            put("url", "data:${v.mime};base64,${v.b64Mp4}")
                         })
                     })
                 }

@@ -1,5 +1,6 @@
 package com.RooMCutNext.ai
 
+import com.RooMCutNext.core.model.MediaType
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.util.IdGen
 import kotlinx.coroutines.CoroutineScope
@@ -25,6 +26,16 @@ import kotlinx.serialization.json.put
  *    要求内容判断时先问用户，不瞎猜（见 [EditSkills.promptBlock]）；
  *  - 意外被拒（模型不支持图）→ 自动降级纯文字重试一次。
  *
+ * v1.6.9（整段视频，用户问“我的模型支持视频分析，怎么像电脑上那样
+ * 直接把素材给模型看”）：
+ *  - 设置切到“整段视频”后，宿主 [videosProvider] 把每个视频片段的
+ *    内容窗口压成 480p 小代理（Media3 Transformer），整段 base64 直传
+ *    —— 原生视频模型（Qwen-VL / GLM-4V-Plus / MiniMax-VL / 自建网关）
+ *    能看到完整运动与节奏，对齐电脑 web/编程 Agent 附文件的体验；
+ *  - 视频部件方言可切（input_video=Qwen 系 / video_url=GLM·MiniMax 系）；
+ *  - 未被视频覆盖的段（图片/超预算/失败）仍用中间帧补齐；被拒时
+ *    自动降级：整段视频 → 关键帧 → 纯文字。
+ *
  * v1.6.4（直接做 + 说人话）维持不变：轮次结束草稿自动应用（单条撤销
  * 记录）、工具调用以通俗动作描述上屏。
  *
@@ -42,6 +53,25 @@ data class AiClipFrame(
     val midSec: Double,
     /** base64 JPEG（无 data: 前缀）。 */
     val b64Jpeg: String,
+)
+
+/**
+ * v1.6.9: 整段视频代理 — 片段内容窗口压成 480p 小视频直传给原生
+ * 视频理解模型（对齐电脑 web/编程 Agent 里“附文件”的体验）。
+ * 模型能看到完整运动/节奏，而不只是一张中间帧。
+ */
+data class AiClipVideo(
+    val clipId: String,
+    val assetName: String,
+    /** 片段内容窗口起点（秒，仅标注用）。 */
+    val startSec: Double,
+    /** 实际发送的时长（秒）。 */
+    val sentSec: Double,
+    /** 内容窗口全长（秒）—— sentSec < windowSec 表示只附了开头一段。 */
+    val windowSec: Double,
+    /** base64 MP4（无 data: 前缀，已压小）。 */
+    val b64Mp4: String,
+    val style: VideoPartStyle,
 )
 
 /** 每轮对话开始时由宿主（EditorViewModel）提供的现场快照。 */
@@ -98,6 +128,11 @@ class AiChatController(
      * 导入后无需重建控制器，下一句话即生效）。默认空（测试兼容）。
      */
     private val customSkillsProvider: () -> List<EditSkill> = { emptyList() },
+    /**
+     * v1.6.9 整段视频：宿主在 IO 线程把视频片段压成小代理（可返回空
+     * = 无视频可传/全部转码失败，控制器自动退回关键帧）。默认不提供。
+     */
+    private val videosProvider: suspend (Project) -> List<AiClipVideo> = { emptyList() },
 ) {
 
     private val _state = MutableStateFlow(AiChatUiState())
@@ -149,8 +184,18 @@ class AiChatController(
         val ctx = contextProvider()
         val tools = EditTools(fonts = ctx.fonts, luts = ctx.luts, idFactory = { IdGen.new("ai") })
 
-        // v1.6.6: 画面感知 — 提帧在后台进行，忙碌行给用户提示。
-        _state.update { it.copy(busyTool = BUSY_READING_FRAMES) }
+        // v1.6.9: 时间线上有没有视频片段（决定要不要走整段直传）。
+        val assetsById = ctx.project.assets.associateBy { it.id }
+        val videoClipsAvailable = ctx.project.clips.any { c ->
+            assetsById[c.assetId]?.type == MediaType.VIDEO
+        }
+        val wantVideo = settings.wantVideo(videoClipsAvailable)
+
+        // v1.6.6/v1.6.9 画面感知 — 提帧/压视频在后台进行，忙碌行给用户提示。
+        _state.update { it.copy(busyTool = if (wantVideo) BUSY_COMPRESSING else BUSY_READING_FRAMES) }
+        val videos = if (wantVideo) {
+            runCatching { videosProvider(ctx.project) }.getOrDefault(emptyList())
+        } else emptyList()
         val frames = runCatching { framesProvider(ctx.project) }.getOrDefault(emptyList())
 
         // 多轮记忆：只保留历史里的 user / assistant 文本（工具报文巨大且已失效）。
@@ -162,17 +207,37 @@ class AiChatController(
             }
         }
 
-        val wantVision = settings.wantFrames(frames.isNotEmpty())
+        // v1.6.9: 视频优先，未被视频覆盖的段（图片片段/超预算/转码失败）
+        // 用中间帧补齐 —— 混合在同一条 vision 消息里。wantVideo 命中时
+        // 即使是纯文本模型名也发（用户显式选了整段视频档）；否则维持
+        // v1.6.6 的 wantFrames 门控（auto 启发式 / on / off）。
+        val wantVision = wantVideo || settings.wantFrames(frames.isNotEmpty())
+        val videoClipIds = videos.map { it.clipId }.toSet()
+        val framesForSend = if (wantVision) frames.filter { it.clipId !in videoClipIds } else emptyList()
 
         try {
             try {
-                runLoop(userText, history, tools, ctx, settings, if (wantVision) frames else emptyList())
+                runLoop(userText, history, tools, ctx, settings, framesForSend, videos)
             } catch (e: LlmException) {
-                // v1.6.6: 意外被拒（纯文本模型收到图）→ 降级纯文字重试一次。
-                // 仅当带了帧才可能走这里；重建草稿保证零残留。
-                if (wantVision && looksLikeVisionRejection(e.message)) {
-                    appendEntry(AiChatEntry.Note(VISION_FALLBACK_NOTE))
-                    runLoop(userText, history, tools, ctx, settings, emptyList())
+                val sentVisual = videos.isNotEmpty() || framesForSend.isNotEmpty()
+                if (sentVisual && looksLikeVisionRejection(e.message)) {
+                    if (videos.isNotEmpty()) {
+                        // v1.6.9: 整段视频被拒（方言不对/模型不吃视频）→ 关键帧降级。
+                        appendEntry(AiChatEntry.Note(VIDEO_FALLBACK_NOTE))
+                        try {
+                            runLoop(userText, history, tools, ctx, settings, frames, emptyList())
+                        } catch (e2: LlmException) {
+                            if (frames.isNotEmpty() && looksLikeVisionRejection(e2.message)) {
+                                // v1.6.6: 帧也被拒 → 纯文字。
+                                appendEntry(AiChatEntry.Note(VISION_FALLBACK_NOTE))
+                                runLoop(userText, history, tools, ctx, settings, emptyList(), emptyList())
+                            } else throw e2
+                        }
+                    } else {
+                        // v1.6.6: 帧被拒（纯文本模型收到图）→ 降级纯文字重试一次。
+                        appendEntry(AiChatEntry.Note(VISION_FALLBACK_NOTE))
+                        runLoop(userText, history, tools, ctx, settings, emptyList(), emptyList())
+                    }
                 } else {
                     throw e
                 }
@@ -189,8 +254,8 @@ class AiChatController(
     }
 
     /**
-     * 一轮完整对话循环（含自动应用）。frames 非空时在 system 后插入
-     * vision 帧消息（每段中间画面 → base64 JPEG）。
+     * 一轮完整对话循环（含自动应用）。frames/videos 非空时在 system 后
+     * 插入混合 vision 消息（视频代理 + 补齐帧）。
      */
     private suspend fun runLoop(
         userText: String,
@@ -199,12 +264,13 @@ class AiChatController(
         ctx: AiProjectContext,
         settings: AiSettings,
         frames: List<AiClipFrame>,
+        videos: List<AiClipVideo>,
     ) {
         val d = EditTools.Draft(ctx.project)
         val wire = mutableListOf(
             WireMessage("system", tools.systemPrompt(d, ctx.playheadUs, customSkillsProvider())),
         )
-        if (frames.isNotEmpty()) wire.add(visionMessage(frames))
+        if (frames.isNotEmpty() || videos.isNotEmpty()) wire.add(visionMessage(frames, videos))
         wire.addAll(history)
         wire.add(WireMessage("user", userText))
 
@@ -279,27 +345,48 @@ class AiChatController(
         }
     }
 
-    /** v1.6.6: 帧消息 — 每段中间画面，按时间线顺序，标注 clip id。 */
-    private fun visionMessage(frames: List<AiClipFrame>): WireMessage {
+    /** v1.6.9: 混合 vision 消息 — 视频代理（原生视频模型）+ 补齐帧。 */
+    private fun visionMessage(frames: List<AiClipFrame>, videos: List<AiClipVideo>): WireMessage {
         val text = buildString {
-            append("Frames of the current timeline - one per clip, taken from the MIDDLE of ")
-            append("each clip's content, in timeline order. Clip id and time are given ")
-            append("before each frame. Use them to judge CONTENT (which clip is the ")
-            append("highlight, scene changes, dead pauses, visual quality); each is a ")
-            append("single midpoint frame, so find precise boundaries with your tools ")
-            append("(split/trim) and verify with get_draft_overview. If a clip has no ")
-            append("frame here, it is a black gap or its frame could not be extracted.")
-            frames.forEach { f ->
-                append("\n[${f.clipId} \"${f.assetName}\" at ${"%.1f".format(f.midSec)}s]")
+            append("Visual context of the current timeline. ")
+            if (videos.isNotEmpty()) {
+                append("VIDEO parts are attached AFTER any image parts, in timeline order: ")
+                append("each is a compressed 480p proxy of that clip's full content window - ")
+                append("watch them to judge content, motion, pacing and rhythm precisely. ")
+                videos.forEach { v ->
+                    append("\n[video ${v.clipId} \"${v.assetName}\" content ")
+                    append("${"%.1f".format(v.startSec)}s..${"%.1f".format(v.startSec + v.windowSec)}s")
+                    if (v.sentSec + 0.05 < v.windowSec) {
+                        append(", only the FIRST ${"%.0f".format(v.sentSec)}s attached")
+                    }
+                    append("]")
+                }
+                append("\nThe proxies are lower resolution: find EXACT cut points with your ")
+                append("tools (split/trim) and verify with get_draft_overview instead of ")
+                append("pixel-peeping.")
             }
+            if (frames.isNotEmpty()) {
+                if (videos.isNotEmpty()) append("\n")
+                append("IMAGE parts follow (one MIDDLE frame per remaining clip, in timeline ")
+                append("order) - use them to judge content where no video is attached: ")
+                frames.forEach { f ->
+                    append("\n[${f.clipId} \"${f.assetName}\" at ${"%.1f".format(f.midSec)}s]")
+                }
+            }
+            append("\nClips with no attachment here are black gaps, audio-only, or extraction failed.")
         }
-        return WireMessage("user", text, images = frames.map { it.b64Jpeg })
+        return WireMessage(
+            role = "user",
+            content = text,
+            images = frames.map { it.b64Jpeg },
+            videos = videos.map { WireVideo(it.b64Mp4, "video/mp4", it.style) },
+        )
     }
 
-    /** 错误文本像“模型不收图”吗（降级重试的触发条件，保守匹配）。 */
+    /** 错误文本像“模型不收图/视频”吗（降级重试的触发条件，保守匹配）。 */
     private fun looksLikeVisionRejection(msg: String?): Boolean {
         val m = msg ?: return false
-        return Regex("(?i)(image|multimodal|modalit|vision|base64|unsupported content|content type)")
+        return Regex("(?i)(image|multimodal|modalit|vision|base64|video|unsupported content|content type)")
             .containsMatchIn(m)
     }
 
@@ -374,6 +461,8 @@ class AiChatController(
         const val NEED_CONFIG_HINT = "请先在设置中配置模型 API Key（密钥只保存在本机）"
         const val ROUND_LIMIT_NOTE = "这一轮做的修改有点多，先到这儿；不满意点撤销，想继续就再说一句"
         const val BUSY_READING_FRAMES = "正在读取画面…"
+        const val BUSY_COMPRESSING = "正在压缩视频发给模型…"
         const val VISION_FALLBACK_NOTE = "这个模型看不了图，我改用纯文字模式再试了一次"
+        const val VIDEO_FALLBACK_NOTE = "这个模型收不了整段视频，我改用关键帧画面再试了一次"
     }
 }

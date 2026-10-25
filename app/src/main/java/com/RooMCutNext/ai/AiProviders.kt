@@ -89,6 +89,14 @@ data class AiSettings(
      * 但 auto 启发式先把大多数情况挡在外面。
      */
     val visionMode: String = VISION_AUTO,
+    /**
+     * v1.6.9 画面方式：frames = 每段中间帧小图（通用多模态）；
+     * video = 整段视频压成 480p 代理直传（需原生视频理解模型，
+     * 对齐电脑 web/编程 Agent 里“附文件”的体验）。
+     */
+    val visionStyle: String = VISION_STYLE_FRAMES,
+    /** v1.6.9 视频部件方言：input_video = Qwen 系；video_url = GLM/MiniMax 系。 */
+    val videoPartStyle: String = VIDEO_PART_INPUT_VIDEO,
 ) {
     val preset: AiProviderPreset get() = AiProvider.byId(providerId) ?: AiProvider.PRESETS.first()
 
@@ -115,10 +123,36 @@ data class AiSettings(
         else -> framesAvailable && modelLooksMultimodal(effectiveModel)
     }
 
+    /**
+     * v1.6.9：是否应把整段视频直传（videoClipsAvailable = 时间线上有
+     * 没有视频片段）。仅 visionStyle = video 时可能为 true；auto 档
+     * 还要求模型名像原生视频模型，否则回落关键帧模式。
+     */
+    fun wantVideo(videoClipsAvailable: Boolean): Boolean {
+        if (visionStyle != VISION_STYLE_VIDEO) return false
+        return when (visionMode) {
+            VISION_OFF -> false
+            VISION_ON -> videoClipsAvailable
+            else -> videoClipsAvailable && modelLooksVideoNative(effectiveModel)
+        }
+    }
+
+    /** v1.6.9：实际使用的视频部件方言。 */
+    val effectiveVideoPartStyle: VideoPartStyle
+        get() = if (videoPartStyle == VIDEO_PART_VIDEO_URL) VideoPartStyle.VIDEO_URL else VideoPartStyle.INPUT_VIDEO
+
     companion object {
         const val VISION_AUTO = "auto"
         const val VISION_ON = "on"
         const val VISION_OFF = "off"
+
+        /** v1.6.9 画面方式：关键帧 / 整段视频。 */
+        const val VISION_STYLE_FRAMES = "frames"
+        const val VISION_STYLE_VIDEO = "video"
+
+        /** v1.6.9 视频部件方言。 */
+        const val VIDEO_PART_INPUT_VIDEO = "input_video"
+        const val VIDEO_PART_VIDEO_URL = "video_url"
 
         /**
          * 模型名启发式：长得像多模态才敢发图。
@@ -130,6 +164,17 @@ data class AiSettings(
         fun modelLooksMultimodal(model: String): Boolean {
             val m = model.trim().lowercase()
             return Regex("(4o|4\\.1|vision|4v|4\\.5v|-vl|vl-|gemini|omni|llava|qvq)").containsMatchIn(m)
+        }
+
+        /**
+         * v1.6.9 原生视频模型启发式（比多模态更严：能“吃整段视频”）：
+         * 覆盖 qwen2.5/3-vl 全系（-vl）、qvq、glm-4v-plus、glm-4.5v、
+         * minimax-vl、intern-vl、自命名含 video 的网关模型。
+         * gpt-4o（只吃图不吃视频）/ glm-4.6 / deepseek / kimi 均不误伤。
+         */
+        fun modelLooksVideoNative(model: String): Boolean {
+            val m = model.trim().lowercase()
+            return Regex("(-vl|vl-|qvq|glm-4v|glm-4\\.5v|glm-4\\.6v|4v-plus|video)").containsMatchIn(m)
         }
     }
 }

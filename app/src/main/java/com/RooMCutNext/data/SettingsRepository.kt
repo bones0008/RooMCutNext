@@ -41,6 +41,11 @@ class SettingsRepository(context: Context) {
         apiKey = prefs.getString(KEY_AI_API_KEY, "") ?: "",
         model = prefs.getString(KEY_AI_MODEL, "") ?: "",
         visionMode = prefs.getString(KEY_AI_VISION, AiSettings.VISION_AUTO) ?: AiSettings.VISION_AUTO,
+        // v1.6.9 整段视频：画面方式 + 视频部件方言。
+        visionStyle = prefs.getString(KEY_AI_VISION_STYLE, AiSettings.VISION_STYLE_FRAMES)
+            ?: AiSettings.VISION_STYLE_FRAMES,
+        videoPartStyle = prefs.getString(KEY_AI_VIDEO_PART, AiSettings.VIDEO_PART_INPUT_VIDEO)
+            ?: AiSettings.VIDEO_PART_INPUT_VIDEO,
     )
 
     fun setAiSettings(settings: AiSettings) {
@@ -50,6 +55,8 @@ class SettingsRepository(context: Context) {
             .putString(KEY_AI_API_KEY, settings.apiKey)
             .putString(KEY_AI_MODEL, settings.model)
             .putString(KEY_AI_VISION, settings.visionMode)
+            .putString(KEY_AI_VISION_STYLE, settings.visionStyle)
+            .putString(KEY_AI_VIDEO_PART, settings.videoPartStyle)
             .apply()
     }
 
@@ -71,5 +78,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_AI_API_KEY = "ai_api_key"
         private const val KEY_AI_MODEL = "ai_model"
         private const val KEY_AI_VISION = "ai_vision"
+        private const val KEY_AI_VISION_STYLE = "ai_vision_style"
+        private const val KEY_AI_VIDEO_PART = "ai_video_part"
     }
 }
