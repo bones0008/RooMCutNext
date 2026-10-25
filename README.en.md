@@ -57,6 +57,7 @@ Mapped against the original V1 requirements (✅ = implemented, ⚠️ = simplif
 
 ### 2.5. AI Editing Assistant (v1.6.0)
 - ✅ **Conversational AI editing (OpenChatCut pattern, replicated)**: describe the edit you want in one sentence and the agent performs REAL edits on the timeline through tool calls — split / delete / reorder / trim / speed / volume / LUT looks / transitions / **black gap insertion (v1.6.1)** / text overlays / audio adjustments / seek, 18 tools in total, all landing on the same TimelineOps core the manual editor uses (agent and editor share one "EditorCore"; there is no second editing semantics to drift apart)
+- ✅ **Chat panel layout reworked (v1.6.2, field feedback)**: opening the AI panel no longer shows the "AI Edit + close" header row or the bottom action toolbar (useless mid-conversation, pure wasted space) — the chat area grows automatically and the close button moved into the input row; when the keyboard opens it now squeezes ONLY the conversation area, the video preview keeps its full size (the old layout squashed the whole UI including the video, and after closing the keyboard the video stayed small until you pressed play); the onboarding card and the proposal card scroll with the message list so the input row stays pinned at the bottom and always visible; the send button now uses an always-visible tint (it used to be a nearly invisible disabled grey when the text was empty)
 - ✅ **Draft session + single-step undo**: AI changes go to a DRAFT first (the project is untouched), the panel lists every operation, and only tapping Apply writes them — the whole batch commits as ONE undo record (one tap undoes the entire AI change set); if the timeline was edited manually during the chat the proposal warns about overwriting; the agent may also seek, so the playhead lands on the change after applying
 - ✅ **BYOK, local-first**: Zhipu GLM / DeepSeek / Kimi / OpenAI presets plus any OpenAI-compatible endpoint (LAN Ollama / LM Studio included); the API key stays on-device; chats carry timeline STRUCTURE only (asset names / durations / tracks / playhead) — never any media content
 - ✅ **Bounded safety net**: at most 8 model round-trips / 24 tool calls per turn; every tool argument is domain-validated (id existence / numeric ranges / source-frame snapping) and errors are fed back to the model as actionable messages; the tool executor is pure Kotlin pinned by 26 new unit tests
@@ -191,7 +192,7 @@ Mapped against the original V1 requirements (✅ = implemented, ⚠️ = simplif
 
 The easiest way (no development environment needed):
 
-1. Open this repository's [Releases](https://github.com/bones0008/RooMCutNext/releases) page, go to the latest version (currently **v1.6.1**) and download `app-release.apk`
+1. Open this repository's [Releases](https://github.com/bones0008/RooMCutNext/releases) page, go to the latest version (currently **v1.6.2**) and download `app-release.apk`
 2. Transfer the APK to your phone (WeChat / cloud drive / USB all work)
 3. Tap the file on the phone and allow "install from unknown sources" when prompted
 4. After installation, the "RooMCutNext" icon appears on the home screen

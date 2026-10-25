@@ -18,16 +18,21 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
@@ -250,7 +255,14 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             // the inline tool panel (文字/精确定位) stay visible while typing.
             // Kept AFTER background() so the background still paints edge to
             // edge; when no keyboard is showing this is a no-op.
-            .imePadding()
+            // v1.6.2: NOT in AI-chat mode — the chat panel handles the IME
+            // itself (ToolPanelHost AI branch), so the video preview keeps
+            // its full size while typing instead of being squashed by the
+            // keyboard.
+            .then(
+                if (state.activePanel == PanelKind.AI_CHAT) Modifier
+                else Modifier.imePadding()
+            )
     ) {
 
         // ---------------- top bar ----------------
@@ -392,6 +404,21 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                         vm.playback.bindView(pv)
                         vm.overlays.attach(overlayLayer)
                         playerViewRef = pv
+                        // v1.6.2: IME-close video-restore fix. While PAUSED no
+                        // frames flow, so after the stage resizes (keyboard
+                        // opening/closing, panel switches…) the surface keeps
+                        // showing the frame at the OLD size until playback
+                        // resumes — the "must press play to see the video big
+                        // again" report. Debounced same-frame redraw via the
+                        // v1.3.3 replayable-cache nudge repaints the paused
+                        // frame at the new size immediately.
+                        val resizeNudge = Runnable { vm.onPreviewStageResized() }
+                        addOnLayoutChangeListener { v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+                            if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
+                                v.removeCallbacks(resizeNudge)
+                                v.postDelayed(resizeNudge, 120L)
+                            }
+                        }
                     }
                 },
                 update = { stage ->
@@ -610,7 +637,12 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         }
 
         // ---------------- action toolbar ----------------
-        ActionToolbar(
+        // v1.6.2: hidden while the AI chat is open — those tools are useless
+        // in a conversation (real-device feedback), and the chat gets the
+        // reclaimed row of height. The panel's close button lives in its
+        // own input row, so no exit affordance is lost.
+        if (state.activePanel != PanelKind.AI_CHAT) {
+            ActionToolbar(
             state = state,
             onAddMedia = { launchMediaPicker() },
             // v1.6.0: AI 剪辑 — 对话式 agent（不要求选中目标，agent 自己读项目）。
@@ -642,7 +674,8 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onAudio = { vm.openPanel(PanelKind.AUDIO) },
             onInfo = { vm.openPanel(PanelKind.INFO) },
             onGoto = { vm.openPanel(PanelKind.GOTO) },
-        )
+            )
+        }
 
         // v1.6.1: 黑场插入对话框。选项行点击即插入（默认 2s，选中即改为选中时长；
         // 拖动片段边缘可后续自由拉伸 0.1..60s）。
@@ -974,6 +1007,23 @@ private fun ToolPanelHost(
         color = MaterialTheme.colorScheme.surface,
         modifier = Modifier.fillMaxSize(),
     ) {
+        // v1.6.2: AI 对话面板独立分支 —— 真机反馈“AI 剪辑+叉的头部行占一排
+        // 毫无用处”：不再渲染头部行（关闭键已收进面板自己的输入行，
+        // 由 AiChatPanel 的 onClose 传入 openPanel(null)）。键盘避让也改由
+        // 这里统一处理（ime ∪ navigationBars 取大者）：宿主主列在 AI 模式
+        // 下不再整体 imePadding，预览保持原尺寸，键盘只压缩对话区；
+        // 旧版的三层叠加 imePadding 会把输入行直接推出屏幕。
+        if (panel == PanelKind.AI_CHAT) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(
+                        WindowInsets.ime.union(WindowInsets.navigationBars)
+                    )
+            ) {
+                AiChatPanel(vm = vm, onClose = { vm.openPanel(null) })
+            }
+        } else {
         Column(Modifier.fillMaxSize()) {
         // ---- pinned header: title + target clip + close ----
         Row(
@@ -1010,18 +1060,6 @@ private fun ToolPanelHost(
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-        // v1.6.0: AI 对话面板自管滚动（消息 LazyColumn + 固定输入行），
-        // 不能进共享 verticalScroll 容器（同向嵌套滚动会被无限高度约束炸掉）。
-        if (panel == PanelKind.AI_CHAT) {
-            Box(
-                Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .imePadding()
-            ) {
-                AiChatPanel(vm = vm)
-            }
-        } else {
         // ---- scrollable body: the ONE vertical scroller shared by every
         // panel. Sheets emit plain ColumnScope content, so they stack
         // vertically and scroll together; sliders keep their horizontal
@@ -1039,7 +1077,7 @@ private fun ToolPanelHost(
                 panel == PanelKind.TEXT && state.selectedText == null ->
                     PanelEmptyHint(stringResource(R.string.panel_text_gone))
                 else -> when (panel) {
-                    // AI_CHAT 不可达（已在上方自管滚动分支处理），仅为枚举完备。
+                    // AI_CHAT 不可达（已在上方独立分支处理），仅为枚举完备。
                     PanelKind.AI_CHAT -> Unit
                     PanelKind.SPEED -> SpeedSheet(vm, state)
                     PanelKind.ROTATE -> RotateSheet(vm, state)

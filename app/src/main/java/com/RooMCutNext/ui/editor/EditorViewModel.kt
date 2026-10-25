@@ -421,6 +421,23 @@ class EditorViewModel(
     }
 
     /**
+     * v1.6.2: the preview stage (AndroidView) just resized — IME opening or
+     * closing, panel switches, anything that changes the stage bounds.
+     *
+     * While paused the video pipeline pushes no frames, so after a resize the
+     * surface keeps showing the paused frame at the OLD output size (the
+     * video graph reconfigures only when the next frame flows) — the exact
+     * "close the keyboard and the video stays small until I press play"
+     * real-device report. A forced redraw replays the cached last frame
+     * through the effects pipeline at the new size, restoring the picture
+     * without needing playback. No-op while playing (frames flow on their
+     * own) and while nothing is prepared.
+     */
+    fun onPreviewStageResized() {
+        nudgePreviewRedraw(force = true)
+    }
+
+    /**
      * Commit a live-preview edit: record undo from the pre-drag state.
      * When no preview drag is active, behaves like [mutate].
      */

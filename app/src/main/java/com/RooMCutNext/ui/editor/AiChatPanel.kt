@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -18,6 +17,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -58,21 +58,28 @@ import com.RooMCutNext.ai.AiChatUiState
 /**
  * AI 剪辑（v1.6.0）— 对话面板。
  *
- * 宿主为 ToolPanelHost 的自管滚动分支（消息列表 + 固定输入行）。
- * 与其它工具面板不同，本面板不要求选中任何目标：agent 通过工具
- * 直接读项目状态，用户只需要描述想要的剪辑结果。
+ * v1.6.2 布局重做（真机反馈）：
+ *  - 引导卡与提案卡移入 LazyColumn —— 面板的固定子项只剩消息列表、
+ *    忙碌行和输入行，输入行永远不会被固定高度内容挤出屏幕（竖屏
+ *    项目预览占 weight(1.4f) 时旧布局把输入行裁剪到只剩一条）；
+ *  - 关闭键收进输入行（“AI 剪辑 + 叉”的整行头部已删，省 41dp）；
+ *  - 发送键不再用 enabled=false 的禁用态（空文本时几乎不可见），
+ *    改为恒可点、按是否有文本换色；
+ *  - 不再自带 imePadding —— 键盘避让由宿主统一处理（旧的三层
+ *    叠加把输入行推出了屏幕）。
  */
 @Composable
-fun AiChatPanel(vm: EditorViewModel, modifier: Modifier = Modifier) {
+fun AiChatPanel(vm: EditorViewModel, onClose: () -> Unit, modifier: Modifier = Modifier) {
     val aiState by vm.aiChat.state.collectAsState()
+    // v1.6.2: 关闭面板时先收键盘，避免宿主恢复 imePadding 的瞬间布局抖动。
+    val keyboard = LocalSoftwareKeyboardController.current
+    fun closePanel() {
+        keyboard?.hide()
+        onClose()
+    }
     Column(modifier = modifier.fillMaxSize()) {
 
-        // ---- 未配置引导 ----
-        if (!aiState.settings.ready) {
-            AiOnboardingCard(onConfigure = { vm.aiChat.openSettings(true) })
-        }
-
-        // ---- 消息流 ----
+        // ---- 消息流（引导卡/提案卡也在流内，可滚动）----
         val listState = rememberLazyListState()
         LazyColumn(
             state = listState,
@@ -84,6 +91,10 @@ fun AiChatPanel(vm: EditorViewModel, modifier: Modifier = Modifier) {
             ),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // 未配置引导放在流首：竖屏小屏上它不再把输入行挤出屏幕。
+            if (!aiState.settings.ready) {
+                item { AiOnboardingCard(onConfigure = { vm.aiChat.openSettings(true) }) }
+            }
             items(aiState.entries.size) { i ->
                 when (val e = aiState.entries[i]) {
                     is AiChatEntry.User -> UserBubble(e.text)
@@ -92,16 +103,31 @@ fun AiChatPanel(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     is AiChatEntry.Note -> NoteLine(e)
                 }
             }
+            // 提案卡也进流：有新提案时自动滚到它能被看到，且小屏不会
+            // 把输入行顶出容器。
+            aiState.proposal?.let { proposal ->
+                item {
+                    ProposalCard(
+                        changeCount = proposal.changeCount,
+                        journal = proposal.journal,
+                        summary = proposal.summary,
+                        seekSec = proposal.seekSec,
+                        stale = proposal.stale,
+                        onApply = { vm.aiChat.applyProposal() },
+                        onDiscard = { vm.aiChat.discardProposal() },
+                    )
+                }
+            }
             item { Spacer(Modifier.height(4.dp)) }
         }
-        // 新消息自动滚到底部。
-        LaunchedEffect(aiState.entries.size) {
+        // 新消息/新提案自动滚到流底。
+        LaunchedEffect(aiState.entries.size, aiState.proposal != null) {
             if (aiState.entries.isNotEmpty()) {
-                runCatching { listState.animateScrollToItem(aiState.entries.size) }
+                runCatching { listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1) }
             }
         }
 
-        // ---- 忙碌指示 ----
+        // ---- 忙碌指示（固定子项，仅 18dp 高）----
         if (aiState.busy) {
             Row(
                 Modifier
@@ -128,21 +154,12 @@ fun AiChatPanel(vm: EditorViewModel, modifier: Modifier = Modifier) {
             )
         }
 
-        // ---- 提案卡 ----
-        aiState.proposal?.let { proposal ->
-            ProposalCard(
-                changeCount = proposal.changeCount,
-                journal = proposal.journal,
-                summary = proposal.summary,
-                seekSec = proposal.seekSec,
-                stale = proposal.stale,
-                onApply = { vm.aiChat.applyProposal() },
-                onDiscard = { vm.aiChat.discardProposal() },
-            )
-        }
-
-        // ---- 输入行 ----
-        AiInputRow(enabled = !aiState.busy, onSend = { vm.aiChat.send(it) })
+        // ---- 输入行（固定子项，永远可见）----
+        AiInputRow(
+            enabled = !aiState.busy,
+            onSend = { vm.aiChat.send(it) },
+            onClose = ::closePanel,
+        )
 
         // ---- 设置 ----
         if (aiState.settingsOpen) {
@@ -306,13 +323,21 @@ private fun ProposalCard(
 }
 
 @Composable
-private fun AiInputRow(enabled: Boolean, onSend: (String) -> Unit) {
+private fun AiInputRow(
+    enabled: Boolean,
+    onSend: (String) -> Unit,
+    onClose: () -> Unit,
+) {
     var text by remember { mutableStateOf("") }
     val keyboard = LocalSoftwareKeyboardController.current
+    fun trySend() {
+        if (text.isNotBlank() && enabled) {
+            onSend(text); text = ""; keyboard?.hide()
+        }
+    }
     Row(
         Modifier
             .fillMaxWidth()
-            .imePadding()
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -324,26 +349,26 @@ private fun AiInputRow(enabled: Boolean, onSend: (String) -> Unit) {
             singleLine = true,
             enabled = enabled,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = {
-                if (text.isNotBlank()) {
-                    onSend(text); text = ""; keyboard?.hide()
-                }
-            }),
+            keyboardActions = KeyboardActions(onSend = { trySend() }),
         )
         Spacer(Modifier.width(6.dp))
-        IconButton(
-            onClick = {
-                if (text.isNotBlank()) {
-                    onSend(text); text = ""; keyboard?.hide()
-                }
-            },
-            enabled = enabled && text.isNotBlank(),
-        ) {
+        // v1.6.2: 发送键恒可点（空文本点击为无操作）—— 禁用态的灰色
+        // 图标在深色面板上几乎不可见，真机反馈“右下有个看不见的按键”。
+        // 是否可发由 tint 表达：有文本亮主题色，无文本用中性色。
+        IconButton(onClick = { trySend() }) {
             Icon(
                 Icons.Filled.Send,
                 stringResource(R.string.ai_send),
                 tint = if (enabled && text.isNotBlank()) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.outline,
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        // v1.6.2: 关闭键收进输入行（原来的“AI 剪辑 + 叉”头部行已删）。
+        IconButton(onClick = onClose) {
+            Icon(
+                Icons.Filled.Close,
+                stringResource(R.string.panel_close),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
