@@ -1,5 +1,6 @@
 package com.RooMCutNext.core.ops
 
+import com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID
 import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.MediaType
@@ -141,22 +142,25 @@ class TimelineOpsTest {
     // ---------------- delete / move / duplicate ----------------
 
     @Test
-    fun `delete keeps a black gap in the middle`() {
-        // v1.0.8: deleting a middle clip leaves the hole — the tail clips
-        // STAY WHERE THEY ARE (the user lays text over the black segment).
+    fun `delete ripples the tail closed`() {
+        // v1.6.1: deleting a middle clip CLOSES the hole — the tail clips
+        // move left onto the predecessor (black pauses are explicit
+        // black-frame clips now; see insertBlackGap tests below).
         val clips = listOf(clip("a", 0, 2_000_000), clip("a", 0, 3_000_000), clip("a", 0, 1_000_000))
         val after = TimelineOps.delete(clips, 1)
         assertEquals(2, after.size)
         val st = TimelineOps.starts(after)
-        // st[1] is the third clip's REAL start (2s of A + 3s hole), not 2s.
+        // The third clip now starts right after the first — no 3s hole.
         assertEquals(0L, st[0])
-        assertEquals(5_000_000L, st[1])
-        assertEquals(6_000_000L, st[2])
-        assertEquals(3_000_000L, after[1].gapBeforeUs)
+        assertEquals(2_000_000L, st[1])
+        assertEquals(3_000_000L, st[2])
+        assertEquals(0L, after.sumOf { it.gapBeforeUs })
     }
 
     @Test
     fun `delete last clip drops the tail`() {
+        // No follower to ripple onto — the tail simply disappears (same as
+        // every version before; ripple delete is trivially identical here).
         val clips = listOf(clip("a", 0, 2_000_000), clip("a", 0, 3_000_000))
         val after = TimelineOps.delete(clips, 1)
         assertEquals(1, after.size)
@@ -165,13 +169,15 @@ class TimelineOpsTest {
     }
 
     @Test
-    fun `delete merges the hole with an existing gap`() {
-        // A | hole(1s) | B : deleting A leaves ONE 3s hole before B.
+    fun `delete keeps only the pre-existing gap`() {
+        // A | hole(1s) | B : deleting A leaves the 1s hole before B (a gap
+        // the user dragged in deliberately survives), but A's own 2s span
+        // ripples closed — it does NOT become a 3s hole anymore (v1.6.1).
         val a = clip("a", 0, 2_000_000)
         val b = clip("b", 0, 1_000_000).copy(gapBeforeUs = 1_000_000L)
         val after = TimelineOps.delete(listOf(a, b), 0)
         assertEquals(1, after.size)
-        assertEquals(3_000_000L, after[0].gapBeforeUs)
+        assertEquals(1_000_000L, after[0].gapBeforeUs)
     }
 
     @Test
@@ -221,6 +227,106 @@ class TimelineOpsTest {
         val after = TimelineOps.duplicate(listOf(a, b), 0, "dup1")
         assertEquals(0L, after[1].gapBeforeUs) // copy hugs the original
         assertEquals(2_000_000L, after[0].gapBeforeUs) // original keeps its hole
+    }
+
+    // ---------------- v1.6.1 black-frame gaps（黑场） ----------------
+
+    @Test
+    fun `insertBlackGap after anchor hugs it and pushes the tail`() {
+        val clips = listOf(clip("a", 0, 2_000_000), clip("b", 0, 1_000_000))
+        val after = TimelineOps.insertBlackGap(clips, 0, after = true, 1_500_000L, "blk1")
+        assertEquals(3, after.size)
+        assertEquals("blk1", after[1].id)
+        assertEquals(BLACK_FRAME_ASSET_ID, after[1].assetId)
+        assertEquals(0L, after[1].gapBeforeUs) // hugs the anchor
+        assertEquals(0L, after[2].gapBeforeUs) // tail hugs the black clip
+        val st = TimelineOps.starts(after)
+        assertEquals(0L, st[0])
+        assertEquals(2_000_000L, st[1])      // black right after A
+        assertEquals(3_500_000L, st[2])      // B pushed right by 1.5s
+        assertEquals(4_500_000L, st[3])
+        // 黑场是普通图片素材：sourceOut 即时长，可被 trim 拉伸 0.1..60s。
+        assertEquals(1_500_000L, after[1].durationUs)
+    }
+
+    @Test
+    fun `insertBlackGap before anchor takes over the anchor gap`() {
+        // A | hole(1s) | B : black goes right before B — the pre-existing hole
+        // stays at the slot front (transferred onto the black clip), B hugs it.
+        val a = clip("a", 0, 1_000_000)
+        val b = clip("b", 0, 1_000_000).copy(gapBeforeUs = 1_000_000L)
+        val after = TimelineOps.insertBlackGap(listOf(a, b), 1, after = false, 2_000_000L, "blk1")
+        assertEquals(3, after.size)
+        assertEquals(BLACK_FRAME_ASSET_ID, after[1].assetId)
+        assertEquals(1_000_000L, after[1].gapBeforeUs) // hole moved onto the black clip
+        assertEquals(0L, after[2].gapBeforeUs)         // B hugs the black clip
+        val st = TimelineOps.starts(after)
+        assertEquals(0L, st[0])
+        assertEquals(2_000_000L, st[1])  // black = A end + hole
+        assertEquals(4_000_000L, st[2])  // B after the 2s black
+        assertEquals(5_000_000L, st[3])
+    }
+
+    @Test
+    fun `insertBlackGap before first clip with no gap starts at zero`() {
+        val clips = listOf(clip("a", 0, 1_000_000))
+        val after = TimelineOps.insertBlackGap(clips, 0, after = false, 1_000_000L, "blk1")
+        assertEquals(BLACK_FRAME_ASSET_ID, after[0].assetId)
+        assertEquals(0L, after[0].gapBeforeUs)
+        val st = TimelineOps.starts(after)
+        assertEquals(0L, st[0])          // black is the new first clip
+        assertEquals(1_000_000L, st[1])
+        assertEquals(2_000_000L, st[2])
+    }
+
+    @Test
+    fun `insertBlackGap with invalid anchor appends`() {
+        val clips = listOf(clip("a", 0, 1_000_000))
+        val after = TimelineOps.insertBlackGap(clips, -1, after = true, 2_000_000L, "blk1")
+        assertEquals(2, after.size)
+        assertEquals(BLACK_FRAME_ASSET_ID, after[1].assetId)
+        assertEquals(3_000_000L, TimelineOps.starts(after)[2])
+        // empty timeline: the black clip alone is a valid (text-over-black) timeline
+        val empty = TimelineOps.insertBlackGap(emptyList(), 0, after = false, 2_000_000L, "blk0")
+        assertEquals(1, empty.size)
+        assertEquals(BLACK_FRAME_ASSET_ID, empty[0].assetId)
+    }
+
+    @Test
+    fun `insertBlackGap clamps duration into 100ms to 60s`() {
+        val tooShort = TimelineOps.insertBlackGap(emptyList(), -1, after = true, 5_000L, "blk1")
+        assertEquals(100_000L, tooShort[0].sourceOutUs)
+        val tooLong = TimelineOps.insertBlackGap(emptyList(), -1, after = true, 90_000_000L, "blk2")
+        assertEquals(60_000_000L, tooLong[0].sourceOutUs)
+    }
+
+    @Test
+    fun `black gap deletes and ripples like any clip`() {
+        // 黑场就是普通素材：删除后时间线收拢，不留洞。
+        val clips = listOf(
+            clip("a", 0, 1_000_000),
+            Clip(id = "blk1", assetId = BLACK_FRAME_ASSET_ID, sourceInUs = 0, sourceOutUs = 2_000_000),
+            clip("b", 0, 1_000_000),
+        )
+        val after = TimelineOps.deleteById(clips, "blk1")
+        assertEquals(2, after.size)
+        assertEquals(0L, after.sumOf { it.gapBeforeUs })
+        assertEquals(2_000_000L, TimelineOps.starts(after)[2])
+    }
+
+    @Test
+    fun `black gap splits at playhead like an image clip`() {
+        val clips = listOf(
+            Clip(id = "blk1", assetId = BLACK_FRAME_ASSET_ID, sourceInUs = 0, sourceOutUs = 4_000_000),
+        )
+        val lookup: (String) -> MediaAsset? = {
+            if (it == BLACK_FRAME_ASSET_ID) asset(id = BLACK_FRAME_ASSET_ID, image = true) else null
+        }
+        val result = TimelineOps.splitAtTimeline(clips, lookup, 1_500_000L, "blk2")
+        assertNotNull(result)
+        assertEquals(1_500_000L, result!!.clips[0].sourceOutUs)
+        assertEquals(1_500_000L, result.clips[1].sourceInUs)
+        assertEquals(BLACK_FRAME_ASSET_ID, result.clips[1].assetId)
     }
 
     // ---------------- gaps (v1.0.8) ----------------

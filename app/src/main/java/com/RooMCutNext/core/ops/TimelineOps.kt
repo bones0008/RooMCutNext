@@ -1,6 +1,7 @@
 package com.RooMCutNext.core.ops
 
 import com.RooMCutNext.core.model.AUDIO_MIN_DURATION_US
+import com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID
 import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
@@ -18,11 +19,18 @@ import kotlin.math.min
 /**
  * Pure, immutable timeline operations for the single-layer editor.
  *
- * Timeline v3 — GAPS: each clip carries a `gapBeforeUs` hole, so positions are
- * prefix sums of (gapBeforeUs + durationUs). Deleting a middle clip KEEPS a
- * black gap (the hole is transferred to the following clip); deleting the last
- * clip drops its tail (no endless black tail). Trim still ripples the tail
- * forward (standard NLE trim behavior), split inserts the right half tightly.
+ * Timeline v3 — GAPS: each clip carries a `gapBeforeUs` hole, so positions
+ * are prefix sums of (gapBeforeUs + durationUs).
+ *
+ * v1.6.1 — RIPPLE DELETE + 黑场： deleting a clip now CLOSES the hole (the
+ * tail clips ripple left; only the clip's PRE-EXISTING leading gap, e.g.
+ * one the user dragged in deliberately, survives). Black pauses are added
+ * explicitly as black-frame clips ([insertBlackGap]) — an ordinary image
+ * clip the user can stretch (0.1s..60s), split, transition into/out of
+ * (dissolve into 黑场 = fade-to-black) and delete — instead of appearing
+ * implicitly as leftover holes. This matches CapCut / Premiere semantics:
+ * the timeline is compact by default, silence is a deliberate asset.
+ * Legacy projects that still carry holes keep rendering them as before.
  *
  * Conventions (from studying OpenCut / LibreCuts):
  *  - All times are integer microseconds.
@@ -106,23 +114,8 @@ object TimelineOps {
         if (asset.isImage) IMAGE_MAX_DURATION_US else asset.durationUs
 
     // ------------------------------------------------------------------
-    // Structural operations (gap-aware: deleting a middle clip leaves a hole)
+    // Structural operations (v1.6.1: ripple delete + explicit black clips)
     // ------------------------------------------------------------------
-
-    /**
-     * Remove clips[index] transferring its hole (gapBeforeUs + durationUs) to
-     * the clip that follows; removing the LAST clip drops the tail entirely
-     * (no endless black tail at the end of the timeline).
-     */
-    private fun removeWithHole(clips: List<Clip>, index: Int): MutableList<Clip> {
-        val out = clips.toMutableList()
-        val removed = out.removeAt(index)
-        if (index < out.size) {
-            val next = out[index]
-            out[index] = next.copy(gapBeforeUs = next.gapBeforeUs + removed.gapBeforeUs + removed.durationUs)
-        }
-        return out
-    }
 
     fun insert(clips: List<Clip>, clip: Clip, atIndex: Int): List<Clip> {
         val idx = atIndex.coerceIn(0, clips.size)
@@ -132,24 +125,28 @@ object TimelineOps {
     fun append(clips: List<Clip>, clip: Clip): List<Clip> = clips + clip
 
     /**
-     * Delete keeping the hole: a middle clip turns into a black gap the user
-     * can lay text over; the tail clips STAY WHERE THEY ARE.
+     * v1.6.1: RIPPLE delete — the removed clip's own time span does NOT
+     * become a hole; the following clips close up. Only the clip's
+     * PRE-EXISTING leading gap (one the user dragged in deliberately, or a
+     * legacy-project hole) survives, transferred to the follower. Black
+     pauses are the user's explicit choice now: [insertBlackGap].
      */
     fun delete(clips: List<Clip>, index: Int): List<Clip> {
         if (index < 0 || index >= clips.size) return clips
-        return removeWithHole(clips, index)
+        return removeTransferringGapOnly(clips, index)
     }
 
     fun deleteById(clips: List<Clip>, clipId: String): List<Clip> {
         val index = clips.indexOfFirst { it.id == clipId }
         if (index < 0) return clips
-        return removeWithHole(clips, index)
+        return removeTransferringGapOnly(clips, index)
     }
 
     /**
      * Remove clips[index] transferring ONLY its pre-existing hole (gapBeforeUs)
-     * to the follower — the clip's own time span does NOT become a hole. Used
-     * by [move]: relocating content must not punch new holes into the timeline.
+     * to the follower — the clip's own time span does NOT become a hole.
+     * Used by [delete] (ripple) and [move]: relocating content must not punch
+     * new holes into the timeline.
      */
     private fun removeTransferringGapOnly(clips: List<Clip>, index: Int): MutableList<Clip> {
         val out = clips.toMutableList()
@@ -220,6 +217,47 @@ object TimelineOps {
         // The copy is inserted tightly after the original (no copied hole).
         val copy = clips[index].copy(id = newId, gapBeforeUs = 0L)
         return clips.subList(0, index + 1) + copy + clips.subList(index + 1, clips.size)
+    }
+
+    /**
+     * v1.6.1: 插入黑场 —— 一段可自由拉伸的纯黑图片素材（0.1s..60s）。
+     *
+     * 锚定语义（与 move/place 的“洞归槽位”纪律一致）：
+     *  - [anchorIndex] 无效（-1/越界/空时间线）→ 追加到末尾；
+     *  - after=true  → 紧贴锚素材之后插入（黑场 gapBeforeUs=0，后续素材右移）；
+     *  - after=false → 紧贴锚素材之前插入：黑场接管锚点原有的 gapBeforeUs
+     *    （锚点前的洞留在槽位前端），锚素材 gapBeforeUs 清零右移 —— 锚素材
+     *    的内容起点恰好右移一个黑场时长，相对位置语义最直观。
+     *
+     * [durationUs] 被钳入 [MIN_SOURCE_SPAN_US]..[IMAGE_MAX_DURATION_US]；
+     * 60s 以上的停顿用多段黑场拼接即可。
+     */
+    fun insertBlackGap(
+        clips: List<Clip>,
+        anchorIndex: Int,
+        after: Boolean,
+        durationUs: Long,
+        newId: String,
+    ): List<Clip> {
+        val dur = durationUs.coerceIn(MIN_SOURCE_SPAN_US, IMAGE_MAX_DURATION_US)
+        val black = Clip(
+            id = newId,
+            assetId = BLACK_FRAME_ASSET_ID,
+            sourceInUs = 0L,
+            sourceOutUs = dur,
+        )
+        if (anchorIndex !in clips.indices) {
+            return clips + black
+        }
+        return if (after) {
+            insert(clips, black, anchorIndex + 1)
+        } else {
+            val anchor = clips[anchorIndex]
+            val out = clips.toMutableList()
+            out[anchorIndex] = anchor.copy(gapBeforeUs = 0L)
+            out.add(anchorIndex, black.copy(gapBeforeUs = anchor.gapBeforeUs))
+            out
+        }
     }
 
     fun update(clips: List<Clip>, clipId: String, transform: (Clip) -> Clip): List<Clip> =

@@ -346,4 +346,15 @@
     <string name="ai_settings_cancel">取消</string>
     <string name="ai_settings_key_hint">获取 Key：%1$s</string>
     <string name="ai_settings_privacy">密钥仅保存在本机；对话只发送时间线结构（素材名、时长、轨道），不发送媒体内容。</string>
+    <!-- v1.6.1: 黑场素材（可拉伸的纯黑图片，替代"删除留洞"的隐式黑场） -->
+    <string name="black_frame_name">黑场</string>
+    <string name="action_black_gap">黑场</string>
+    <string name="black_gap_title">添加黑场</string>
+    <string name="black_gap_duration">时长</string>
+    <string name="black_gap_before">在素材前添加</string>
+    <string name="black_gap_after">在素材后添加</string>
+    <string name="black_gap_end">添加到时间线末尾</string>
+    <string name="black_gap_none_selected">未选中素材，将添加到时间线末尾</string>
+    <string name="black_gap_failed">黑场素材初始化失败</string>
+    <string name="black_gap_cancel">取消</string>
 </resources>

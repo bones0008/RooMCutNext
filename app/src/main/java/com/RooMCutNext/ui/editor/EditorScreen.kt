@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Square
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Undo
@@ -64,6 +65,7 @@ import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -99,6 +101,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.launch
 import com.RooMCutNext.R
+import com.RooMCutNext.core.model.BLACK_DEFAULT_DURATION_US
 import com.RooMCutNext.core.util.TimeCode
 import com.RooMCutNext.export.ExportBus
 import com.RooMCutNext.ui.theme.AccentColor
@@ -119,6 +122,9 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
     val titleInteraction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     var titleTapCount by remember { mutableStateOf(0) }
     var lastTitleTapMs by remember { mutableStateOf(0L) }
+
+    // ---- v1.6.1: 黑场插入对话框（时长 + 前/后/末尾） ----
+    var showBlackGapDialog by remember { mutableStateOf(false) }
 
     // ---- media pickers ----
     // "添加素材" accepts ALL media types (video / image / audio): audio files
@@ -609,6 +615,8 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onAddMedia = { launchMediaPicker() },
             // v1.6.0: AI 剪辑 — 对话式 agent（不要求选中目标，agent 自己读项目）。
             onAi = { vm.openPanel(PanelKind.AI_CHAT) },
+            // v1.6.1: 黑场 — 删除已改为收拢贴合，黑色停顿作为显式素材插入。
+            onBlackGap = { showBlackGapDialog = true },
             onSpeed = { vm.openPanel(PanelKind.SPEED) },
             onRotate = { vm.openPanel(PanelKind.ROTATE) },
             onCrop = { vm.openPanel(PanelKind.CROP) },
@@ -635,6 +643,19 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onInfo = { vm.openPanel(PanelKind.INFO) },
             onGoto = { vm.openPanel(PanelKind.GOTO) },
         )
+
+        // v1.6.1: 黑场插入对话框。选项行点击即插入（默认 2s，选中即改为选中时长；
+        // 拖动片段边缘可后续自由拉伸 0.1..60s）。
+        if (showBlackGapDialog) {
+            BlackGapDialog(
+                hasSelection = state.selectedClipId != null,
+                onDismiss = { showBlackGapDialog = false },
+                onInsert = { before, durationUs ->
+                    showBlackGapDialog = false
+                    vm.addBlackGap(before, durationUs)
+                },
+            )
+        }
     }
 }
 
@@ -789,6 +810,7 @@ private fun ActionToolbar(
     state: EditorUiState,
     onAddMedia: () -> Unit,
     onAi: () -> Unit,
+    onBlackGap: () -> Unit,
     onSpeed: () -> Unit,
     onRotate: () -> Unit,
     onCrop: () -> Unit,
@@ -823,6 +845,9 @@ private fun ActionToolbar(
         ToolbarButton(Icons.Filled.TextFields, stringResource(R.string.action_text), enabled = true, active = active == PanelKind.TEXT, onClick = onText)
         ToolbarButton(Icons.Filled.PictureInPictureAlt, stringResource(R.string.action_pip), enabled = true, active = active == PanelKind.PIP, onClick = onPip)
         ToolbarButton(Icons.Filled.MusicNote, stringResource(R.string.action_audio), enabled = true, active = active == PanelKind.AUDIO, onClick = onAudio)
+        // v1.6.1: 黑场素材 —— 时间线级内容（同文字/音频一样不依赖选中），
+        // 对话框里再选前/后/末尾。删除已改为收拢贴合，黑场成为显式停顿。
+        ToolbarButton(Icons.Filled.Square, stringResource(R.string.action_black_gap), enabled = true, active = false, onClick = onBlackGap)
         ToolbarButton(Icons.Filled.Speed, stringResource(R.string.action_speed), enabled = hasClip, active = active == PanelKind.SPEED, onClick = onSpeed)
         ToolbarButton(Icons.Filled.RotateRight, stringResource(R.string.action_rotate), enabled = hasClip, active = active == PanelKind.ROTATE, onClick = onRotate)
         ToolbarButton(Icons.Filled.Crop, stringResource(R.string.action_crop), enabled = hasClip, active = active == PanelKind.CROP, onClick = onCrop)
@@ -1056,5 +1081,83 @@ private fun PanelEmptyHint(text: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
+    }
+}
+
+// ===========================================================================
+// v1.6.1 — 黑场插入对话框
+//
+// 删除自本版起收拢贴合（ripple），黑色停顿改为显式素材：对话框选时长
+// （1/2/5/10/30s 预设，后续仍可拖边拉伸 0.1..60s）和插入位（选中素材的
+// 前/后；未选中或空时间线则追加到末尾）。黑场是普通图片素材：可分割、
+// 可加转场（叠化进黑场 = 专业淡入黑）、可删除。
+// ===========================================================================
+
+@Composable
+private fun BlackGapDialog(
+    hasSelection: Boolean,
+    onDismiss: () -> Unit,
+    onInsert: (before: Boolean?, durationUs: Long) -> Unit,
+) {
+    var durSec by remember { mutableStateOf((BLACK_DEFAULT_DURATION_US / 1_000_000L).toInt()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.black_gap_title)) },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    stringResource(R.string.black_gap_duration),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(1, 2, 5, 10, 30).forEach { s ->
+                        FilterChip(
+                            selected = durSec == s,
+                            onClick = { durSec = s },
+                            label = { Text("${s}s") },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                if (hasSelection) {
+                    BlackGapRow(stringResource(R.string.black_gap_before)) { onInsert(true, durSec * 1_000_000L) }
+                    BlackGapRow(stringResource(R.string.black_gap_after)) { onInsert(false, durSec * 1_000_000L) }
+                } else {
+                    Text(
+                        stringResource(R.string.black_gap_none_selected),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
+                BlackGapRow(stringResource(R.string.black_gap_end)) { onInsert(null, durSec * 1_000_000L) }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.black_gap_cancel)) }
+        },
+    )
+}
+
+@Composable
+private fun BlackGapRow(label: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }

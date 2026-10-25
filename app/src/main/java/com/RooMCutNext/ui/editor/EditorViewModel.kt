@@ -16,6 +16,9 @@ import com.RooMCutNext.core.model.Clip
 import com.RooMCutNext.core.model.ColorAdjust
 import com.RooMCutNext.core.model.CropSpec
 import com.RooMCutNext.core.model.IMAGE_DEFAULT_DURATION_US
+import com.RooMCutNext.core.model.BLACK_DEFAULT_DURATION_US
+import com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID
+import com.RooMCutNext.core.model.BLACK_FRAME_FILE_NAME
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.PipLayer
 import com.RooMCutNext.core.model.Project
@@ -342,8 +345,36 @@ class EditorViewModel(
      * v1.6.0: AI 草稿提交入口 —— 整组 AI 修改作为单条撤销记录写入
      * （等价于 OpenChatCut 的 apply edit session），可选把播放头跳到 agent
      * 指定的观察位置。清空选择避免悬空 id。
+     *
+     * v1.6.1: 草稿里若引用了黑场资产（agent 的 add_black_clip 工具），
+     * 先把内置 black_frame.png 落到项目媒体目录再提交 —— EditTools 是纯
+     * Kotlin，无法自己碰文件系统，落地责任在本层。
      */
     fun aiApplyDraftInternal(after: Project, label: String, seekUs: Long?) {
+        // 快路径：草稿完全没碰黑场资产时零额外开销。
+        if (after.clips.none { it.assetId == BLACK_FRAME_ASSET_ID } &&
+            after.assets.none { it.id == BLACK_FRAME_ASSET_ID }
+        ) {
+            commitAiDraft(after, label, seekUs)
+            return
+        }
+        viewModelScope.launch {
+            // 幂等：文件在则只重建元数据（6KB PNG 解码开销可忽略）；
+            // 同时把草稿里的合成资产治愈为真实落盘资产（本地化名/真实字节），
+            // 覆盖"文件已存在但资产条目来自模板"的撤销重放等边缘情况。
+            val real = importer.ensureBlackFrameAsset(repo.mediaDir(projectId))
+            if (real == null) {
+                _state.update { it.copy(toast = app.getString(com.RooMCutNext.R.string.black_gap_failed)) }
+                return@launch
+            }
+            val healed = after.copy(
+                assets = after.assets.map { a -> if (a.id == BLACK_FRAME_ASSET_ID) real else a }
+            )
+            commitAiDraft(healed, label, seekUs)
+        }
+    }
+
+    private fun commitAiDraft(after: Project, label: String, seekUs: Long?) {
         dragOriginProject = null
         val before = _state.value.project
         if (after != before) {
@@ -803,8 +834,10 @@ class EditorViewModel(
             return
         }
         val clipId = s.selectedClipId ?: return
-        // Texts and audios are independent layers: deleting a video clip no
-        // longer shortens / drops them (the black background covers the tail).
+        // Texts and audios are independent layers anchored to the timeline:
+        // deleting a video clip ripples the video track closed (v1.6.1) and
+        // never shortens / drops them by itself — need a black pause? The
+        // user adds a 黑场 clip (addBlackGap) instead of relying on leftovers.
         mutate("删除") { p -> p.copy(clips = TimelineOps.deleteById(p.clips, clipId)) }
         _state.update { it.copy(selectedClipId = null, activePanel = null) }
     }
@@ -816,6 +849,56 @@ class EditorViewModel(
         val newId = IdGen.new("c")
         mutate("复制") { p -> p.copy(clips = TimelineOps.duplicate(p.clips, idx, newId)) }
         _state.update { it.copy(selectedClipId = newId) }
+    }
+
+    /**
+     * v1.6.1 黑场：插入一段可自由拉伸的纯黑图片素材（默认 2s，拖边 0.1..60s）。
+     *
+     * [before] == null → 追加到时间线末尾（无选中素材时的入口）；
+     * 否则以当前选中素材为锚，紧贴其前/后插入。首次调用把内置
+     * black_frame.png 幂等地落到项目媒体目录（6KB，与普通导入同构：
+     * 素材归项目所有，导出/回放与图片素材零差别）。
+     */
+    fun addBlackGap(before: Boolean?, durationUs: Long = BLACK_DEFAULT_DURATION_US) {
+        viewModelScope.launch {
+            val dir = repo.mediaDir(projectId)
+            val asset = _state.value.project.assets.firstOrNull { it.isBlackFrame }
+                ?: importer.ensureBlackFrameAsset(dir)
+                ?: run {
+                    _state.update {
+                        it.copy(toast = app.getString(com.RooMCutNext.R.string.black_gap_failed))
+                    }
+                    return@launch
+                }
+            val newId = IdGen.new("c")
+            mutate("添加黑场") { p ->
+                val withAsset =
+                    if (p.assets.any { it.isBlackFrame }) p else p.copy(assets = p.assets + asset)
+                val selectedId = _state.value.selectedClipId
+                val anchor = if (before != null && selectedId != null) {
+                    withAsset.clips.indexOfFirst { it.id == selectedId }
+                } else -1
+                p.copy(
+                    assets = withAsset.assets,
+                    clips = TimelineOps.insertBlackGap(
+                        withAsset.clips,
+                        anchor,
+                        after = before != false,
+                        durationUs = durationUs,
+                        newId = newId,
+                    ),
+                )
+            }
+            _state.update {
+                it.copy(
+                    selectedClipId = newId,
+                    selectedTextId = null,
+                    selectedAudioId = null,
+                    selectedPipId = null,
+                )
+            }
+            viewModelScope.launch { preloadThumbnails(listOf(asset)) }
+        }
     }
 
     fun moveClip(fromIndex: Int, toIndex: Int) {

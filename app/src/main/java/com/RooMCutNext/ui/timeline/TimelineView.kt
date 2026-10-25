@@ -1459,8 +1459,53 @@ private fun DrawScope.drawClip(
         cornerRadius = corner,
     )
 
+    // ---- v1.6.1: 黑场专属渲染（纯黑 + 斜纹 + 居中标签）----
+    // 黑场是普通图片素材，但纯黑缩略图在深色时间线上与空洞无法区分：
+    // 用斜纹纹理 + “黑场”标签让它一眼可辨，选中/裁剪手柄/转场徽章等
+    // 其余绘制路径与普通素材完全共用。
+    if (asset != null && asset.isBlackFrame && !missing) {
+        val pad = 2.5f * dp
+        val innerTop = top + pad
+        val innerHeight = height - pad * 2 - 7f * dp
+        if (innerHeight > 4f * dp && layout.width > 8f * dp) {
+            withClippedRoundRect(layout.left, innerTop, layout.width, innerHeight, corner) {
+                drawRect(
+                    Color(0xFF000000),
+                    topLeft = Offset(layout.left, innerTop),
+                    size = Size(layout.width, innerHeight),
+                )
+                val hatch = Color(0xFF2A313C)
+                val step = 7f * dp
+                var x = layout.left - innerHeight
+                while (x < layout.left + layout.width) {
+                    val x0 = x.coerceAtLeast(layout.left)
+                    val x1 = (x + innerHeight).coerceAtMost(layout.left + layout.width)
+                    if (x1 > x0) {
+                        drawLine(
+                            color = hatch,
+                            start = Offset(x0, innerTop + innerHeight),
+                            end = Offset(x1, innerTop),
+                            strokeWidth = 1f * dp,
+                        )
+                    }
+                    x += step
+                }
+            }
+            if (layout.width > 26f * dp) {
+                val native = drawContext.canvas.nativeCanvas
+                badgePaint.color = android.graphics.Color.rgb(0xB8, 0xC2, 0xCC)
+                badgePaint.textAlign = android.graphics.Paint.Align.CENTER
+                badgePaint.textSize = 10f * dp
+                native.drawText(
+                    "黑场",
+                    layout.left + layout.width / 2f,
+                    top + height / 2f + 3.5f * dp,
+                    badgePaint,
+                )
+            }
+        }
+    } else if (thumbs != null && thumbs.isNotEmpty() && asset != null && !missing) {
     // ---- filmstrip thumbnails ----
-    if (thumbs != null && thumbs.isNotEmpty() && asset != null && !missing) {
         val pad = 2.5f * dp
         val innerTop = top + pad
         val innerHeight = height - pad * 2 - 7f * dp

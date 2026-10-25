@@ -1,7 +1,12 @@
 package com.RooMCutNext.ai
 
 import com.RooMCutNext.core.model.AudioClip
+import com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID
+import com.RooMCutNext.core.model.BLACK_FRAME_FILE_NAME
 import com.RooMCutNext.core.model.Clip
+import com.RooMCutNext.core.model.IMAGE_MAX_DURATION_US
+import com.RooMCutNext.core.model.MediaAsset
+import com.RooMCutNext.core.model.MediaType
 import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.core.model.TextStyleSpec
@@ -189,6 +194,17 @@ class EditTools(
             listOf("clip_id"),
         ))
         add(schema(
+            T.ADD_BLACK,
+            "Insert a black gap clip (solid black frames) - the explicit way to add a pause; " +
+                "deleting clips RIPPLES the timeline closed, so pauses must be inserted on purpose. " +
+                "position: \"before\" or \"after\" the anchor clip (default after); with no " +
+                "anchor_clip_id, appends at the end. duration_sec: 0.1-60 (default 2.0), " +
+                "stretchable afterwards like any clip. Tip: a dissolve transition into a black " +
+                "clip is a professional fade-to-black.",
+            mapOf("anchor_clip_id" to "string", "position" to "string", "duration_sec" to "number"),
+            emptyList(),
+        ))
+        add(schema(
             T.ADD_TEXT,
             "Add a text overlay (title/caption). font_id one of: ${fonts.joinToString(" | ") { it.first }}. " +
                 "color_hex like \"#FFFFFF\". x_ratio/y_ratio: 0-1 canvas position. " +
@@ -255,6 +271,7 @@ class EditTools(
         const val LOOK = "set_clip_look"
         const val TRANSITION = "set_transition"
         const val REMOVE_TRANSITION = "remove_transition"
+        const val ADD_BLACK = "add_black_clip"
         const val ADD_TEXT = "add_text"
         const val UPDATE_TEXT = "update_text"
         const val DELETE_TEXT = "delete_text"
@@ -285,7 +302,7 @@ class EditTools(
                     "未知工具 \"$name\"。可用: " +
                         listOf(T.OVERVIEW, T.SPLIT, T.DELETE_CLIP, T.TRIM_CLIP, T.MOVE_CLIP,
                             T.SPEED, T.VOLUME, T.LOOK, T.TRANSITION, T.REMOVE_TRANSITION,
-                            T.ADD_TEXT, T.UPDATE_TEXT, T.DELETE_TEXT, T.AUDIO_VOLUME,
+                            T.ADD_BLACK, T.ADD_TEXT, T.UPDATE_TEXT, T.DELETE_TEXT, T.AUDIO_VOLUME,
                             T.AUDIO_TRIM, T.DELETE_AUDIO, T.SEEK).joinToString(", "),
                 )
         }
@@ -302,6 +319,23 @@ class EditTools(
 
     private fun clipIdList(p: Project): String =
         p.clips.take(8).joinToString(", ") { it.id } + if (p.clips.size > 8) " …" else ""
+
+    /**
+     * v1.6.1: 草稿会话内的黑场资产模板（纯 Kotlin，无文件系统依赖）。
+     * 提交时 ViewModel 会用真实落盘资产（本地化名称/真实字节数）治愈替换
+     * ——见 EditorViewModel.aiApplyDraftInternal。
+     */
+    private fun blackFrameAsset() = MediaAsset(
+        id = BLACK_FRAME_ASSET_ID,
+        fileName = BLACK_FRAME_FILE_NAME,
+        displayName = "黑场",
+        type = MediaType.IMAGE,
+        durationUs = 0L,
+        width = 1920,
+        height = 1080,
+        fps = 0f,
+        hasAudio = false,
+    )
 
     private fun clipTools(draft: Draft, name: String, args: JsonObject): ToolResult? {
         val p = draft.project
@@ -339,6 +373,45 @@ class EditTools(
                 draft.project = p.copy(clips = newClips)
                 bump(draft, "delete_clip: $clipId")
                 okJson("clips_remaining" to newClips.size)
+            }
+            T.ADD_BLACK -> {
+                val durSec = args.num("duration_sec") ?: 2.0
+                if (durSec <= 0.0) return errJson("duration_sec 必须为正数")
+                val durUs = (durSec * 1_000_000.0).roundToLong()
+                    .coerceIn(MIN_SPAN, IMAGE_MAX_DURATION_US)
+                val posRaw = args.str("position") ?: "after"
+                val afterPos = when (posRaw.lowercase()) {
+                    "before", "前" -> false
+                    "after", "后" -> true
+                    else -> return errJson("position 只能是 \"before\" 或 \"after\"")
+                }
+                // 锚点参数名兼容：schema 声明 anchor_clip_id，但其它工具都是
+                // clip_id —— 模型两种叫法都接受，避免无谓的工具调用失败。
+                val anchorId = args.str("anchor_clip_id") ?: clipId
+                val anchorIdx = if (anchorId != null) {
+                    requireClip(p, anchorId)?.first
+                        ?: return errJson("clip_id 无效。可用: ${clipIdList(p)}")
+                } else -1
+                val newId = idFactory()
+                val withAsset = if (p.assets.any { it.id == BLACK_FRAME_ASSET_ID }) {
+                    p
+                } else {
+                    p.copy(assets = p.assets + blackFrameAsset())
+                }
+                val newClips = TimelineOps.insertBlackGap(
+                    withAsset.clips,
+                    anchorIdx,
+                    after = afterPos,
+                    durationUs = durUs,
+                    newId = newId,
+                )
+                draft.project = withAsset.copy(clips = newClips)
+                bump(
+                    draft,
+                    "add_black_clip: ${usToSec(durUs)}s " +
+                        (if (anchorIdx >= 0) "${if (afterPos) "after" else "before"} $anchorId" else "at end"),
+                )
+                okJson("new_clip_id" to newId, "duration_sec" to usToSec(durUs))
             }
             T.TRIM_CLIP -> {
                 val found = requireClip(p, clipId) ?: return errJson(
@@ -704,10 +777,12 @@ class EditTools(
             put("playhead_sec", usToSec(playheadUs))
             put("clips", buildJsonArray {
                 p.clips.take(MAX_CLIPS_IN_OVERVIEW).forEachIndexed { i, c ->
+                    val clipAsset = p.assetById(c.assetId)
                     add(buildJsonObject {
                         put("id", c.id)
                         put("index", i)
-                        put("name", p.assetById(c.assetId)?.displayName?.take(24) ?: c.assetId)
+                        put("name", clipAsset?.displayName?.take(24) ?: c.assetId)
+                        if (clipAsset?.isBlackFrame == true) put("black", true)
                         put("start_sec", usToSec(st[i]))
                         put("duration_sec", usToSec(c.durationUs))
                         put("speed", c.speed.toDouble())
@@ -772,7 +847,9 @@ class EditTools(
             append(
                 "You are the AI editing assistant of RooMCutNext, a mobile video editor. " +
                     "You edit the user's REAL project through tool calls: split, trim, delete, reorder, " +
-                    "speed, volume, LUT looks, transitions and text overlays. All edits go to a DRAFT " +
+                    "speed, volume, LUT looks, transitions, black gaps (add_black_clip) and text " +
+                    "overlays. Deleting a clip RIPPLES the timeline closed - add a black gap clip " +
+                    "when the user wants a pause or breathing room. All edits go to a DRAFT " +
                     "the user reviews and applies as ONE undoable step - nothing is destructive.\n\n" +
                     "Rules:\n" +
                     "1. Times are seconds (float). Use ids EXACTLY as given in the overview.\n" +

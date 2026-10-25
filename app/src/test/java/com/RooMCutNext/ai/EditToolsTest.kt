@@ -313,6 +313,110 @@ class EditToolsTest {
         assertTrue(r.json.toString().contains("未知工具"))
     }
 
+    // ------------------------------------------------------------------
+    // v1.6.1: add_black_clip（黑场）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun addBlackClipAfterAnchorHugsIt() {
+        val p = project(listOf(clip("c1", "a1"), clip("c2", "a2")), listOf(asset("a1"), asset("a2")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "add_black_clip",
+            args("anchor_clip_id" to "c1", "position" to "after", "duration_sec" to 1.5),
+        )
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals("ai-x", r.json["new_clip_id"]?.jsonPrimitive?.contentOrNull)
+        // 黑场紧贴 c1 之后，c2 右移；时长 1.5s。
+        assertEquals(3, d.project.clips.size)
+        assertEquals("ai-x", d.project.clips[1].id)
+        assertEquals(1_500_000L, d.project.clips[1].durationUs)
+        val st = com.RooMCutNext.core.ops.TimelineOps.starts(d.project.clips)
+        assertEquals(10_000_000L, st[1])
+        assertEquals(11_500_000L, st[2])
+        // 草稿资产表里自动补上黑场资产（稳定 id，提交时 ViewModel 落盘治愈）。
+        assertTrue(d.project.assets.any { it.id == com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID })
+        assertTrue(d.journal.single().startsWith("add_black_clip"))
+    }
+
+    @Test
+    fun addBlackClipBeforeAnchorAndDefaultDuration() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        // 省略 position 默认 after；这里显式 before + 省略时长（默认 2s）。
+        val r = tools.execute(d, "add_black_clip", args("anchor_clip_id" to "c1", "position" to "before"))
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals(2, d.project.clips.size)
+        assertEquals(2_000_000L, d.project.clips[0].durationUs)
+        assertEquals(com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID, d.project.clips[0].assetId)
+    }
+
+    @Test
+    fun addBlackClipWithoutAnchorAppendsAtEnd() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "add_black_clip", args("duration_sec" to 3.0))
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals(2, d.project.clips.size)
+        assertEquals(3_000_000L, d.project.clips[1].durationUs)
+        // 空时间线：黑场单独成片（文字压黑场工作流）。
+        val d2 = EditTools.Draft(project(emptyList(), emptyList()))
+        val r2 = tools.execute(d2, "add_black_clip", args("duration_sec" to 2.0))
+        assertTrue(r2.json.toString(), r2.ok)
+        assertEquals(1, d2.project.clips.size)
+    }
+
+    @Test
+    fun addBlackClipClampsDurationAndValidatesPosition() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        // 时长越界被钳入 0.1..60s；无上限报错。
+        val r = tools.execute(d, "add_black_clip", args("duration_sec" to 99.0, "position" to "after"))
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals(60_000_000L, d.project.clips[1].durationUs)
+        val rBadPos = tools.execute(d, "add_black_clip", args("position" to "middle"))
+        assertFalse(rBadPos.json.toString(), rBadPos.ok)
+        // 锚 id 无效 → 可执行错误信息（列出可用 id）。
+        val rBadAnchor = tools.execute(d, "add_black_clip", args("anchor_clip_id" to "nope"))
+        assertFalse(rBadAnchor.json.toString(), rBadAnchor.ok)
+        assertTrue(rBadAnchor.json.toString().contains("c1"))
+    }
+
+    @Test
+    fun deleteClipNowRipplesClosed() {
+        // v1.6.1: delete_clip 与手动删除同构 —— 后续素材收拢贴合，不留洞。
+        val p = project(
+            listOf(clip("c1", "a1", outUs = 2_000_000L), clip("c2", "a2"), clip("c3", "a3")),
+            listOf(asset("a1"), asset("a2"), asset("a3")),
+        )
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "delete_clip", args("clip_id" to "c2"))
+        assertTrue(r.json.toString(), r.ok)
+        val st = com.RooMCutNext.core.ops.TimelineOps.starts(d.project.clips)
+        assertEquals(2_000_000L, st[1]) // c3 直接贴上 c1
+        assertEquals(0L, d.project.clips.sumOf { it.gapBeforeUs })
+    }
+
+    @Test
+    fun overviewMarksBlackClips() {
+        val blackAsset = com.RooMCutNext.core.model.MediaAsset(
+            id = com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID,
+            fileName = com.RooMCutNext.core.model.BLACK_FRAME_FILE_NAME,
+            displayName = "黑场", type = MediaType.IMAGE,
+            durationUs = 0L, width = 1920, height = 1080, fps = 0f, hasAudio = false,
+        )
+        val p = project(
+            clips = listOf(clip("c1", "a1"), Clip(id = "b1", assetId = com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID, sourceInUs = 0L, sourceOutUs = 2_000_000L)),
+            assets = listOf(asset("a1"), blackAsset),
+        )
+        val d = EditTools.Draft(p)
+        val json = tools.overviewJson(d)
+        val clipsJson = json["clips"]!!.jsonArray.toString()
+        assertTrue(clipsJson.contains("\"black\":true"))
+        // system prompt 同步告知 agent 黑场能力。
+        assertTrue(tools.systemPrompt(d, 0L).contains("add_black_clip"))
+    }
+
     @Test
     fun systemPromptContainsOverview() {
         val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
@@ -329,7 +433,7 @@ class EditToolsTest {
         listOf(
             "get_draft_overview", "split_clip", "delete_clip", "trim_clip", "move_clip",
             "set_clip_speed", "set_clip_volume", "set_clip_look", "set_transition",
-            "remove_transition", "add_text", "update_text", "delete_text",
+            "remove_transition", "add_black_clip", "add_text", "update_text", "delete_text",
             "set_audio_volume", "trim_audio", "delete_audio", "seek",
         ).forEach { assertTrue("missing $names", names.contains("\"$it\"")) }
         // zoom 转场 v1.5.5 已移除，不应对 agent 开放。

@@ -56,7 +56,7 @@ Mapped against the original V1 requirements (✅ = implemented, ⚠️ = simplif
 - ✅ **Stuck-playback self-healing watchdog (v1.6.0)**: targets the field-reported "playback occasionally freezes mid-timeline and only dragging the playhead resumes it" (the media3 stuck-playing failure mode: isPlaying=true while the position stops advancing). The 33Hz playback poll now carries a watchdog — when the position stays frozen for 1.5s it fires the SAME-position seek that the manual drag workaround performs (4s cooldown), escalating to a pause→seek→play full pipeline reset after two ineffective nudges; every event lands in the DIAG overlay (`STALL` lines with frozen duration / state / attempt count). The threshold is safe for 0.25x slow-motion (still advances 375ms per 1.5s window, far above the 5ms epsilon)
 
 ### 2.5. AI Editing Assistant (v1.6.0)
-- ✅ **Conversational AI editing (OpenChatCut pattern, replicated)**: describe the edit you want in one sentence and the agent performs REAL edits on the timeline through tool calls — split / delete / reorder / trim / speed / volume / LUT looks / transitions / text overlays / audio adjustments / seek, 17 tools in total, all landing on the same TimelineOps core the manual editor uses (agent and editor share one "EditorCore"; there is no second editing semantics to drift apart)
+- ✅ **Conversational AI editing (OpenChatCut pattern, replicated)**: describe the edit you want in one sentence and the agent performs REAL edits on the timeline through tool calls — split / delete / reorder / trim / speed / volume / LUT looks / transitions / **black gap insertion (v1.6.1)** / text overlays / audio adjustments / seek, 18 tools in total, all landing on the same TimelineOps core the manual editor uses (agent and editor share one "EditorCore"; there is no second editing semantics to drift apart)
 - ✅ **Draft session + single-step undo**: AI changes go to a DRAFT first (the project is untouched), the panel lists every operation, and only tapping Apply writes them — the whole batch commits as ONE undo record (one tap undoes the entire AI change set); if the timeline was edited manually during the chat the proposal warns about overwriting; the agent may also seek, so the playhead lands on the change after applying
 - ✅ **BYOK, local-first**: Zhipu GLM / DeepSeek / Kimi / OpenAI presets plus any OpenAI-compatible endpoint (LAN Ollama / LM Studio included); the API key stays on-device; chats carry timeline STRUCTURE only (asset names / durations / tracks / playhead) — never any media content
 - ✅ **Bounded safety net**: at most 8 model round-trips / 24 tool calls per turn; every tool argument is domain-validated (id existence / numeric ranges / source-frame snapping) and errors are fed back to the model as actionable messages; the tool executor is pure Kotlin pinned by 26 new unit tests
@@ -64,14 +64,15 @@ Mapped against the original V1 requirements (✅ = implemented, ⚠️ = simplif
 ### 3. Cutting
 - ✅ Trim: drag the rounded handles at both ends of the selected clip with live duration display; **source-frame accurate** (snap-once algorithm keeps left/right durations conserved)
 - ✅ Split: frame-accurate cut at the playhead producing two clips; **audio splits the same way (v1.0.9)** — whichever track (video/audio/**PiP**) is under the playhead gets split, one undo step; **PiP splitting (v1.5.5)**: layers now carry a source offset (sourceInUs), so the right half plays the source from the cut point (the halves join sequentially, exactly like splitting a video clip), and dragging the left edge advances the source window instead of restarting the material from its head
-- ✅ Delete **leaves a hole** (v1.0.8): deleting a middle clip leaves a black gap (text can be layered on top); deleting a tail clip closes the gap
+- ✅ Delete **ripples closed (v1.6.1)**: deleting a clip makes the following clips close up (CapCut/Premiere default behavior); black pauses are inserted explicitly with the Black Gap feature (see below) — legacy holes in old projects keep rendering as-is
 
-### 4. Gaps / Ripple (redone in v1.0.8, free placement in v1.0.9)
+### 4. Black Gap Clips & Gaps (redone in v1.6.1)
+- ✅ **Black gap = a stretchable solid-black image clip**: a new "Black" toolbar button opens a dialog to pick a duration preset (1/2/5/10/30s) and the insertion point (before/after the selected clip, or the timeline end); afterwards drag the clip's trim handles to stretch it freely **0.1s–60s** (longer pauses = chain multiple black clips)
+- ✅ **A black gap is an ordinary clip**: splittable, deletable (deleting it ripples too), and transitionable — **a dissolve into a black clip is a professional fade-to-black**; layer text over it (black-slate intro workflow); rendered on the timeline as pure black + diagonal hatch + a "黑场" label so it is distinguishable at a glance from holes and regular clips
+- ✅ **Ripple delete**: deleted clips no longer leave implicit black holes — the timeline is compact by default and black pauses are deliberate, explicit assets (fixes the old delete-leaves-a-hole model where removing a long clip forced you to drag later material across a huge empty span)
 - ✅ **Free placement by dragging (v1.0.9)**: drop a clip anywhere; a black gap is automatically left between clips (live drop preview and gap duration shown while dragging; snaps shut when close); gap blocks display their duration (e.g. "2.0s")
-- ✅ **Deleting a middle clip leaves a black gap** (shown as a black block on the timeline); later clips stay put; text can be layered over the gap
 - ✅ Trim / speed changes still ripple (later clips shift forward), matching mainstream NLE behavior
-- ✅ Drag-reorder: content moves, gaps stay in place; compact timelines stay compact after reordering
-- ✅ Gaps render as true black (preview matches export); older projects (no gap field) auto-migrate to the compact layout
+- ✅ Gaps render as true black (preview matches export); legacy projects carrying old holes render them unchanged
 
 ### 5. Clip Operations
 - ✅ Move / delete / trim / split / duplicate / **replace media** (editing params preserved) / info
@@ -190,7 +191,7 @@ Mapped against the original V1 requirements (✅ = implemented, ⚠️ = simplif
 
 The easiest way (no development environment needed):
 
-1. Open this repository's [Releases](https://github.com/bones0008/RooMCutNext/releases) page, go to the latest version (currently **v1.6.0**) and download `app-release.apk`
+1. Open this repository's [Releases](https://github.com/bones0008/RooMCutNext/releases) page, go to the latest version (currently **v1.6.1**) and download `app-release.apk`
 2. Transfer the APK to your phone (WeChat / cloud drive / USB all work)
 3. Tap the file on the phone and allow "install from unknown sources" when prompted
 4. After installation, the "RooMCutNext" icon appears on the home screen
@@ -198,7 +199,7 @@ The easiest way (no development environment needed):
 > As of v1.6.0 R8 code shrinking is enabled: the APK shrinks from 56MB to **12.8MB (-77%)** with zero feature or bundled-resource cuts — the 5 text fonts and 8 LUT looks all remain (the previous bulk was unshrunk dependency code: material-icons-extended et al. shipped whole).
 
 > Signing keys are never distributed with the repository: official Release APKs are signed with a key stored outside the repo.
-> The v1.6.0 official APK **keeps the original signing key** (rotation is deferred until just before an app-store listing), so upgrades from any v1.5.x official APK install directly over the top with project data intact; v1.0.4 or earlier requires a one-time uninstall first. When the rotation eventually happens it will be prominently noted in the release notes (a one-time uninstall/reinstall will be needed then).
+> The v1.6.x official APKs **keep the original signing key** (rotation is deferred until just before an app-store listing), so upgrades from any v1.5.x official APK install directly over the top with project data intact; v1.0.4 or earlier requires a one-time uninstall first. When the rotation eventually happens it will be prominently noted in the release notes (a one-time uninstall/reinstall will be needed then).
 > Building from source: debug builds work out of the box after cloning; configure release signing via `local.properties` (git-ignored) keys `roocmcut.keystore` / `roocmcut.storePassword`, or env vars `ROOCMCUT_KEYSTORE` / `ROOCMCUT_STORE_PASSWORD` — builds fall back to debug signing when unconfigured.
 
 **System requirements: Android 12 (API 31) or newer.**
@@ -319,4 +320,4 @@ The 8 built-in `.cube` LUT filters are procedurally generated by this project �
 
 ---
 
-*Built with Kotlin 2.2 · Jetpack Compose · Media3 1.11 · single-layer timeline editing kernel with 398 passing unit tests · source code released under AGPL-3.0*
+*Built with Kotlin 2.2 · Jetpack Compose · Media3 1.11 · single-layer timeline editing kernel with 411 passing unit tests · source code released under AGPL-3.0*

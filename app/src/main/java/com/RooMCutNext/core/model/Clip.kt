@@ -6,10 +6,17 @@ import kotlinx.serialization.Serializable
  * A single clip on the (single-layer) timeline.
  *
  * Timeline v3 — GAPS: each clip carries a [gapBeforeUs] hole in front of it,
- * so positions are the prefix sum of (gapBeforeUs + durationUs). Deleting a
- * middle clip leaves a black gap (classic NLE behavior) instead of rippling
- * the tail closed. Old project JSON (schema v2, no gap field) deserializes
- * with gapBeforeUs = 0 everywhere = the old compact layout.
+ * so positions are the prefix sum of (gapBeforeUs + durationUs). Old project
+ * JSON (schema v2, no gap field) deserializes with gapBeforeUs = 0 everywhere
+ * = the old compact layout.
+ *
+ * v1.6.1 — RIPPLE DELETE + 黑场： deleting a clip no longer leaves its span
+ * behind as a hole — the tail ripples closed, and black pauses are explicit
+ * black-frame clips (see MediaAsset.BLACK_FRAME_ASSET_ID /
+ * TimelineOps.insertBlackGap): an ordinary image clip the user stretches
+ * (0.1s..60s), transitions into (dissolve into 黑场 = fade-to-black) and
+ * deletes like any other media. Holes now only appear where the user drags
+ * one in deliberately (or in legacy projects, which keep rendering as-is).
  *
  * Timeline v4 — TRANSITIONS (v1.2.1): a clip may carry a [transitionInUs]
  * crossfade with the PREVIOUS clip: the clip starts that much EARLIER,

@@ -3,6 +3,9 @@ package com.RooMCutNext.media
 import android.content.Context
 import android.net.Uri
 import android.webkit.MimeTypeMap
+import com.RooMCutNext.R
+import com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID
+import com.RooMCutNext.core.model.BLACK_FRAME_FILE_NAME
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.util.IdGen
 import java.io.File
@@ -67,6 +70,35 @@ class MediaImporter(private val context: Context) {
             if (fromMime != null) return fromMime
         }
         return "bin"
+    }
+
+    /**
+     * v1.6.1 黑场：确保项目媒体目录里存在内置纯黑图片素材，返回带稳定
+     * 身份（[BLACK_FRAME_ASSET_ID]，displayName 本地化）的资产对象。
+     *
+     * 文件只在首次缺失时从 APK assets/media/ 复制一次（6KB）；已存在则
+     * 直接复用（项目重新打开、多段黑场共享同一资产）。返回 null 仅当
+     * PNG 写入失败或元数据解码失败（几乎不可发生：文件随 APK 分发）。
+     * 缩略图生成失败静默忽略 —— 时间线对黑场走专属渲染（斜纹+标签），
+     * 不依赖缩略图。
+     */
+    suspend fun ensureBlackFrameAsset(mediaDir: File): MediaAsset? = withContext(Dispatchers.IO) {
+        val target = File(mediaDir, BLACK_FRAME_FILE_NAME)
+        runCatching {
+            if (!target.exists()) {
+                mediaDir.mkdirs()
+                context.assets.open("media/$BLACK_FRAME_FILE_NAME").use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+            // 元数据来自真实文件（宽高/字节数），身份重写为稳定 id。
+            val extracted = MetadataExtractor.extract(target)?.copy(
+                id = BLACK_FRAME_ASSET_ID,
+                displayName = context.getString(R.string.black_frame_name),
+            ) ?: return@runCatching null
+            runCatching { ThumbnailGenerator.generate(target, extracted) }
+            extracted
+        }.getOrNull()
     }
 
     companion object {

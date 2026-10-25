@@ -346,4 +346,15 @@
     <string name="ai_settings_cancel">Cancel</string>
     <string name="ai_settings_key_hint">Get a key: %1$s</string>
     <string name="ai_settings_privacy">The key never leaves this device; chats send only timeline structure (asset names, durations, tracks), never your media.</string>
+    <!-- v1.6.1: black frame clip (stretchable solid black, replaces implicit delete-holes) -->
+    <string name="black_frame_name">Black</string>
+    <string name="action_black_gap">Black</string>
+    <string name="black_gap_title">Add black gap</string>
+    <string name="black_gap_duration">Duration</string>
+    <string name="black_gap_before">Insert before clip</string>
+    <string name="black_gap_after">Insert after clip</string>
+    <string name="black_gap_end">Append to timeline end</string>
+    <string name="black_gap_none_selected">No clip selected; it will be appended to the end</string>
+    <string name="black_gap_failed">Failed to create the black frame asset</string>
+    <string name="black_gap_cancel">Cancel</string>
 </resources>
