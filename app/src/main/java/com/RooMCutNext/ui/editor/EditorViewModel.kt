@@ -191,8 +191,8 @@ class EditorViewModel(
      * v1.6.0: AI 剪辑会话（OpenChatCut 模式复刻）。
      *
      * agent 工具直接落到 TimelineOps 纯函数 —— 与手动编辑、撤销栈、导出
-     * 管线共享同一套核心命令；修改先进入草稿，用户确认后由
-     * [aiApplyDraftInternal] 以单条撤销记录提交。密钥经
+     * 管线共享同一套核心命令；v1.6.4 起修改完直接以单条撤销记录提交
+     * （不满意靠撤销兜底，不再弹确认）。密钥经
      * [SettingsRepository] 只存本机。
      */
     val aiChat: AiChatController = AiChatController(
@@ -205,7 +205,6 @@ class EditorViewModel(
                 playheadUs = s.playheadUs,
                 fonts = s.availableFonts.map { it.id to it.nameZh },
                 luts = s.availableLuts.map { it.id to it.nameZh },
-                structureVersion = _structureVersion.value.toLong(),
             )
         },
         applyDraft = ::aiApplyDraftInternal,
@@ -213,7 +212,6 @@ class EditorViewModel(
             override fun load(): AiSettings = settingsRepo.aiSettings()
             override fun save(settings: AiSettings) = settingsRepo.setAiSettings(settings)
         },
-        projectChangedSince = { v -> _structureVersion.value.toLong() != v },
     )
 
     init {

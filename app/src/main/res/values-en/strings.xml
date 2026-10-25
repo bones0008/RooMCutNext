@@ -331,11 +331,6 @@
     <string name="ai_send">Send</string>
     <string name="ai_busy_thinking">AI is thinking…</string>
     <string name="ai_busy_tool_fmt">Running: %1$s</string>
-    <string name="ai_proposal_title">AI changes (%1$d)</string>
-    <string name="ai_proposal_apply">Apply</string>
-    <string name="ai_proposal_discard">Discard</string>
-    <string name="ai_proposal_seek_fmt">Jumps to %1$s s after applying</string>
-    <string name="ai_project_changed_warn">The timeline was edited manually during the chat; applying will overwrite those edits</string>
     <string name="ai_provider_zai">Zhipu GLM</string>
     <string name="ai_provider_deepseek">DeepSeek</string>
     <string name="ai_provider_moonshot">Moonshot Kimi</string>

@@ -260,7 +260,7 @@ class EditTools(
         ))
     }
 
-    private object T {
+    internal object T {
         const val OVERVIEW = "get_draft_overview"
         const val SPLIT = "split_clip"
         const val DELETE_CLIP = "delete_clip"
@@ -849,13 +849,16 @@ class EditTools(
                     "You edit the user's REAL project through tool calls: split, trim, delete, reorder, " +
                     "speed, volume, LUT looks, transitions, black gaps (add_black_clip) and text " +
                     "overlays. Deleting a clip RIPPLES the timeline closed - add a black gap clip " +
-                    "when the user wants a pause or breathing room. All edits go to a DRAFT " +
-                    "the user reviews and applies as ONE undoable step - nothing is destructive.\n\n" +
+                    "when the user wants a pause or breathing room. Edits apply immediately as ONE " +
+                    "undoable step - the user can revert everything with a single tap, so just do " +
+                    "the work directly.\n\n" +
                     "Rules:\n" +
                     "1. Times are seconds (float). Use ids EXACTLY as given in the overview.\n" +
                     "2. Call get_draft_overview when you need fresh state after edits.\n" +
                     "3. Prefer several small precise tool calls over one huge guess; chain them freely.\n" +
-                    "4. When done, reply with a SHORT summary of what changed (2-5 bullets).\n" +
+                    "4. When done, reply in the user's language with ONE or TWO short, plain, friendly " +
+                    "sentences describing what changed - like a video-editor buddy talking to a friend. " +
+                    "NO bullet lists, NO markdown, NO tool ids, NO technical terms or parameter names.\n" +
                     "5. If the request needs a capability you have no tool for (importing new media, " +
                     "generating audio/video, keyframes, PiP geometry), say so plainly.\n" +
                     "6. Reply in the user's language (Chinese in, Chinese out; English in, English out).\n\n" +

@@ -331,11 +331,6 @@
     <string name="ai_send">发送</string>
     <string name="ai_busy_thinking">AI 正在思考…</string>
     <string name="ai_busy_tool_fmt">正在执行：%1$s</string>
-    <string name="ai_proposal_title">AI 修改方案（%1$d 项）</string>
-    <string name="ai_proposal_apply">应用</string>
-    <string name="ai_proposal_discard">放弃</string>
-    <string name="ai_proposal_seek_fmt">应用后跳到 %1$s 秒</string>
-    <string name="ai_project_changed_warn">对话期间时间线被手动修改过，应用将覆盖这些修改</string>
     <string name="ai_provider_zai">智谱 GLM</string>
     <string name="ai_provider_deepseek">DeepSeek</string>
     <string name="ai_provider_moonshot">Kimi 月之暗面</string>

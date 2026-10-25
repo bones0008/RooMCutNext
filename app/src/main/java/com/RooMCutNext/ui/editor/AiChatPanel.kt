@@ -117,21 +117,9 @@ fun AiChatOverlay(vm: EditorViewModel, modifier: Modifier = Modifier) {
             ),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            // 最新内容在 DSL 首（视觉底部）：先提案卡（贴着输入行，
-            // 应用/放弃按钮一伸手就够到），再消息倒序。
-            aiState.proposal?.let { proposal ->
-                item {
-                    ProposalCard(
-                        changeCount = proposal.changeCount,
-                        journal = proposal.journal,
-                        summary = proposal.summary,
-                        seekSec = proposal.seekSec,
-                        stale = proposal.stale,
-                        onApply = { vm.aiChat.applyProposal() },
-                        onDiscard = { vm.aiChat.discardProposal() },
-                    )
-                }
-            }
+            // 最新内容在 DSL 首（视觉底部）：消息倒序。
+            // v1.6.4: 提案卡已删 —— 修改直接应用，撤销兜底（真机反馈
+            // “为什么要弹出对话框确认？直接做就好了”）。
             val reversed = aiState.entries.asReversed()
             items(reversed.size) { i ->
                 when (val e = reversed[i]) {
@@ -146,9 +134,9 @@ fun AiChatOverlay(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 item { AiOnboardingBar(onConfigure = { vm.aiChat.openSettings(true) }) }
             }
         }
-        // 新消息/新提案 → 滚回视觉底部（reverseLayout 的 index 0）。
-        LaunchedEffect(aiState.entries.size, aiState.proposal != null) {
-            if (aiState.entries.isNotEmpty() || aiState.proposal != null) {
+        // 新消息 → 滚回视觉底部（reverseLayout 的 index 0）。
+        LaunchedEffect(aiState.entries.size) {
+            if (aiState.entries.isNotEmpty()) {
                 runCatching { listState.animateScrollToItem(0) }
             }
         }
@@ -276,22 +264,25 @@ private fun AssistantBubble(text: String) {
     }
 }
 
+/**
+ * v1.6.4: 工具事件改为通俗动作列表 —— 不再是等宽字体的
+ * `split_clip(clip_id=c1 …)` 技术行（真机反馈“返回信息看着太高级”）。
+ * 成功项柔和小字，失败项附一句短原因。
+ */
 @Composable
 private fun ToolEventBlock(e: AiChatEntry.ToolEvent) {
-    Surface(
-        color = Color(0xB3151517),
-        shape = RoundedCornerShape(10.dp),
-        modifier = Modifier.fillMaxWidth(),
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-            e.lines.forEach { line ->
-                Text(
-                    (if (line.ok) "✓ " else "✗ ") + line.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = if (line.ok) Color(0xFF9FDCA8) else Color(0xFFFFB4AB),
-                )
-            }
+        e.lines.forEach { line ->
+            Text(
+                (if (line.ok) "· " else "⚠ ") + line.label,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (line.ok) Color(0xCCFFFFFF) else Color(0xFFFFB4AB),
+            )
         }
     }
 }
@@ -305,83 +296,6 @@ private fun NoteLine(e: AiChatEntry.Note) {
         color = if (e.isError) Color(0xFFFFB4AB) else Color(0xCCFFFFFF),
         textAlign = TextAlign.Center,
     )
-}
-
-@Composable
-private fun ProposalCard(
-    changeCount: Int,
-    journal: List<String>,
-    summary: String,
-    seekSec: Double?,
-    stale: Boolean,
-    onApply: () -> Unit,
-    onDiscard: () -> Unit,
-) {
-    Surface(
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.96f),
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 4.dp),
-    ) {
-        Column(Modifier.padding(12.dp)) {
-            Text(
-                stringResource(R.string.ai_proposal_title, changeCount),
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            if (journal.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                journal.take(10).forEachIndexed { i, line ->
-                    Text(
-                        "${i + 1}. $line",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
-                    )
-                }
-                if (journal.size > 10) {
-                    Text(
-                        "… +${journal.size - 10}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f),
-                    )
-                }
-            }
-            if (summary.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    summary,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-            }
-            if (stale) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    stringResource(R.string.ai_project_changed_warn),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-            seekSec?.let {
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    stringResource(R.string.ai_proposal_seek_fmt, "%.1f".format(it)),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onDiscard) {
-                    Text(stringResource(R.string.ai_proposal_discard))
-                }
-                Spacer(Modifier.weight(1f))
-                Button(onClick = onApply) {
-                    Text(stringResource(R.string.ai_proposal_apply))
-                }
-            }
-        }
-    }
 }
 
 /**

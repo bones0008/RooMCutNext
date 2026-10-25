@@ -11,14 +11,13 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * v1.6.0: agent 会话编排测试 —— 用假传输层脚本化模型回复，验证
- * 工具循环 / 提案生命周期 / 设置门禁 / 有界循环安全网。
+ * 工具循环 / 自动应用（v1.6.4 起不再有提案确认）/ 设置门禁 /
+ * 有界循环安全网 / 通俗动作文案。
  */
 class AiChatControllerTest {
 
@@ -67,7 +66,6 @@ class AiChatControllerTest {
     private fun controller(
         transport: FakeTransport,
         settings: AiSettings = AiSettings(apiKey = "k"),
-        projectChanged: (Long) -> Boolean = { false },
         applied: MutableList<Triple<Project, String, Long?>> = mutableListOf(),
     ): AiChatController {
         val ctxProject = twoClipProject()
@@ -80,23 +78,21 @@ class AiChatControllerTest {
                     playheadUs = 0L,
                     fonts = listOf("system" to "System"),
                     luts = listOf("builtin:warm" to "Warm"),
-                    structureVersion = 7L,
                 )
             },
             applyDraft = { p, label, seek -> applied.add(Triple(p, label, seek)) },
             settingsStore = MemSettings(settings),
-            projectChangedSince = projectChanged,
         )
     }
 
     // ------------------------------------------------------------------
 
     @Test
-    fun fullFlowExecutesToolsAndBuildsProposal() {
+    fun fullFlowExecutesToolsAndAutoApplies() {
         val transport = FakeTransport(
             mutableListOf(
                 LlmReply(null, listOf(splitCall())),
-                LlmReply("已分割 c1", emptyList()),
+                LlmReply("剪好了", emptyList()),
             ),
         )
         val applied = mutableListOf<Triple<Project, String, Long?>>()
@@ -108,24 +104,46 @@ class AiChatControllerTest {
         assertEquals(2, transport.requests.size)
         val entries = c.state.value.entries
         assertTrue(entries[0] is AiChatEntry.User)
-        val toolEvent = entries.filterIsInstance<AiChatEntry.ToolEvent>().single()
-        assertTrue(toolEvent.lines.single().ok)
         val assistant = entries.filterIsInstance<AiChatEntry.Assistant>().single()
-        assertEquals("已分割 c1", assistant.text)
+        assertEquals("剪好了", assistant.text)
 
-        // 提案就绪：1 项修改。
-        val proposal = c.state.value.proposal
-        assertNotNull(proposal)
-        assertEquals(1, proposal!!.changeCount)
-        assertFalse(c.state.value.busy)
-
-        // 应用：单次提交、项目已分割、撤销标签带 "AI"。
-        c.applyProposal()
+        // v1.6.4: 自动应用 —— 单次提交、项目已分割、撤销标签带 "AI"，
+        // 无需用户确认。
         assertEquals(1, applied.size)
         assertEquals(3, applied.single().first.clips.size)
         assertTrue(applied.single().second.contains("AI"))
-        assertNull(c.state.value.proposal)
-        assertTrue(c.state.value.entries.last() is AiChatEntry.Note)
+        assertFalse(c.state.value.busy)
+        // 末尾是“已改好”提示。
+        val note = entries.last() as AiChatEntry.Note
+        assertFalse(note.isError)
+        assertTrue(note.text.contains("已改好"))
+    }
+
+    @Test
+    fun toolEventsUseFriendlyLabelsAndHideInternalCalls() {
+        val transport = FakeTransport(
+            mutableListOf(
+                // 先读概览（内部操作，不得上屏），再分割，最后收尾。
+                LlmReply(null, listOf(
+                    call("0", "get_draft_overview", buildJsonObject { }),
+                    splitCall(),
+                )),
+                LlmReply("好了", emptyList()),
+            ),
+        )
+        val c = controller(transport)
+
+        c.send("剪一刀")
+
+        val toolEvent = c.state.value.entries.filterIsInstance<AiChatEntry.ToolEvent>().single()
+        // 只有 split 上屏；get_draft_overview 被滤掉。
+        assertEquals(1, toolEvent.lines.size)
+        assertTrue(toolEvent.lines.single().ok)
+        // 通俗文案：不含工具名/参数名，含位置秒数。
+        val label = toolEvent.lines.single().label
+        assertFalse(label.contains("split_clip"))
+        assertFalse(label.contains("clip_id"))
+        assertTrue(label.contains("5"))
     }
 
     @Test
@@ -158,11 +176,12 @@ class AiChatControllerTest {
 
     @Test
     fun boundedLoopStopsAtRoundLimit() {
-        // 模型永远只回工具调用 → 8 轮上限必须截停。
+        // 模型永远只回分割调用 → 8 轮上限必须截停，且已做的修改自动应用。
         val transport = FakeTransport(
-            MutableList(20) { LlmReply(null, listOf(seekCall())) },
+            MutableList(20) { LlmReply(null, listOf(splitCall())) },
         )
-        val c = controller(transport)
+        val applied = mutableListOf<Triple<Project, String, Long?>>()
+        val c = controller(transport, applied = applied)
 
         c.send("连发工具")
 
@@ -172,22 +191,27 @@ class AiChatControllerTest {
             c.state.value.entries.count { it is AiChatEntry.ToolEvent },
         )
         assertFalse(c.state.value.busy)
-        // seek-only：项目未变 → 无提案。
-        assertNull(c.state.value.proposal)
+        // 截停后自动应用了已完成的修改（一次提交）。
+        assertEquals(1, applied.size)
     }
 
     @Test
-    fun proposalFlagsStaleWhenTimelineChangedDuringChat() {
+    fun noChangesMeansNoApply() {
+        // seek-only：项目未变 → 不应用。
         val transport = FakeTransport(
             mutableListOf(
-                LlmReply(null, listOf(splitCall())),
-                LlmReply("done", emptyList()),
+                LlmReply(null, listOf(seekCall())),
+                LlmReply("看了一眼", emptyList()),
             ),
         )
-        val c = controller(transport, projectChanged = { v -> true })
+        val applied = mutableListOf<Triple<Project, String, Long?>>()
+        val c = controller(transport, applied = applied)
 
-        c.send("split")
-        assertTrue(c.state.value.proposal!!.stale)
+        c.send("看一眼")
+
+        assertEquals(0, applied.size)
+        // seek 是内部操作：消息流里不应出现工具事件行。
+        assertEquals(0, c.state.value.entries.count { it is AiChatEntry.ToolEvent })
     }
 
     @Test
