@@ -15,6 +15,8 @@ import com.RooMCutNext.ai.AiClipFrame
 import com.RooMCutNext.ai.AiProjectContext
 import com.RooMCutNext.ai.AiSettings
 import com.RooMCutNext.ai.AiSettingsStore
+import com.RooMCutNext.ai.CustomSkillCodec
+import com.RooMCutNext.ai.EditSkill
 import com.RooMCutNext.ai.HttpLlmTransport
 import com.RooMCutNext.core.model.AudioClip
 import com.RooMCutNext.core.model.Clip
@@ -34,6 +36,7 @@ import com.RooMCutNext.core.ops.TimelineOps
 import com.RooMCutNext.core.undo.SnapshotHistory
 import com.RooMCutNext.core.util.IdGen
 import com.RooMCutNext.data.ProjectRepository
+import com.RooMCutNext.data.CustomSkillStore
 import com.RooMCutNext.data.SettingsRepository
 import com.RooMCutNext.export.ExportBus
 import com.RooMCutNext.export.ExportService
@@ -50,6 +53,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -230,7 +234,58 @@ class EditorViewModel(
         // v1.6.6 画面感知：多模态模型由帧真正“看到”内容（高潮前置/
         // 整片精简等判断型技能的前提）；提取失败返回空 = 退回先问模式。
         framesProvider = { project -> aiCollectFrames(project) },
+        // v1.6.8 自定义技能：每轮 send 现取 —— 技能面板里刚导入的下一句即生效。
+        customSkillsProvider = { _customSkills.value },
     )
+
+    // ------------------------------------------------------------------
+    // v1.6.8 自定义技能（导入/删除/列表 —— 技能面板消费）
+    // ------------------------------------------------------------------
+
+    private val customSkillStore = CustomSkillStore(application)
+
+    private val _customSkills = MutableStateFlow(customSkillStore.list())
+
+    /** 已导入的自定义技能（技能面板列表 + system prompt 注入源）。 */
+    val customSkills: StateFlow<List<EditSkill>> = _customSkills.asStateFlow()
+
+    /**
+     * 导入技能（粘贴文本或文件内容同一入口）：校验 → 落盘 → 刷新列表。
+     * 返回 [CustomSkillCodec.Result] 供 UI 展示“导入了 N 个/失败原因”。
+     */
+    fun importCustomSkills(text: String): CustomSkillCodec.Result {
+        val r = CustomSkillCodec.parse(text, existing = _customSkills.value)
+        if (r is CustomSkillCodec.Result.Success) {
+            r.skills.forEach { customSkillStore.save(it) }
+            _customSkills.value = customSkillStore.list()
+        }
+        return r
+    }
+
+    fun deleteCustomSkill(id: String) {
+        customSkillStore.delete(id)
+        _customSkills.value = customSkillStore.list()
+    }
+
+    /**
+     * 读取导入文件内容（IO 线程，超限 256KB 返回 null —— 技能 JSON
+     * 正常在几 KB 以内，选错大文件直接拒读，不把内存吃干）。
+     */
+    suspend fun readSkillFileText(uri: Uri): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            getApplication<Application>().contentResolver.openInputStream(uri)?.use { ins ->
+                val buf = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(8192)
+                while (true) {
+                    val n = ins.read(chunk)
+                    if (n <= 0) break
+                    if (buf.size() + n > MAX_SKILL_FILE_BYTES) return@runCatching null
+                    buf.write(chunk, 0, n)
+                }
+                buf.toByteArray().decodeToString()
+            }
+        }.getOrNull()
+    }
 
     /** v1.6.6 画面感知：帧缓存（assetId+窗口位置 → base64），避免每轮重复解码。 */
     private val aiFrameCache = mutableMapOf<String, String>()
@@ -1853,6 +1908,7 @@ class EditorViewModel(
     }
 
     companion object {
+        private const val MAX_SKILL_FILE_BYTES = 256 * 1024
         const val MIN_PPS = 6f
         const val MAX_PPS = 480f
 

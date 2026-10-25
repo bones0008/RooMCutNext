@@ -38,6 +38,24 @@ import kotlinx.serialization.json.put
  *
  * 本类是纯 Kotlin（无 Android 依赖），全部行为可单测。
  */
+
+/**
+ * [EditTools.T] 全部工具名（v1.6.8：导入技能校验共享 —— 自定义技能
+ * 配方里出现幻觉工具名（如 "fade_out_clip"）在导入时即拦下，
+ * 坏配方永远进不了 system prompt。反射收一次，常驻内存。
+ */
+val TOOL_NAMES: Set<String> =
+    EditTools.T::class.java.declaredFields
+        .filter { it.type == String::class.java }
+        .map { it.get(null) as String }
+        .toSet()
+
+/** 技能 steps 中允许出现的非工具 snake_case 标识符（参数名白名单）。 */
+val SKILL_PARAM_WHITELIST: Set<String> = setOf(
+    "anchor_clip_id", "duration_sec", "start_sec", "new_start_sec", "new_end_sec",
+    "to_index", "font_size_ratio", "x_ratio", "y_ratio", "color_hex",
+)
+
 class EditTools(
     /** 可用字体 (id, 显示名)。 */
     private val fonts: List<Pair<String, String>>,
@@ -840,8 +858,12 @@ class EditTools(
         }
     }
 
-    /** 每轮对话的 system prompt（含最新项目概览）。 */
-    fun systemPrompt(draft: Draft, playheadUs: Long): String {
+    /** 每轮对话的 system prompt（含最新项目概览 + 技能库）。v1.6.8：自定义技能一并注入。 */
+    fun systemPrompt(
+        draft: Draft,
+        playheadUs: Long,
+        customSkills: List<EditSkill> = emptyList(),
+    ): String {
         val overview = overviewJson(draft, playheadUs).toString()
         return buildString {
             append(
@@ -866,7 +888,7 @@ class EditTools(
                     "7. The skill library below names editing techniques you know how to execute. " +
                     "When the user names one (or describes it), follow its recipe; when the user asks " +
                     "\"what can you do\", mention a few skill names in the user's language.\n\n" +
-                    EditSkills.promptBlock() +
+                    EditSkills.promptBlock(customSkills) +
                     "\nCurrent draft overview (JSON):\n",
             )
             append(overview)

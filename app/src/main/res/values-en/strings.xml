@@ -357,6 +357,17 @@
     <string name="ai_skills_open">Skills</string>
     <string name="ai_skills_close">Close</string>
     <string name="ai_skills_footer">Tap a skill to drop it into the input box, then add details if you like. Describing it in your own words works just as well.</string>
+    <!-- v1.6.8: custom skill import (new techniques as JSON, injected into the prompt for any model) -->
+    <string name="ai_skills_import">Import custom skills…</string>
+    <string name="ai_skills_import_title">Import custom skills</string>
+    <string name="ai_skills_import_hint">Paste skill JSON here, or tap "From file" to pick a .json file</string>
+    <string name="ai_skills_import_sample">Insert sample</string>
+    <string name="ai_skills_import_file">From file</string>
+    <string name="ai_skills_import_do">Import</string>
+    <string name="ai_skills_import_ok_fmt">Imported %1$d skill(s) — the AI can use them in your very next message</string>
+    <string name="ai_skills_file_error">Could not read the selected file (corrupt or larger than 256KB)</string>
+    <string name="ai_skills_import_format">Format: id, names (nameZh/nameEn), a one-liner, and steps (English instructions for the model; only real tool names allowed). Tap "Insert sample" and adapt it.</string>
+    <string name="ai_skills_delete">Delete this skill</string>
     <!-- v1.6.1: black frame clip (stretchable solid black, replaces implicit delete-holes) -->
     <string name="black_frame_name">Black</string>
     <string name="action_black_gap">Black</string>

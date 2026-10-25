@@ -71,6 +71,7 @@ class AiChatControllerTest {
         settings: AiSettings = AiSettings(apiKey = "k"),
         applied: MutableList<Triple<Project, String, Long?>> = mutableListOf(),
         frames: List<AiClipFrame> = emptyList(),
+        customSkills: List<EditSkill> = emptyList(),
     ): AiChatController {
         val ctxProject = twoClipProject()
         return AiChatController(
@@ -87,6 +88,7 @@ class AiChatControllerTest {
             applyDraft = { p, label, seek -> applied.add(Triple(p, label, seek)) },
             settingsStore = MemSettings(settings),
             framesProvider = { frames },
+            customSkillsProvider = { customSkills },
         )
     }
 
@@ -118,6 +120,31 @@ class AiChatControllerTest {
 
         assertFalse(c.state.value.settings.ready)
         assertEquals("", c.state.value.settings.apiKey)
+    }
+
+    /**
+     * v1.6.8 回归：自定义技能随 system prompt 注入 —— 导入的新招式
+     * 下一句话即可被模型按名调用（provider 每次 send 现取，无需重建
+     * 控制器）。
+     */
+    @Test
+    fun customSkillsInjectedIntoSystemPrompt() {
+        val transport = FakeTransport(mutableListOf())
+        val mySkill = EditSkill(
+            id = "my_opener", nameZh = "专属开场", nameEn = "my opener",
+            aliasesZh = listOf("开场钩子"), category = SkillCategory.CUSTOM,
+            oneLinerZh = "自定义开场招式", oneLinerEn = "A custom opener",
+            steps = listOf("get_draft_overview first.", "seek to 0."),
+        )
+        val c = controller(transport, customSkills = listOf(mySkill))
+
+        c.send("专属开场")
+
+        assertEquals(1, transport.requests.size)
+        val system = transport.requests.single().first().content.orEmpty()
+        assertTrue("system prompt should carry the custom skill", system.contains("专属开场"))
+        assertTrue(system.contains("my opener"))
+        assertTrue(system.contains("imported by the user"))
     }
 
     @Test

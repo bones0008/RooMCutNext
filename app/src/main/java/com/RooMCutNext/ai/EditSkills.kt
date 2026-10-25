@@ -18,13 +18,15 @@ package com.RooMCutNext.ai
  * 显示（英语环境取 nameEn/oneLinerEn），prompt 侧双语全量注入。
  */
 
-/** 技能分类（UI 分组标题用）。 */
+/** 技能分类（UI 分组标题用）。CUSTOM 仅用于用户导入的技能。 */
 enum class SkillCategory(val id: String, val zh: String, val en: String) {
     RHYTHM("rhythm", "节奏", "Rhythm"),
     TRANSITION("transition", "转场", "Transition"),
     STORY("story", "叙事", "Story"),
     AUDIO("audio", "声音", "Audio"),
     TEXT("text", "字幕", "Text"),
+    /** v1.6.8：用户导入技能的默认分组（内置技能永不使用）。 */
+    CUSTOM("custom", "自定义", "Custom"),
 }
 
 /**
@@ -252,17 +254,32 @@ object EditSkills {
         ),
     )
 
-    fun byCategory(): List<Pair<SkillCategory, List<EditSkill>>> =
-        SkillCategory.entries.map { c -> c to ALL.filter { it.category == c } }
+    /** category id → 分类（导入 JSON 用；未知/缺失归 CUSTOM）。 */
+    fun categoryById(id: String?): SkillCategory =
+        SkillCategory.entries.firstOrNull { it.id == id?.trim()?.lowercase() } ?: SkillCategory.CUSTOM
 
-    /** 按名字/别名找技能（UI 或控制器侧可用）。 */
-    fun find(query: String): EditSkill? {
+    /**
+     * 分组视图：内置 + 自定义（v1.6.8）。空分组不返回 —— CUSTOM 在
+     * 无导入技能时不出现在 UI/prompt，与旧行为字节一致。
+     */
+    fun byCategory(custom: List<EditSkill> = emptyList()): List<Pair<SkillCategory, List<EditSkill>>> =
+        SkillCategory.entries.map { c ->
+            c to (ALL.filter { it.category == c } + custom.filter { it.category == c })
+        }.filter { it.second.isNotEmpty() }
+
+    /**
+     * 按名字/别名找技能（UI 或控制器侧可用）。
+     * v1.6.8：自定义优先 —— 同名时用户导入的技能覆盖内置（用户表达意愿
+     * 优先于出厂默认），id 仍保证不撞（导入时查重拦截）。
+     */
+    fun find(query: String, custom: List<EditSkill> = emptyList()): EditSkill? {
         val q = query.trim()
         if (q.isEmpty()) return null
-        return ALL.firstOrNull { s ->
+        val match: (EditSkill) -> Boolean = { s ->
             q.equals(s.nameZh, true) || q.equals(s.nameEn, true) ||
                 s.aliasesZh.any { q.contains(it, true) }
         }
+        return custom.firstOrNull(match) ?: ALL.firstOrNull(match)
     }
 
     /**
@@ -274,7 +291,7 @@ object EditSkills {
      * 判断内容；不带帧 → 只能靠名字/时长/用户描述，需要内容判断时
      * 先问一句，禁止默默瞎猜。
      */
-    fun promptBlock(): String = buildString {
+    fun promptBlock(custom: List<EditSkill> = emptyList()): String = buildString {
         append("Skill library - named techniques the user may ask for by name ")
         append("(match the names/aliases below in Chinese OR English). When a request ")
         append("matches a skill, follow its recipe with your tools, adapting the numbers ")
@@ -288,12 +305,17 @@ object EditSkills {
         append("when a choice needs content judgment (highlight clip, dead segments, ")
         append("chapter boundaries), ASK ONE short question in the user's language ")
         append("instead of guessing silently.\n")
-        byCategory().forEach { (cat, skills) ->
+        byCategory(custom).forEach { (cat, skills) ->
             append("\n[${cat.zh} ${cat.en}]\n")
             skills.forEach { s ->
                 append("- ${s.promptNames}: ${s.oneLinerEn}\n")
                 s.steps.forEachIndexed { i, step -> append("  $i. $step\n") }
             }
+        }
+        if (custom.isNotEmpty()) {
+            append("\nThe [${SkillCategory.CUSTOM.zh} ${SkillCategory.CUSTOM.en}] ")
+            append("entries above were imported by the user - treat them exactly like ")
+            append("the built-in skills.\n")
         }
     }
 }

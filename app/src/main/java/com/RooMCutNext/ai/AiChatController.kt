@@ -93,6 +93,11 @@ class AiChatController(
      * = 无画面可用，例如全黑场/提取失败）。默认不提供（测试兼容）。
      */
     private val framesProvider: suspend (Project) -> List<AiClipFrame> = { emptyList() },
+    /**
+     * v1.6.8 自定义技能：宿主提供已导入技能（每轮 send 时现取 ——
+     * 导入后无需重建控制器，下一句话即生效）。默认空（测试兼容）。
+     */
+    private val customSkillsProvider: () -> List<EditSkill> = { emptyList() },
 ) {
 
     private val _state = MutableStateFlow(AiChatUiState())
@@ -196,7 +201,9 @@ class AiChatController(
         frames: List<AiClipFrame>,
     ) {
         val d = EditTools.Draft(ctx.project)
-        val wire = mutableListOf(WireMessage("system", tools.systemPrompt(d, ctx.playheadUs)))
+        val wire = mutableListOf(
+            WireMessage("system", tools.systemPrompt(d, ctx.playheadUs, customSkillsProvider())),
+        )
         if (frames.isNotEmpty()) wire.add(visionMessage(frames))
         wire.addAll(history)
         wire.add(WireMessage("user", userText))

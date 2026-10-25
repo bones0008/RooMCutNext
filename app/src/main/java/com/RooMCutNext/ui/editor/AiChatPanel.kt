@@ -1,5 +1,8 @@
 package com.RooMCutNext.ui.editor
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,9 +26,11 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
@@ -47,6 +52,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -54,6 +60,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -63,8 +70,11 @@ import androidx.compose.ui.unit.dp
 import com.RooMCutNext.R
 import com.RooMCutNext.ai.AiChatEntry
 import com.RooMCutNext.ai.AiChatUiState
+import com.RooMCutNext.ai.CustomSkillCodec
+import com.RooMCutNext.ai.EditSkill
 import com.RooMCutNext.ai.EditSkills
 import com.RooMCutNext.ui.settings.AiSettingsDialog
+import kotlinx.coroutines.launch
 
 // ===========================================================================
 // AI 剪辑（v1.6.0）— v1.6.3 微信式布局。
@@ -232,8 +242,15 @@ fun AiBottomBar(
         }
 
         // ---- v1.6.5 技能库（窗口级）----
+        // v1.6.8：自定义技能同库展示（“自定义”分组，可删），列表来自
+        // VM 的 customSkills flow —— 导入/删除后即时刷新。
         if (skillsOpen) {
+            val custom by vm.customSkills.collectAsState()
             AiSkillsSheet(
+                custom = custom,
+                onImport = vm::importCustomSkills,
+                onReadFile = vm::readSkillFileText,
+                onDelete = vm::deleteCustomSkill,
                 onDismiss = { skillsOpen = false },
                 onPick = { name ->
                     // 追加而非覆盖 —— 用户可能已打了半句细节，别替他删。
@@ -461,16 +478,26 @@ private fun AiInputRow(
 // ---------------------------------------------------------------------
 
 /**
- * 技能库弹窗：分类列出 [EditSkills] 全部技能（名称 + 一句话），
+ * 技能库弹窗：分类列出全部技能（内置 + 自定义，名称 + 一句话），
  * 点选即把技能名填入输入框（用户可继续补细节再发送）。
  * 中文名为主，英语环境自动切英文字段。
+ *
+ * v1.6.8：顶部新增“导入自定义技能”入口（文件/粘贴 → 校验 → 落盘），
+ * 自定义技能出现“自定义”分组、带删除按钮，导入后随 system prompt
+ * 注入 —— 下一句话 AI 即可按名调用。
  */
 @Composable
 private fun AiSkillsSheet(
+    custom: List<EditSkill>,
+    onImport: (String) -> CustomSkillCodec.Result,
+    onReadFile: suspend (Uri) -> String?,
+    onDelete: (String) -> Unit,
     onDismiss: () -> Unit,
     onPick: (String) -> Unit,
 ) {
     val zh = LocalConfiguration.current.locale.language.startsWith("zh")
+    var importOpen by remember { mutableStateOf(false) }
+    val customIds = custom.map { it.id }.toSet()
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
@@ -493,7 +520,30 @@ private fun AiSkillsSheet(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
             ) {
-                EditSkills.byCategory().forEach { (cat, skills) ->
+                // ---- v1.6.8 导入入口（置顶 —— 用户要能“看到上传的地方”）----
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { importOpen = true }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Filled.Add, null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        stringResource(R.string.ai_skills_import),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                EditSkills.byCategory(custom).forEach { (cat, skills) ->
                     Text(
                         if (zh) cat.zh else cat.en,
                         style = MaterialTheme.typography.labelMedium,
@@ -501,22 +551,40 @@ private fun AiSkillsSheet(
                         modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
                     )
                     skills.forEach { s ->
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable { onPick(if (zh) s.nameZh else s.nameEn) }
-                                .padding(vertical = 6.dp),
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(
-                                if (zh) s.nameZh else s.nameEn,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium,
-                            )
-                            Text(
-                                if (zh) s.oneLinerZh else s.oneLinerEn,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                            Column(
+                                Modifier
+                                    .weight(1f)
+                                    .clickable { onPick(if (zh) s.nameZh else s.nameEn) }
+                                    .padding(vertical = 6.dp),
+                            ) {
+                                Text(
+                                    if (zh) s.nameZh else s.nameEn,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                Text(
+                                    if (zh) s.oneLinerZh else s.oneLinerEn,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (s.id in customIds) {
+                                IconButton(
+                                    onClick = { onDelete(s.id) },
+                                    modifier = Modifier.size(32.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Delete,
+                                        stringResource(R.string.ai_skills_delete),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -529,6 +597,120 @@ private fun AiSkillsSheet(
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
+        },
+    )
+
+    if (importOpen) {
+        AiSkillImportDialog(
+            onImport = onImport,
+            onReadFile = onReadFile,
+            onDismiss = { importOpen = false },
+        )
+    }
+}
+
+// ---------------------------------------------------------------------
+// v1.6.8 技能导入对话框
+// ---------------------------------------------------------------------
+
+/**
+ * 导入自定义技能：粘贴 JSON 或从文件选（填充进文本框检查后再导入）。
+ * “填入示例”一键塞入可直接导入的样例 —— 用户照着改就能写新技能。
+ * 导入成功留在本对话框（可连续导入多个文件），技能库列表实时刷新。
+ */
+@Composable
+private fun AiSkillImportDialog(
+    onImport: (String) -> CustomSkillCodec.Result,
+    onReadFile: suspend (Uri) -> String?,
+    onDismiss: () -> Unit,
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var text by rememberSaveable { mutableStateOf("") }
+    var message by remember { mutableStateOf<String?>(null) }
+    var isError by remember { mutableStateOf(false) }
+
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val content = onReadFile(uri)
+                if (content == null) {
+                    message = ctx.getString(R.string.ai_skills_file_error)
+                    isError = true
+                } else {
+                    // 填入文本框让用户过目 —— 导入仍由“导入”键触发，
+                    // 选错文件（非 JSON）在解析层拦下。
+                    text = content
+                    message = null
+                }
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.ai_skills_import_title)) },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text(stringResource(R.string.ai_skills_import_hint)) },
+                    minLines = 5,
+                    maxLines = 10,
+                )
+                message?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isError) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = {
+                        text = CustomSkillCodec.SAMPLE_JSON
+                        message = null
+                    }) { Text(stringResource(R.string.ai_skills_import_sample)) }
+                    TextButton(onClick = { filePicker.launch(arrayOf("*/*")) }) {
+                        Text(stringResource(R.string.ai_skills_import_file))
+                    }
+                }
+                Text(
+                    stringResource(R.string.ai_skills_import_format),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = text.isNotBlank(),
+                onClick = {
+                    when (val r = onImport(text)) {
+                        is CustomSkillCodec.Result.Success -> {
+                            val warn = r.warnings.takeIf { it.isNotEmpty() }
+                                ?.joinToString("；", prefix = "（", postfix = "）") ?: ""
+                            message = ctx.getString(
+                                R.string.ai_skills_import_ok_fmt, r.skills.size,
+                            ) + warn
+                            isError = false
+                            text = ""
+                        }
+                        is CustomSkillCodec.Result.Error -> {
+                            message = r.message
+                            isError = true
+                        }
+                    }
+                },
+            ) { Text(stringResource(R.string.ai_skills_import_do)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.ai_skills_close)) }
         },
     )
 }

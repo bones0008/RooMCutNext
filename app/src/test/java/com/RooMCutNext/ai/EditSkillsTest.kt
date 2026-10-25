@@ -2,6 +2,7 @@ package com.RooMCutNext.ai
 
 import com.RooMCutNext.core.model.Project
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,18 +17,11 @@ import org.junit.Test
  */
 class EditSkillsTest {
 
-    /** steps 中允许出现的参数名（非工具名）。 */
-    private val paramWhitelist = setOf(
-        "anchor_clip_id", "duration_sec", "start_sec", "new_start_sec", "new_end_sec",
-        "to_index", "font_size_ratio", "x_ratio", "y_ratio", "color_hex",
-    )
+    /** steps 中允许出现的参数名（非工具名）—— 与生产校验同源。 */
+    private val paramWhitelist: Set<String> = SKILL_PARAM_WHITELIST
 
-    /** EditTools.T 的全部工具名（反射收集，新增工具自动纳入校验）。 */
-    private val toolNames: Set<String> =
-        EditTools.T::class.java.declaredFields
-            .filter { it.type == String::class.java }
-            .map { it.get(null) as String }
-            .toSet()
+    /** EditTools 全部工具名（生产校验同源，新增工具自动纳入）。 */
+    private val toolNames: Set<String> = TOOL_NAMES
 
     @Test
     fun skillIdsAreUnique() {
@@ -50,10 +44,11 @@ class EditSkillsTest {
     @Test
     fun allCategoriesArePopulated() {
         val byCat = EditSkills.byCategory().toMap()
-        SkillCategory.entries.forEach { c ->
+        // v1.6.8：CUSTOM 无导入技能时不出现（空分组过滤）。
+        SkillCategory.entries.filter { it != SkillCategory.CUSTOM }.forEach { c ->
             assertTrue("category ${c.id} empty", byCat[c].orEmpty().isNotEmpty())
         }
-        assertEquals(SkillCategory.entries.size, EditSkills.byCategory().size)
+        assertEquals(SkillCategory.entries.size - 1, EditSkills.byCategory().size)
         assertEquals(EditSkills.ALL.size, EditSkills.byCategory().sumOf { it.second.size })
     }
 
@@ -111,6 +106,28 @@ class EditSkillsTest {
         assertTrue(prompt.contains("jump cut"))
     }
 
+    /** v1.6.8：systemPrompt 接受自定义技能并随技能库注入。 */
+    @Test
+    fun systemPromptInjectsCustomSkills() {
+        val tools = EditTools(
+            fonts = listOf("system" to "System"),
+            luts = listOf("builtin:warm" to "Warm"),
+            idFactory = { "x" },
+        )
+        val p = Project(
+            id = "p", name = "P", assets = emptyList(),
+            clips = emptyList(), texts = emptyList(), audios = emptyList(),
+        )
+        val prompt = tools.systemPrompt(
+            EditTools.Draft(p), playheadUs = 0L,
+            customSkills = listOf(customSkill(nameZh = "专属开场")),
+        )
+        assertTrue(prompt.contains("专属开场"))
+        assertTrue(prompt.contains("自定义 Custom"))
+        // 默认参（空自定义）不引入 CUSTOM 分组。
+        assertFalse(tools.systemPrompt(EditTools.Draft(p), 0L).contains("自定义 Custom"))
+    }
+
     // ------------------------------------------------------------------
     // v1.6.6 画面感知：content-blind 规则（无帧时先问，不瞎猜）
     // ------------------------------------------------------------------
@@ -137,5 +154,55 @@ class EditSkillsTest {
                 s.steps.any { it.contains(Regex("(?i)ask")) },
             )
         }
+    }
+
+    // ------------------------------------------------------------------
+    // v1.6.8 自定义技能：分组 / 查找 / prompt 注入
+    // ------------------------------------------------------------------
+
+    private fun customSkill(id: String = "my_cut", nameZh: String = "我的招式") = EditSkill(
+        id = id, nameZh = nameZh, nameEn = "My Move",
+        aliasesZh = listOf("招式"), category = SkillCategory.CUSTOM,
+        oneLinerZh = "自定义测试技能", oneLinerEn = "A custom test skill",
+        steps = listOf("get_draft_overview first.", "seek to 0."),
+    )
+
+    @Test
+    fun customSkillsAppearInCustomGroupOnlyWhenPresent() {
+        // 空自定义：无 CUSTOM 分组（旧行为字节一致）。
+        assertFalse(EditSkills.byCategory().any { it.first == SkillCategory.CUSTOM })
+        // 有自定义：CUSTOM 分组出现且只含它。
+        val byCat = EditSkills.byCategory(listOf(customSkill())).toMap()
+        assertEquals(listOf("my_cut"), byCat[SkillCategory.CUSTOM]?.map { it.id })
+        assertEquals(
+            EditSkills.ALL.size + 1,
+            EditSkills.byCategory(listOf(customSkill())).sumOf { it.second.size },
+        )
+    }
+
+    @Test
+    fun promptBlockInjectsCustomSkills() {
+        val block = EditSkills.promptBlock(listOf(customSkill(nameZh = "专属开场")))
+        assertTrue(block.contains("自定义 Custom"))
+        assertTrue(block.contains("专属开场"))
+        assertTrue(block.contains("My Move"))
+        assertTrue(block.contains("imported by the user"))
+        // 空自定义：不该出现导入注记（与旧输出字节一致）。
+        assertFalse(EditSkills.promptBlock().contains("imported by the user"))
+    }
+
+    @Test
+    fun findPrefersCustomOverBuiltin() {
+        val sameNameAsBuiltin = EditSkill(
+            id = "my_jump", nameZh = "跳剪", nameEn = "my jump",
+            category = SkillCategory.CUSTOM,
+            oneLinerZh = "用户版", oneLinerEn = "user version",
+            steps = listOf("seek to 0."),
+        )
+        assertEquals("my_jump", EditSkills.find("跳剪", listOf(sameNameAsBuiltin))?.id)
+        assertEquals("my_cut", EditSkills.find("我的招式", listOf(customSkill()))?.id)
+        assertEquals("my_cut", EditSkills.find("招式", listOf(customSkill()))?.id)
+        // 无自定义时回落内置。
+        assertEquals("jump_cut", EditSkills.find("跳剪")?.id)
     }
 }

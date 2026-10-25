@@ -1,0 +1,48 @@
+{
+  "skills": [
+    {
+      "id": "vlog_opener",
+      "nameZh": "Vlog开场钩子",
+      "nameEn": "vlog opener",
+      "aliasesZh": ["开场钩子", "黄金三秒"],
+      "category": "story",
+      "oneLinerZh": "把最抓人的一段挪到开头，前三秒就留住观众",
+      "oneLinerEn": "Lead with the most striking moment to hook viewers in three seconds.",
+      "steps": [
+        "get_draft_overview; WITH frames pick the most striking clip visually, WITHOUT frames ASK the user which clip hooks best.",
+        "move_clip that clip to to_index 0.",
+        "trim_clip it to 2-3 seconds keeping the strongest part.",
+        "add_text a short hook caption at start_sec 0, duration_sec 2, y_ratio 0.80, color_hex #FFFFFF."
+      ]
+    },
+    {
+      "id": "beat_grid",
+      "nameZh": "音乐卡点",
+      "nameEn": "beat grid",
+      "aliasesZh": ["卡点", "踩点"],
+      "category": "rhythm",
+      "oneLinerZh": "每段掐成同样长的短切，跟着音乐的节拍走",
+      "oneLinerEn": "Even sub-second cuts that ride the music beat.",
+      "steps": [
+        "get_draft_overview; find the music audio clip and the total video duration.",
+        "Ask the user the cut length per beat if not given; default 0.5 seconds.",
+        "trim_clip every video clip to that length so the cuts land on an even beat grid.",
+        "remove_transition on every clip so each hit is a hard cut, then seek to 0."
+      ]
+    },
+    {
+      "id": "chapter_captions",
+      "nameZh": "章节字幕",
+      "nameEn": "chapter captions",
+      "aliasesZh": ["分段字幕", "章节标题"],
+      "category": "text",
+      "oneLinerZh": "按用户给的章节名在每段开头压一条顶部字幕",
+      "oneLinerEn": "A top caption at each chapter start, names supplied by the user.",
+      "steps": [
+        "get_draft_overview and the user's chapter names; ASK for the list if missing.",
+        "add_text for each chapter at its start time: the chapter name, duration_sec 2, x_ratio 0.5, y_ratio 0.12, color_hex #FFFFFF.",
+        "seek to 0 so the user can preview the chapter flow."
+      ]
+    }
+  ]
+}
