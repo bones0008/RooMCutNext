@@ -11,7 +11,10 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -29,8 +33,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -70,14 +73,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.RooMCutNext.R
@@ -529,12 +533,14 @@ private fun AiInputRow(
             keyboard?.hide()
         }
     }
-    // v1.6.16: 输入行紧凑化（真机反馈“占的高度太大…高度减少三分之一”）——
-    // 旧：OutlinedTextField 默认 56dp + 行 padding 12 → ≈68dp；新：
-    // 40dp 紧凑输入框 + 38dp 按钮座 + 行 padding 8 → ≈48dp（↓30%）。
-    // 字号同步变小（bodySmall 12sp，占位符同），技能入口改竖排胶囊
-    // （宽度 ~32dp，比横排省 ~25dp，还给正文），麦克风从输入框尾部
-    // 移出为独立常驻按钮（无识别服务的设备也可见，点按有解释）。
+    // v1.6.16→v1.6.17 输入行演化：v1.6.16 为压缩高度把 OutlinedTextField
+    // 硬限到 40dp，结果 M3 内部布局被压缩、正文纵向裁切（真机反馈
+    // “输入的文字只能看到一半”），且单行模式长文本只能横向滚动，
+    // 永远看不全自己打了什么。v1.6.17 改 BasicTextField + 自绘边框
+    // （见下方）：高度永远跟随内容 —— 1 行 ~48dp 紧凑起跳（保持
+    // v1.6.16 瘦身量级），多行自动长高至 5 行封顶、超出框内滚动；
+    // 12sp 小字、竖排技能胶囊、独立常驻麦克风（无识别服务也可见、
+    // 点按有解释）等 v1.6.16 决策全部保留。
     Row(
         Modifier
             .fillMaxWidth()
@@ -555,51 +561,84 @@ private fun AiInputRow(
                 modifier = Modifier.size(20.dp),
             )
         }
-        OutlinedTextField(
+        // v1.6.17: 输入框重构 —— OutlinedTextField.height(40.dp) 的硬限高
+        // 被 M3 内部最小高度顶住，正文被纵向裁切“只能看到一半”；
+        // singleLine=true 又让长文本只能横向滚动。改 BasicTextField +
+        // 自绘 1dp 圆角边框后高度完全由内容驱动：1 行 ~48dp，多行自动
+        // 增高，maxLines=5 封顶（~100dp）后框内滚动 —— 任何字号缩放下
+        // 都不可能再裁字。Enter=换行（可写多行剪辑指令），发送走右侧
+        // 按钮或麦克风语音。
+        val fieldInteraction = remember { MutableInteractionSource() }
+        val fieldFocused by fieldInteraction.collectIsFocusedAsState()
+        BasicTextField(
             value = text,
             onValueChange = onTextChange,
             modifier = Modifier
                 .weight(1f)
-                .height(40.dp),
-            placeholder = {
-                Text(
-                    stringResource(R.string.ai_input_hint),
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                )
-            },
-            singleLine = true,
+                .heightIn(min = 44.dp),
             enabled = enabled,
-            // v1.6.16: 小字号（占位符与输入正文都从 16sp 降到 12sp）——
-            // 大号占位文字是旧版“输入框显得高”的元凶之一。
-            textStyle = MaterialTheme.typography.bodySmall,
-            // v1.6.5: 技能库入口内嵌输入框左端（不占行宽）；v1.6.11 升级
-            // 为带文字的胶囊；v1.6.16 改竖排（真机反馈横排胶囊丑且占宽）。
-            leadingIcon = {
-                Column(
+            // v1.6.16: 小字号（占位符与输入正文都从 16sp 降到 12sp）。
+            textStyle = MaterialTheme.typography.bodySmall.copy(
+                color = if (enabled) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            ),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            singleLine = false,
+            maxLines = 5,
+            minLines = 1,
+            interactionSource = fieldInteraction,
+            decorationBox = { innerTextField ->
+                Row(
                     Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer)
-                        .clickable(enabled = enabled, onClick = onOpenSkills)
-                        .padding(horizontal = 5.dp, vertical = 3.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                        .border(
+                            width = 1.dp,
+                            color = if (fieldFocused) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outline,
+                            shape = RoundedCornerShape(12.dp),
+                        )
+                        .padding(start = 6.dp, end = 10.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        Icons.Filled.Bolt,
-                        stringResource(R.string.ai_skills_open),
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.size(11.dp),
-                    )
-                    Text(
-                        stringResource(R.string.ai_skills_chip),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
+                    // v1.6.5: 技能库入口内嵌输入框左端（不占行宽）；v1.6.11
+                    // 升级为带文字胶囊；v1.6.16 改竖排（真机反馈横排
+                    // 胶囊丑且占宽）；v1.6.17 随自绘边框内嵌同款。
+                    Column(
+                        Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .clickable(enabled = enabled, onClick = onOpenSkills)
+                            .padding(horizontal = 5.dp, vertical = 3.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Icon(
+                            Icons.Filled.Bolt,
+                            stringResource(R.string.ai_skills_open),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(11.dp),
+                        )
+                        Text(
+                            stringResource(R.string.ai_skills_chip),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Box(Modifier.weight(1f)) {
+                        innerTextField()
+                        // 占位符：空文本时垫在正文位（12sp 小字、单行省略）。
+                        if (text.isEmpty()) {
+                            Text(
+                                stringResource(R.string.ai_input_hint),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
             },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { trySend() }),
         )
         Spacer(Modifier.width(2.dp))
         // v1.6.14: 语音输入麦克风；v1.6.16 从输入框尾部移出为独立常驻
