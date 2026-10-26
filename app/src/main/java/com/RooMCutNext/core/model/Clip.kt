@@ -15,8 +15,16 @@ import kotlinx.serialization.Serializable
  * black-frame clips (see MediaAsset.BLACK_FRAME_ASSET_ID /
  * TimelineOps.insertBlackGap): an ordinary image clip the user stretches
  * (0.1s..60s), transitions into (dissolve into 黑场 = fade-to-black) and
- * deletes like any other media. Holes now only appear where the user drags
- * one in deliberately (or in legacy projects, which keep rendering as-is).
+ * deletes like any other media.
+ *
+ * v1.6.18 — GAPS ARE DEAD: dragging is a PURE REORDER (the drop always
+ * lands tight — see TimelineView.computePlacement), so no gesture ever
+ * punches a hole anymore. Legacy holes (from the old free-positioning
+ * drags) are migrated on project load into equal-length 黑场 clips
+ * (TimelineOps.migrateGapsToBlackClips — playback identical, but visible
+ * / editable / deletable). Black pauses ONLY come from the explicit
+ * 「加黑场」 action from now on; the gapBeforeUs field survives purely as
+ * schema compatibility for old project JSON.
  *
  * Timeline v4 — TRANSITIONS (v1.2.1): a clip may carry a [transitionInUs]
  * crossfade with the PREVIOUS clip: the clip starts that much EARLIER,

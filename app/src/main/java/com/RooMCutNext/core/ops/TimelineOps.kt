@@ -220,6 +220,18 @@ object TimelineOps {
     }
 
     /**
+     * v1.6.18: 「加黑场」菜单的 before 语义 → [insertBlackGap] 的 after 语义。
+     *
+     * 手动菜单回调传 before：true=在素材前添加 / false=在素材后添加 /
+     * null=追加到时间线末尾（此时锚点无效，after 取值不参与定位）。
+     * 两套命名互为取反——v1.6.1..v1.6.17 的 ViewModel 里写成
+     * `after = before != false`，双重否定把前后彻底颠倒（「在素材前
+     * 添加」黑场落到素材后面）。抽出纯映射并单测钉死，防止这个
+     * 双重否定再次悄悄反转。
+     */
+    fun blackGapAfter(before: Boolean?): Boolean = before == false
+
+    /**
      * v1.6.1: 插入黑场 —— 一段可自由拉伸的纯黑图片素材（0.1s..60s）。
      *
      * 锚定语义（与 move/place 的“洞归槽位”纪律一致）：
@@ -262,6 +274,41 @@ object TimelineOps {
 
     fun update(clips: List<Clip>, clipId: String, transform: (Clip) -> Clip): List<Clip> =
         clips.map { if (it.id == clipId) transform(it) else it }
+
+    /**
+     * v1.6.18: 一次性迁移 —— 把旧版"自由定位"拖拽留下的素材间隙
+     * （gapBeforeUs > 0）原地转成等时长的黑场素材；间隙不足
+     * [MIN_SOURCE_SPAN_US]（0.1s）的零头直接抹掉（视觉不可辨）。
+     * 迁移后所有素材 gapBeforeUs == 0：时间线从此无空隙，黑底停顿
+     * 只能由显式黑场（[insertBlackGap] / AI 的 add_black_clip）表达。
+     *
+     * 时间轴坐标保持不变：黑场占位时长 == 原间隙（超过
+     * [IMAGE_MAX_DURATION_US] 的间隙按上限分段拼接，段和 == 间隙），
+     * 后续素材起点与文字/音乐/画中画的绝对锚点零位移。
+     *
+     * 纯函数：干净列表（无间隙）原样返回同一实例，调用方可用
+     * 引用相等短路。黑场素材 id 由 [newId] 生成。
+     */
+    fun migrateGapsToBlackClips(clips: List<Clip>, newId: () -> String): List<Clip> {
+        if (clips.none { it.gapBeforeUs > 0L }) return clips
+        val out = mutableListOf<Clip>()
+        for (clip in clips) {
+            var gap = clip.gapBeforeUs
+            while (gap >= MIN_SOURCE_SPAN_US) {
+                val chunk = gap.coerceAtMost(IMAGE_MAX_DURATION_US)
+                out += Clip(
+                    id = newId(),
+                    assetId = BLACK_FRAME_ASSET_ID,
+                    sourceInUs = 0L,
+                    sourceOutUs = chunk,
+                )
+                gap -= chunk
+            }
+            // 不足 0.1s 的残余间隙直接并入（后续素材前移 <0.1s）。
+            out += if (clip.gapBeforeUs > 0L) clip.copy(gapBeforeUs = 0L) else clip
+        }
+        return out
+    }
 
     // ------------------------------------------------------------------
     // Crossfade transitions (v1.2.1)

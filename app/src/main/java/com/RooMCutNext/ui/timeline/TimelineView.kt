@@ -109,15 +109,16 @@ private data class ClipLayout(
     val transitionType: String = "",
 )
 
-/** Projected drop of a clip drag (v1.0.9 free positioning): the slot the
- *  clip will occupy and the black hole in front of it. */
+/** Projected drop of a clip drag (v1.6.18 pure reorder): the slot the
+ * clip will occupy — it always lands TIGHT (no leading hole). */
 private data class Placement(
     val insertAt: Int,
+    /** Always 0 since v1.6.18 — kept for the place() call shape. */
     val gapBeforeUs: Long,
     /** Timeline start/end of the clip once dropped, microseconds. */
     val landStartUs: Long,
     val landEndUs: Long,
-    /** End of the clip in front (where the projected hole begins). */
+    /** End of the clip in front (the tight landing start). */
     val predEndUs: Long,
 )
 
@@ -306,13 +307,16 @@ fun TimelineView(
         (((scroll + playheadScreenX()) / pps * 1_000_000f).toLong()).coerceAtLeast(0L)
 
     /**
-     * Projected drop of a clip drag (v1.0.9 free positioning): release at
-     * [fingerXpx] and the clip lands at [Placement.landStartUs] with a black
-     * hole of [Placement.gapBeforeUs] in front of it. This is how the user
-     * puts space between two clips — the drag is no longer a pure reorder.
+     * Projected drop of a clip drag — v1.6.18 纯重排序：release at
+     * [fingerXpx] and the clip lands TIGHT at [Placement.landStartUs]
+     * (its insertion slot's front clip end). Dragging NEVER leaves a hole
+     * between clips anymore — 想要黑底停顿就显式「加黑场」（addBlackGap）；
+     * 旧版拖出的间隙由加载时的 TimelineOps.migrateGapsToBlackClips
+     * 一次性转成黑场素材（播放结果完全不变）。
      *
-     * The clip's left edge tracks (fingerX - grabOffset), matching the
-     * elevated preview, so the clip lands exactly where it is drawn.
+     * The clip's left edge tracks (fingerX - grabOffset) while elevated, so
+     * the drag feels free — but the drop snaps tight into the slot picked by
+     * the finger position (first clip whose midpoint is past the target).
      */
     fun computePlacement(
         snap: EditorViewModel.TimelineSnapshot,
@@ -333,11 +337,9 @@ fun TimelineView(
             }
         }
         val predEndUs = if (insertAt == 0) 0L else starts[insertAt - 1] + others[insertAt - 1].durationUs
-        // Magnetic: a near-touch drop snaps tight — no sliver black holes.
-        val gap = (targetStartUs - predEndUs).coerceAtLeast(0L)
-        val snappedGap = if (gap <= 300_000L) 0L else gap
-        val landStartUs = predEndUs + snappedGap
-        return Placement(insertAt, snappedGap, landStartUs, landStartUs + moved.durationUs, predEndUs)
+        // v1.6.18: 恒紧贴落位 —— 拖放只改变顺序，不产生空隙。
+        val landStartUs = predEndUs
+        return Placement(insertAt, 0L, landStartUs, landStartUs + moved.durationUs, predEndUs)
     }
 
     // ---------------- auto-sync scroll to the playhead ----------------
@@ -608,8 +610,8 @@ fun TimelineView(
                 val moved = snap.project.clips.firstOrNull { it.id == mode.clipId } ?: return
                 val placement = computePlacement(snap, moved, x)
                 if (placement != null) {
-                    // v1.0.9: the drop CREATES the gap the user dragged —
-                    // clips can now sit apart with black between them.
+                    // v1.6.18: 纯重排序落位 —— 紧贴插入槽，永不留空隙；
+                    // 黑底停顿只能由「加黑场」显式插入。
                     v.placeClip(mode.fromIndex, placement.insertAt, placement.gapBeforeUs)
                 }
                 fingerX.floatValue = Float.NaN
@@ -1024,27 +1026,7 @@ fun TimelineView(
                 val fx = fingerX.floatValue
                 val placement = movedClip?.let { computePlacement(snap, it, fx) }
                 if (placement != null) {
-                    // ---- projected black hole (only when the drop leaves a gap) ----
-                    if (placement.gapBeforeUs > 0L) {
-                        val gapL = g.timeToX(placement.predEndUs)
-                        val gapR = g.timeToX(placement.landStartUs)
-                        if (gapR - gapL > 1f) {
-                            drawRoundRect(
-                                color = Color(0xAA000000),
-                                topLeft = Offset(gapL, g.trackTop + 2f * dp),
-                                size = Size(gapR - gapL, TimelineVerticalMath.TRACK_HEIGHT_DP * dp - 8f * dp),
-                                cornerRadius = CornerRadius(6f * dp),
-                            )
-                            drawRoundRect(
-                                color = Color(0x8037474F),
-                                topLeft = Offset(gapL, g.trackTop + 2f * dp),
-                                size = Size(gapR - gapL, TimelineVerticalMath.TRACK_HEIGHT_DP * dp - 8f * dp),
-                                cornerRadius = CornerRadius(6f * dp),
-                                style = Stroke(width = 1.dp.toPx()),
-                            )
-                        }
-                    }
-                    // ---- landing outline: where the clip will snap ----
+                    // ---- landing outline: where the clip will snap (tight) ----
                     val landL = g.timeToX(placement.landStartUs)
                     val landW = g.timeToX(placement.landEndUs) - landL
                     drawRoundRect(

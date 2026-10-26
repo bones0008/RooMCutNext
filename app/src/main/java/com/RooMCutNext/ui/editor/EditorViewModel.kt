@@ -657,6 +657,38 @@ class EditorViewModel(
         }
         viewModelScope.launch { checkMissingAssets() }
         viewModelScope.launch { preloadThumbnails(_state.value.project.assets) }
+        migrateLegacyGaps()
+    }
+
+    /**
+     * v1.6.18: 一次性迁移 —— 旧版"自由定位"拖拽在素材间留下的间隙
+     * （gapBeforeUs > 0）转成等时长的黑场素材（播放结果逐帧一致，
+     * 但从此是可见、可删、可拉伸的显式对象）。迁移后时间线永无空隙：
+     * 拖放只重排序（computePlacement 恒紧贴），黑底停顿只能通过
+     * 「加黑场」插入。幂等：干净项目零开销直接返回。
+     *
+     * 不写撤销记录（迁移是格式归一化，撤销回去等于把空隙又变回来）；
+     * 落盘走 autosave。黑场素材文件由 [MediaImporter.ensureBlackFrameAsset]
+     * 幂等落地，失败则保持原样渲染（间隙照常播黑），下次打开再试。
+     */
+    private fun migrateLegacyGaps() {
+        if (_state.value.project.clips.none { it.gapBeforeUs > 0L }) return
+        viewModelScope.launch {
+            val loaded = _state.value.project
+            if (loaded.clips.none { it.gapBeforeUs > 0L }) return@launch
+            val asset = loaded.assets.firstOrNull { it.isBlackFrame }
+                ?: importer.ensureBlackFrameAsset(repo.mediaDir(projectId))
+                ?: return@launch
+            val migrated = loaded.copy(
+                assets = if (loaded.assets.any { it.isBlackFrame }) loaded.assets
+                else loaded.assets + asset,
+                clips = TimelineOps.migrateGapsToBlackClips(loaded.clips) { IdGen.new("c") },
+            )
+            _state.update { it.copy(project = migrated) }
+            _structureVersion.value += 1
+            refreshPlayback()
+            scheduleAutosave()
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1330,7 +1362,10 @@ class EditorViewModel(
                     clips = TimelineOps.insertBlackGap(
                         withAsset.clips,
                         anchor,
-                        after = before != false,
+                        // v1.6.18 修复：菜单 before(true=素材前/false=素材后)与 ops 的
+                        // after 互为取反，旧的 `before != false` 双重否定把前后颠倒
+                        //（“在素材前添加”黑场落到素材后面）。纯映射已单测钉死。
+                        after = TimelineOps.blackGapAfter(before),
                         durationUs = durationUs,
                         newId = newId,
                     ),

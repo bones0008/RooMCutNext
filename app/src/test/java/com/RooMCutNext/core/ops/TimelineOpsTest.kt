@@ -11,6 +11,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -298,6 +299,64 @@ class TimelineOpsTest {
         assertEquals(100_000L, tooShort[0].sourceOutUs)
         val tooLong = TimelineOps.insertBlackGap(emptyList(), -1, after = true, 90_000_000L, "blk2")
         assertEquals(60_000_000L, tooLong[0].sourceOutUs)
+    }
+
+    @Test
+    fun `blackGapAfter maps the menu's before-flag onto ops' after-flag`() {
+        // v1.6.18 回归钉死：手动菜单「在素材前添加」(before=true) 期间
+        // ViewModel 旧映射 `after = before != false` 双重否定把前后颠倒，
+        // 黑场落到素材后面（反之亦然）。菜单语义与 ops 语义互为取反。
+        assertFalse(TimelineOps.blackGapAfter(true))  // 素材前 → after=false
+        assertTrue(TimelineOps.blackGapAfter(false)) // 素材后 → after=true
+        // null = 追加到时间线末尾：锚点无效，after 不参与定位，仅求确定值。
+        assertFalse(TimelineOps.blackGapAfter(null))
+    }
+
+    @Test
+    fun `menu semantics end-to-end - before=true lands the black clip in front of the anchor`() {
+        // 模拟手动菜单全链路（addBlackGap(before=true) → blackGapAfter →
+        // insertBlackGap）：黑场必须出现在选中素材【前】面。
+        val clips = listOf(
+            Clip(id = "a", assetId = "a1", sourceInUs = 0, sourceOutUs = 2_000_000),
+            Clip(id = "sel", assetId = "a1", sourceInUs = 0, sourceOutUs = 3_000_000),
+        )
+        val anchor = clips.indexOfFirst { it.id == "sel" }
+        val out = TimelineOps.insertBlackGap(
+            clips, anchor,
+            after = TimelineOps.blackGapAfter(before = true),
+            durationUs = 1_000_000L, newId = "blk",
+        )
+        assertEquals(3, out.size)
+        assertEquals("blk", out[1].id)               // 夹在 a 与 sel 之间
+        assertEquals("sel", out[2].id)               // 锚素材被推到黑场之后
+        val st = TimelineOps.starts(out)
+        assertEquals(0L, st[0])
+        assertEquals(2_000_000L, st[1])              // 黑场紧贴 a 末尾
+        assertEquals(3_000_000L, st[2])              // sel 右移一个黑场时长
+        assertEquals(6_000_000L, st[3])
+    }
+
+    @Test
+    fun `menu semantics end-to-end - before=false lands the black clip behind the anchor`() {
+        val clips = listOf(
+            Clip(id = "sel", assetId = "a1", sourceInUs = 0, sourceOutUs = 2_000_000),
+            Clip(id = "b", assetId = "a1", sourceInUs = 0, sourceOutUs = 1_000_000),
+        )
+        val anchor = clips.indexOfFirst { it.id == "sel" }
+        val out = TimelineOps.insertBlackGap(
+            clips, anchor,
+            after = TimelineOps.blackGapAfter(before = false),
+            durationUs = 1_000_000L, newId = "blk",
+        )
+        assertEquals(3, out.size)
+        assertEquals("sel", out[0].id)               // 锚素材原地不动
+        assertEquals("blk", out[1].id)               // 黑场紧贴其后
+        assertEquals("b", out[2].id)
+        val st = TimelineOps.starts(out)
+        assertEquals(0L, st[0])
+        assertEquals(2_000_000L, st[1])
+        assertEquals(3_000_000L, st[2])
+        assertEquals(4_000_000L, st[3])
     }
 
     @Test
@@ -763,5 +822,103 @@ class TimelineOpsTest {
         val out = TimelineOps.applyAdjustToAll(listOf(graded), com.RooMCutNext.core.model.ColorAdjust())
         assertNull(out[0].adjust.lutId)
         assertTrue(out[0].adjust.isNeutral)
+    }
+
+    // ---------------- v1.6.18: migrateGapsToBlackClips ----------------
+
+    private fun gappedClip(id: String, gapUs: Long, durUs: Long = 3_000_000L) =
+        Clip(id = id, assetId = "a1", gapBeforeUs = gapUs, sourceInUs = 0L, sourceOutUs = durUs)
+
+    @Test
+    fun `migrate on clean list returns the same instance`() {
+        val clips = listOf(clip(), clip())
+        assertSame(clips, TimelineOps.migrateGapsToBlackClips(clips) { "b" })
+    }
+
+    @Test
+    fun `migrate converts a middle gap into an equal black clip`() {
+        val clips = listOf(clip(outUs = 2_000_000), gappedClip("c2", 1_500_000))
+        val out = TimelineOps.migrateGapsToBlackClips(clips) { "blk" }
+        assertEquals(3, out.size)
+        assertEquals(BLACK_FRAME_ASSET_ID, out[1].assetId)
+        assertEquals(1_500_000L, out[1].sourceOutUs)
+        assertEquals(0L, out[2].gapBeforeUs)
+        // timeline coordinates preserved: c2 keeps its content start and
+        // the total duration is identical
+        val before = TimelineOps.starts(clips)
+        val after = TimelineOps.starts(out)
+        assertEquals(before[1], after[2])
+        assertEquals(before[clips.size], after[out.size])
+    }
+
+    @Test
+    fun `migrate converts a leading gap into a black clip at the head`() {
+        val clips = listOf(gappedClip("c1", 2_000_000), clip())
+        val out = TimelineOps.migrateGapsToBlackClips(clips) { "blk" }
+        assertEquals(3, out.size)
+        assertEquals(BLACK_FRAME_ASSET_ID, out[0].assetId)
+        assertEquals(0L, out[1].gapBeforeUs)
+        // c1's content start was 2s (the leading hole) and stays 2s
+        val before = TimelineOps.starts(clips)
+        val after = TimelineOps.starts(out)
+        assertEquals(before[0], after[1])
+        assertEquals(before[clips.size], after[out.size])
+    }
+
+    @Test
+    fun `migrate chunks an oversized gap into 60s black clips`() {
+        // 125s gap -> 60s + 60s + 5s, total preserved exactly
+        val gap = 125_000_000L
+        val clips = listOf(clip(), gappedClip("c2", gap))
+        val out = TimelineOps.migrateGapsToBlackClips(clips) { "blk" }
+        val blacks = out.filter { it.assetId == BLACK_FRAME_ASSET_ID }
+        assertEquals(3, blacks.size)
+        assertEquals(60_000_000L, blacks[0].sourceOutUs)
+        assertEquals(60_000_000L, blacks[1].sourceOutUs)
+        assertEquals(5_000_000L, blacks[2].sourceOutUs)
+        assertEquals(gap, blacks.sumOf { it.durationUs })
+        assertEquals(0L, out.last().gapBeforeUs)
+    }
+
+    @Test
+    fun `migrate drops sub-100ms slivers instead of clipping them`() {
+        val clips = listOf(clip(), gappedClip("c2", 80_000L))
+        val out = TimelineOps.migrateGapsToBlackClips(clips) { "blk" }
+        assertEquals(2, out.size)
+        assertEquals(0L, out[1].gapBeforeUs)
+    }
+
+    @Test
+    fun `migrate keeps clean neighbors untouched`() {
+        val clean = clip(inUs = 1_000_000L, outUs = 4_000_000L).copy(speed = 2f, volume = 0.5f)
+        val clips = listOf(clean, gappedClip("c2", 1_000_000L))
+        val out = TimelineOps.migrateGapsToBlackClips(clips) { "blk" }
+        assertEquals(clean, out[0])
+    }
+
+    @Test
+    fun `migrate black clips carry fresh unique ids`() {
+        val clips = listOf(gappedClip("c1", 1_000_000L), gappedClip("c2", 2_000_000L))
+        var seq = 0
+        val out = TimelineOps.migrateGapsToBlackClips(clips) { "blk-${seq++}" }
+        val blackIds = out.filter { it.assetId == BLACK_FRAME_ASSET_ID }.map { it.id }
+        assertEquals(blackIds.size, blackIds.toSet().size)
+        assertTrue(blackIds.none { it in setOf("c1", "c2") })
+        assertTrue(out.filter { it.assetId == BLACK_FRAME_ASSET_ID }.all { it.sourceInUs == 0L })
+    }
+
+    @Test
+    fun `migrate leaves no gapBehind anywhere`() {
+        val clips = listOf(
+            gappedClip("c1", 90_000_000L),
+            gappedClip("c2", 150_000L),
+            gappedClip("c3", 0L),
+        )
+        val out = TimelineOps.migrateGapsToBlackClips(clips) { "blk" }
+        assertTrue(out.all { it.gapBeforeUs == 0L })
+        // 90s -> 60s + 30s (chunked); 150ms -> one tiny black clip (>= 100ms
+        // is representable); c3 had no gap
+        assertEquals(3, out.count { it.assetId == BLACK_FRAME_ASSET_ID })
+        assertEquals(6, out.size)
     }
 }
