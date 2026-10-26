@@ -343,6 +343,14 @@
     <string name="ai_overlay_hide">Hide conversation</string>
     <string name="ai_input_hint">Describe the edit you want…</string>
     <string name="ai_send">Send</string>
+    <!-- v1.6.14: voice input (system SpeechRecognizer, zero deps/cost) -->
+    <string name="ai_voice_input">Voice input</string>
+    <string name="ai_voice_listening">Listening — tap the mic when done</string>
+    <string name="ai_voice_no_match">Didn’t catch that, please try again</string>
+    <string name="ai_voice_permission">Microphone permission is needed for voice input</string>
+    <string name="ai_voice_busy">Speech recognizer is busy, try again shortly</string>
+    <string name="ai_voice_network">Speech recognition needs network — check connection and retry</string>
+    <string name="ai_voice_retry">Speech recognition failed, please try again</string>
     <string name="ai_busy_thinking">AI is thinking…</string>
     <string name="ai_busy_tool_fmt">Running: %1$s</string>
     <string name="ai_provider_zai">Zhipu GLM</string>

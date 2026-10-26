@@ -1,8 +1,15 @@
 package com.RooMCutNext.ui.editor
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +38,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
@@ -60,6 +68,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -68,6 +77,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.RooMCutNext.R
 import com.RooMCutNext.ai.AiChatEntry
 import com.RooMCutNext.ai.AiChatUiState
@@ -246,6 +256,9 @@ fun AiBottomBar(
                 inputText = ""
             },
             onClose = ::closePanel,
+            // v1.6.14: 语音输入的错误提示走全局 toast 通道（与导入/剪辑
+            // 反馈同一条链路，不另建 UI）。
+            onFlashToast = vm::flashToast,
         )
 
         // ---- 设置对话框（窗口级）----
@@ -465,8 +478,42 @@ private fun AiInputRow(
     onOpenSkills: () -> Unit,
     onSend: (String) -> Unit,
     onClose: () -> Unit,
+    onFlashToast: (String) -> Unit,
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+
+    // ---- v1.6.14: 语音输入 ----
+    // 系统 SpeechRecognizer（在线优先/离线兑底，见 VoiceInput.kt）。
+    // 识别结果（partial 与 final）填入输入框由用户确认后手动发送 ——
+    // 不自动发送，防“听岔了直接执行错误剪辑指令”。
+    val voice = rememberVoiceInput(
+        onPartial = onTextChange,
+        onFinal = onTextChange,
+        onError = { code ->
+            voiceErrorHint(code)?.let { onFlashToast(context.getString(it)) }
+        },
+    )
+    // 权限门与旁白录音同一条路：未授权则请求，授予后立即开始听。
+    val micPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) voice.toggle(text)
+        else onFlashToast(context.getString(R.string.ai_voice_permission))
+    }
+    fun toggleVoice() {
+        // 先收键盘 —— 语音会话和 IME 并存体验混乱，且让麦克风成为唯一焦点。
+        keyboard?.hide()
+        if (ContextCompat.checkSelfPermission(
+                context, Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            voice.toggle(text)
+        } else {
+            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     fun trySend() {
         if (text.isNotBlank() && enabled) {
             onSend(text)
@@ -529,6 +576,19 @@ private fun AiInputRow(
             },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { trySend() }),
+            // v1.6.14: 麦克风内嵌输入框右端（trailingIcon 不占行宽，与
+            // 左端技能胶囊对称 —— v1.6.3/1.6.5 已验证行宽敏感，独立
+            // 48dp 按钮会把输入框挤到 ~140dp）。无识别服务的 ROM
+            // 不渲染（available=false），干净降级。
+            trailingIcon = if (voice.available) {
+                {
+                    VoiceMicIcon(
+                        listening = voice.listening,
+                        enabled = enabled,
+                        onToggle = ::toggleVoice,
+                    )
+                }
+            } else null,
         )
         Spacer(Modifier.width(6.dp))
         // v1.6.2: 发送键恒可点（空文本点击为无操作）—— 禁用态的灰色
@@ -551,6 +611,46 @@ private fun AiInputRow(
             )
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// v1.6.14 语音输入麦克风
+// ---------------------------------------------------------------------
+
+/**
+ * 输入框尾部的麦克风图标：静止中性色；识别中主题色 + 呼吸脉动，
+ * 再点一次即停止（stopListening，系统随后给出最终结果）。
+ */
+@Composable
+private fun VoiceMicIcon(
+    listening: Boolean,
+    enabled: Boolean,
+    onToggle: () -> Unit,
+) {
+    val pulse = if (listening) {
+        val infinite = rememberInfiniteTransition(label = "voice")
+        infinite.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(500), RepeatMode.Reverse),
+            label = "voice",
+        ).value
+    } else 1f
+    Icon(
+        Icons.Filled.Mic,
+        stringResource(
+            if (listening) R.string.ai_voice_listening else R.string.ai_voice_input
+        ),
+        tint = when {
+            listening -> MaterialTheme.colorScheme.primary
+            enabled -> MaterialTheme.colorScheme.onSurfaceVariant
+            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+        },
+        modifier = Modifier
+            .padding(end = 4.dp)
+            .graphicsLayer { alpha = if (enabled) pulse else 0.6f }
+            .clickable(enabled = enabled, onClick = onToggle),
+    )
 }
 
 // ---------------------------------------------------------------------
