@@ -838,6 +838,16 @@ class EditorViewModel(
         playback.currentProjectRef = project
         if (!project.hasContent) {
             playback.setCompositionForEmpty()
+            // v1.6.16: mirror the transport stop into UI state. The player
+            // listeners fire onIsPlaying(false)/onWantsPlay(false) from the
+            // pause() above, but state them explicitly anyway — listener
+            // ordering is not guaranteed and stale wantsPlay=true would
+            // leave the play button showing "pause" on an empty timeline.
+            // Playhead is meaningless on an empty project: park it at 0 so
+            // the next import starts clean (wasPlaying=false → paused).
+            _state.update {
+                it.copy(isPlaying = false, wantsPlay = false, playheadUs = 0L)
+            }
             return
         }
         playback.refresh(project, repo.mediaDir(project.id), _state.value.playheadUs, force)

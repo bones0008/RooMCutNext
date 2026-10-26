@@ -48,6 +48,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -55,6 +56,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -504,6 +506,13 @@ private fun AiInputRow(
     fun toggleVoice() {
         // 先收键盘 —— 语音会话和 IME 并存体验混乱，且让麦克风成为唯一焦点。
         keyboard?.hide()
+        // v1.6.16: 无识别服务的设备麦克风仍可见（v1.6.14 直接隐藏按钮让
+        // 用户以为功能不存在 —— 真机反馈“我没有看到语音输入的功能键”），
+        // 点按给出解释与替代方案。
+        if (!voice.available) {
+            onFlashToast(context.getString(R.string.ai_voice_unavailable))
+            return
+        }
         if (ContextCompat.checkSelfPermission(
                 context, Manifest.permission.RECORD_AUDIO
             ) == PackageManager.PERMISSION_GRANTED
@@ -520,52 +529,67 @@ private fun AiInputRow(
             keyboard?.hide()
         }
     }
+    // v1.6.16: 输入行紧凑化（真机反馈“占的高度太大…高度减少三分之一”）——
+    // 旧：OutlinedTextField 默认 56dp + 行 padding 12 → ≈68dp；新：
+    // 40dp 紧凑输入框 + 38dp 按钮座 + 行 padding 8 → ≈48dp（↓30%）。
+    // 字号同步变小（bodySmall 12sp，占位符同），技能入口改竖排胶囊
+    // （宽度 ~32dp，比横排省 ~25dp，还给正文），麦克风从输入框尾部
+    // 移出为独立常驻按钮（无识别服务的设备也可见，点按有解释）。
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 6.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // v1.6.3: 对话浮层开关 — 关掉即完整视频画面（想看剪辑效果时用）。
-        IconButton(onClick = onToggleOverlay) {
+        TransportIcon(
+            onClick = onToggleOverlay,
+            tint = if (overlayVisible) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        ) {
             Icon(
                 if (overlayVisible) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
                 stringResource(
                     if (overlayVisible) R.string.ai_overlay_hide else R.string.ai_overlay_show
                 ),
-                tint = if (overlayVisible) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
             )
         }
         OutlinedTextField(
             value = text,
             onValueChange = onTextChange,
-            modifier = Modifier.weight(1f),
-            placeholder = { Text(stringResource(R.string.ai_input_hint)) },
+            modifier = Modifier
+                .weight(1f)
+                .height(40.dp),
+            placeholder = {
+                Text(
+                    stringResource(R.string.ai_input_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                )
+            },
             singleLine = true,
             enabled = enabled,
-            // v1.6.5: 技能库入口内嵌输入框左端（leadingIcon 不占行宽 —
-            // 行内已有眼睛/发送/关闭三个 48dp 按钮，再加独立按钮会把
-            // 输入框挤到 ~140dp，v1.6.3 刚验证过行宽敏感）。
-            // v1.6.11: 图标-only 方案两轮真机证伪（v1.6.5 上线以来用户
-            // 两次找不到入口）—— 闪电加「技能」文字做成胶囊按钮，
-            // primaryContainer 底色，自解释可点；宽度代价仅 ~30dp。
+            // v1.6.16: 小字号（占位符与输入正文都从 16sp 降到 12sp）——
+            // 大号占位文字是旧版“输入框显得高”的元凶之一。
+            textStyle = MaterialTheme.typography.bodySmall,
+            // v1.6.5: 技能库入口内嵌输入框左端（不占行宽）；v1.6.11 升级
+            // 为带文字的胶囊；v1.6.16 改竖排（真机反馈横排胶囊丑且占宽）。
             leadingIcon = {
-                Row(
+                Column(
                     Modifier
                         .clip(RoundedCornerShape(999.dp))
                         .background(MaterialTheme.colorScheme.primaryContainer)
                         .clickable(enabled = enabled, onClick = onOpenSkills)
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .padding(horizontal = 5.dp, vertical = 3.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Icon(
                         Icons.Filled.Bolt,
                         stringResource(R.string.ai_skills_open),
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.size(14.dp),
+                        modifier = Modifier.size(11.dp),
                     )
-                    Spacer(Modifier.width(3.dp))
                     Text(
                         stringResource(R.string.ai_skills_chip),
                         style = MaterialTheme.typography.labelSmall,
@@ -576,39 +600,68 @@ private fun AiInputRow(
             },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { trySend() }),
-            // v1.6.14: 麦克风内嵌输入框右端（trailingIcon 不占行宽，与
-            // 左端技能胶囊对称 —— v1.6.3/1.6.5 已验证行宽敏感，独立
-            // 48dp 按钮会把输入框挤到 ~140dp）。无识别服务的 ROM
-            // 不渲染（available=false），干净降级。
-            trailingIcon = if (voice.available) {
-                {
-                    VoiceMicIcon(
-                        listening = voice.listening,
-                        enabled = enabled,
-                        onToggle = ::toggleVoice,
-                    )
-                }
-            } else null,
         )
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(2.dp))
+        // v1.6.14: 语音输入麦克风；v1.6.16 从输入框尾部移出为独立常驻
+        // 按钮（尾部小图标不够显眼 + 无服务设备曾直接隐藏）。
+        VoiceMicIcon(
+            available = voice.available,
+            listening = voice.listening,
+            enabled = enabled,
+            onToggle = ::toggleVoice,
+            onUnavailable = {
+                onFlashToast(context.getString(R.string.ai_voice_unavailable))
+            },
+        )
         // v1.6.2: 发送键恒可点（空文本点击为无操作）—— 禁用态的灰色
-        // 图标在深色面板上几乎不可见，真机反馈“右下有个看不见的按键”。
-        // 是否可发由 tint 表达：有文本亮主题色，无文本用中性色。
-        IconButton(onClick = { trySend() }) {
+        // 图标在深色面板上几乎不可见；是否可发由 tint 表达。
+        TransportIcon(
+            onClick = { trySend() },
+            tint = if (enabled && text.isNotBlank()) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        ) {
             Icon(
                 Icons.Filled.Send,
                 stringResource(R.string.ai_send),
-                tint = if (enabled && text.isNotBlank()) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
             )
         }
-        // v1.6.2: 关闭键收进输入行（原来的“AI 剪辑 + 叉”头部行已删）。
-        IconButton(onClick = onClose) {
+        // v1.6.2: 关闭键收进输入行（原“AI 剪辑 + 叉”头部行已删）。
+        TransportIcon(
+            onClick = onClose,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        ) {
             Icon(
                 Icons.Filled.Close,
                 stringResource(R.string.panel_close),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
             )
+        }
+    }
+}
+
+/**
+ * v1.6.16: 紧凑型按钮座（38dp，图标 20dp）—— 替换输入行里的 48dp
+ * IconButton。IconButton 的最小交互尺寸约束会把行高预在 48dp，
+ * 紧凑底栏下不去；Box+clickable 的视觉尺寸精确可控（点击区域
+ * 38dp 略低于 48dp 推荐，属用户明确要求的紧凑底栏权衡）。
+ */
+@Composable
+private fun TransportIcon(
+    onClick: () -> Unit,
+    tint: Color,
+    icon: @Composable () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(38.dp)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        CompositionLocalProvider(
+            LocalContentColor provides tint,
+        ) {
+            icon()
         }
     }
 }
@@ -618,14 +671,19 @@ private fun AiInputRow(
 // ---------------------------------------------------------------------
 
 /**
- * 输入框尾部的麦克风图标：静止中性色；识别中主题色 + 呼吸脉动，
- * 再点一次即停止（stopListening，系统随后给出最终结果）。
+ * v1.6.16: 独立常驻麦克风按钮（输入框右侧，发送键左边）。v1.6.14 曾把它
+ * 藏在输入框尾部且无服务设备直接不渲染 —— 真机反馈"没有看到语音输入的
+ * 功能键"。现在**恒可见**：识别中主题色 + 呼吸脉动，再点一次停止
+ * （stopListening，系统随后给出最终结果）；无识别服务的设备半透明，
+ * 点按触发 [onUnavailable] 给出解释与替代方案。
  */
 @Composable
 private fun VoiceMicIcon(
+    available: Boolean,
     listening: Boolean,
     enabled: Boolean,
     onToggle: () -> Unit,
+    onUnavailable: () -> Unit,
 ) {
     val pulse = if (listening) {
         val infinite = rememberInfiniteTransition(label = "voice")
@@ -636,21 +694,31 @@ private fun VoiceMicIcon(
             label = "voice",
         ).value
     } else 1f
-    Icon(
-        Icons.Filled.Mic,
-        stringResource(
-            if (listening) R.string.ai_voice_listening else R.string.ai_voice_input
-        ),
-        tint = when {
-            listening -> MaterialTheme.colorScheme.primary
-            enabled -> MaterialTheme.colorScheme.onSurfaceVariant
-            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-        },
-        modifier = Modifier
-            .padding(end = 4.dp)
-            .graphicsLayer { alpha = if (enabled) pulse else 0.6f }
-            .clickable(enabled = enabled, onClick = onToggle),
-    )
+    Box(
+        Modifier
+            .size(38.dp)
+            .clickable(enabled = enabled) {
+                if (available) onToggle() else onUnavailable()
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Filled.Mic,
+            stringResource(
+                if (listening) R.string.ai_voice_listening else R.string.ai_voice_input
+            ),
+            tint = when {
+                listening -> MaterialTheme.colorScheme.primary
+                // 无服务：半透明提示"存在但当前不可用"，点按有解释。
+                !available -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                enabled -> MaterialTheme.colorScheme.onSurfaceVariant
+                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+            },
+            modifier = Modifier
+                .size(20.dp)
+                .graphicsLayer { alpha = if (listening) pulse else 1f },
+        )
+    }
 }
 
 // ---------------------------------------------------------------------

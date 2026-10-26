@@ -352,6 +352,7 @@
     <string name="ai_voice_busy">语音识别忙，稍后再试</string>
     <string name="ai_voice_network">语音识别需要网络，请检查后重试</string>
     <string name="ai_voice_retry">语音识别失败，请再试一次</string>
+    <string name="ai_voice_unavailable">此设备没有可用的语音识别服务（需 Google 服务或系统离线语音引擎）。可换用键盘输入法自带的语音输入（麦克风按钮通常在键盘上方）</string>
     <string name="ai_busy_thinking">AI 正在思考…</string>
     <string name="ai_busy_tool_fmt">正在执行：%1$s</string>
     <string name="ai_provider_zai">智谱 GLM</string>

@@ -373,7 +373,19 @@ class PlaybackController(
     }
 
     fun setCompositionForEmpty() {
-        // Nothing to play; keep the player idle.
+        // v1.6.16: bug fix — this used to ONLY reset the hash gates, leaving
+        // the STALE composition playing. Field report: deleting the last
+        // clip(s) while previewing kept the deleted footage's audio/video
+        // running, AND the pause button was dead (togglePlay early-returns
+        // on an empty project, so the user could not even pause manually).
+        // Actually stop the transport now: pause silences it immediately,
+        // stop() drops the player to IDLE so the stale composition (and its
+        // last rendered frame on the surface) is cleared. The hash gates
+        // reset to 0 so the next import rebuilds from scratch.
+        player?.let { p ->
+            p.pause()
+            runCatching { p.stop() }
+        }
         lastSyncedClipsHash = 0
         lastSyncedTextsHash = 0
         lastSyncedAudiosHash = 0

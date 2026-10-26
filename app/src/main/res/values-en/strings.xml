@@ -353,6 +353,7 @@
     <string name="ai_voice_busy">Speech recognizer is busy, try again shortly</string>
     <string name="ai_voice_network">Speech recognition needs network — check connection and retry</string>
     <string name="ai_voice_retry">Speech recognition failed, please try again</string>
+    <string name="ai_voice_unavailable">No speech recognition service on this device (Google services or a system on-device engine required). As a workaround, use your keyboard’s own voice input (usually a mic button on the keyboard bar)</string>
     <string name="ai_busy_thinking">AI is thinking…</string>
     <string name="ai_busy_tool_fmt">Running: %1$s</string>
     <string name="ai_provider_zai">Zhipu GLM</string>
