@@ -15,8 +15,8 @@ android {
         applicationId = "com.RooMCutNext"
         minSdk = 31
         targetSdk = 35
-        versionCode = 56
-        versionName = "1.6.10"
+        versionCode = 57
+        versionName = "1.6.11"
         vectorDrawables { useSupportLibrary = true }
     }
 

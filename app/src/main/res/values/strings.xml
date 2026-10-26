@@ -361,10 +361,16 @@
     <!-- v1.6.5: 剪辑技能库（命名技巧配方注入 system prompt，用户口语点名即可） -->
     <string name="ai_skills_title">剪辑技能库</string>
     <string name="ai_skills_open">技能库</string>
+    <!-- v1.6.11: 入口可发现性 —— 输入框闪电胶囊文字 + 空对话引导卡 -->
+    <string name="ai_skills_chip">技能</string>
+    <string name="ai_empty_hint_title">AI 剪辑怎么用</string>
+    <string name="ai_empty_hint_skills">技能库：点输入框左端的「⚡ 技能」，或点这张卡 —— 15+ 项内置技巧，面板顶部可上传 / 导入自定义技能（JSON）</string>
+    <string name="ai_empty_hint_examples">也可以直接用自己的话说，例如：「跳剪一下」「把第二段掐头去尾」「高潮前置」</string>
+    <string name="ai_empty_hint_open">点这张卡打开技能库 →</string>
     <string name="ai_skills_close">关闭</string>
     <string name="ai_skills_footer">点一个技能填进输入框，可以再补细节；用自己的话描述也一样管用。</string>
     <!-- v1.6.8: 自定义技能导入（新剪辑技巧写成 JSON 导入，随 prompt 注入，任意模型即可用） -->
-    <string name="ai_skills_import">导入自定义技能…</string>
+    <string name="ai_skills_import">上传 / 导入自定义技能…</string>
     <string name="ai_skills_import_title">导入自定义技能</string>
     <string name="ai_skills_import_hint">把技能 JSON 粘贴到这里，或点“从文件导入”选择 .json 文件</string>
     <string name="ai_skills_import_sample">填入示例</string>

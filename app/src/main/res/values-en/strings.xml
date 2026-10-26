@@ -361,10 +361,16 @@
     <!-- v1.6.5: editing skill library (named technique recipes injected into the system prompt) -->
     <string name="ai_skills_title">Editing skills</string>
     <string name="ai_skills_open">Skills</string>
+    <!-- v1.6.11: entry discoverability — labeled chip in the input row + empty-chat hint card -->
+    <string name="ai_skills_chip">Skills</string>
+    <string name="ai_empty_hint_title">How to use AI editing</string>
+    <string name="ai_empty_hint_skills">Skills: tap the "⚡ Skills" chip at the left of the input box, or tap this card — 15+ built-in recipes, and you can upload / import custom skills (JSON) at the top of that sheet</string>
+    <string name="ai_empty_hint_examples">Or just say it your way: "jump-cut it", "trim the heads and tails", "put the best part first"</string>
+    <string name="ai_empty_hint_open">Tap this card to open the skill library →</string>
     <string name="ai_skills_close">Close</string>
     <string name="ai_skills_footer">Tap a skill to drop it into the input box, then add details if you like. Describing it in your own words works just as well.</string>
     <!-- v1.6.8: custom skill import (new techniques as JSON, injected into the prompt for any model) -->
-    <string name="ai_skills_import">Import custom skills…</string>
+    <string name="ai_skills_import">Upload / import custom skills…</string>
     <string name="ai_skills_import_title">Import custom skills</string>
     <string name="ai_skills_import_hint">Paste skill JSON here, or tap "From file" to pick a .json file</string>
     <string name="ai_skills_import_sample">Insert sample</string>

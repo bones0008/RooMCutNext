@@ -57,6 +57,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
@@ -107,9 +108,16 @@ import kotlinx.coroutines.launch
  * reverseLayout 底部对齐 — 消息少时贴着播放栏上沿、视频上部完整露出；
  * 消息多时整层可上下滚动。浮层显示期间消费手势（滚动/点按气泡），
  * 想直接操作视频（拖动 PiP、看完整画面）时用输入行左端的开关关掉。
+ *
+ * v1.6.11: 新增 onOpenSkills —— 空对话引导卡整卡可点直接打开技能库
+ * （skillsOpen 状态提升到 EditorScreen，与 aiOverlayVisible 同模式）。
  */
 @Composable
-fun AiChatOverlay(vm: EditorViewModel, modifier: Modifier = Modifier) {
+fun AiChatOverlay(
+    vm: EditorViewModel,
+    onOpenSkills: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val aiState by vm.aiChat.state.collectAsState()
     Box(modifier) {
         // 轻度渐变 scrim：顶部几乎透明（视频清晰），底部渐深（气泡可读）。
@@ -145,9 +153,13 @@ fun AiChatOverlay(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     is AiChatEntry.Note -> NoteLine(e)
                 }
             }
-            // 最旧位置（视觉顶部）：未配置时的单行小条。
+            // 最旧位置（视觉顶部）：未配置时的单行小条；已配置且还没
+            // 聊过 → 使用引导卡（v1.6.11：技能库/上传入口两轮真机反馈
+            // 找不到，可发现性救急），发过首条消息即自动消失。
             if (!aiState.settings.ready) {
                 item { AiOnboardingBar(onConfigure = { vm.aiChat.openSettings(true) }) }
+            } else if (aiState.entries.isEmpty()) {
+                item { AiEmptyHintCard(onOpenSkills = onOpenSkills) }
             }
         }
         // 新消息 → 滚回视觉底部（reverseLayout 的 index 0）。
@@ -170,6 +182,8 @@ fun AiBottomBar(
     overlayVisible: Boolean,
     onToggleOverlay: () -> Unit,
     onClose: () -> Unit,
+    skillsOpen: Boolean,
+    onSkillsOpenChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val aiState by vm.aiChat.state.collectAsState()
@@ -181,7 +195,9 @@ fun AiBottomBar(
     }
     // v1.6.5: 输入文本提升到底栏层 —— 技能面板点选后能直接填进来。
     var inputText by rememberSaveable { mutableStateOf("") }
-    var skillsOpen by remember { mutableStateOf(false) }
+    // v1.6.11: skillsOpen 提升到 EditorScreen（浮层引导卡也能打开）。
+    // 此前是本组件私有 remember —— 空状态引导卡需要跨组件触发，
+    // 与 aiOverlayVisible 同一提升模式，行为不变。
     Column(
         modifier
             .fillMaxWidth()
@@ -224,7 +240,7 @@ fun AiBottomBar(
             onToggleOverlay = onToggleOverlay,
             text = inputText,
             onTextChange = { inputText = it },
-            onOpenSkills = { skillsOpen = true },
+            onOpenSkills = { onSkillsOpenChange(true) },
             onSend = {
                 vm.aiChat.send(it)
                 inputText = ""
@@ -251,11 +267,11 @@ fun AiBottomBar(
                 onImport = vm::importCustomSkills,
                 onReadFile = vm::readSkillFileText,
                 onDelete = vm::deleteCustomSkill,
-                onDismiss = { skillsOpen = false },
+                onDismiss = { onSkillsOpenChange(false) },
                 onPick = { name ->
                     // 追加而非覆盖 —— 用户可能已打了半句细节，别替他删。
                     inputText = if (inputText.isBlank()) name else "$inputText，$name"
-                    skillsOpen = false
+                    onSkillsOpenChange(false)
                 },
             )
         }
@@ -383,6 +399,58 @@ private fun AiOnboardingBar(onConfigure: () -> Unit) {
     }
 }
 
+/**
+ * v1.6.11: 空对话使用引导卡 —— 技能库/上传入口两轮真机反馈找不到
+ * （入口在输入框左端，v1.6.5 上线以来一直存在但用户两次均未发现）。
+ * 已配置且未发首条消息时显示于浮层顶部，**整卡可点直接打开技能库**
+ * （顶部即"上传 / 导入自定义技能"），发过任意一条消息即自动消失。
+ * 深底浅字与气泡同风格，叠在视频渐变 scrim 上保证可读。
+ */
+@Composable
+private fun AiEmptyHintCard(onOpenSkills: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xD91E1E22))
+            .clickable(onClick = onOpenSkills)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.AutoAwesome, null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                stringResource(R.string.ai_empty_hint_title),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+                color = Color(0xFFF4EFF4),
+            )
+        }
+        Text(
+            stringResource(R.string.ai_empty_hint_skills),
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xCCFFFFFF),
+        )
+        Text(
+            stringResource(R.string.ai_empty_hint_examples),
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xCCFFFFFF),
+        )
+        Text(
+            stringResource(R.string.ai_empty_hint_open),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+}
+
 // ---------------------------------------------------------------------
 // 输入行
 // ---------------------------------------------------------------------
@@ -432,18 +500,30 @@ private fun AiInputRow(
             // v1.6.5: 技能库入口内嵌输入框左端（leadingIcon 不占行宽 —
             // 行内已有眼睛/发送/关闭三个 48dp 按钮，再加独立按钮会把
             // 输入框挤到 ~140dp，v1.6.3 刚验证过行宽敏感）。
+            // v1.6.11: 图标-only 方案两轮真机证伪（v1.6.5 上线以来用户
+            // 两次找不到入口）—— 闪电加「技能」文字做成胶囊按钮，
+            // primaryContainer 底色，自解释可点；宽度代价仅 ~30dp。
             leadingIcon = {
-                Box(
+                Row(
                     Modifier
-                        .size(28.dp)
-                        .clickable(enabled = enabled, onClick = onOpenSkills),
-                    contentAlignment = Alignment.Center,
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer)
+                        .clickable(enabled = enabled, onClick = onOpenSkills)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(
                         Icons.Filled.Bolt,
                         stringResource(R.string.ai_skills_open),
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        stringResource(R.string.ai_skills_chip),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
                 }
             },

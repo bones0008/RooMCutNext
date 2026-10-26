@@ -131,6 +131,11 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
     // 得到完整视频画面）。rememberSaveable — 配置旋转后保持。 ----
     var aiOverlayVisible by rememberSaveable { mutableStateOf(true) }
 
+    // ---- v1.6.11: 技能库弹窗开关提升到屏级（原为 AiBottomBar 私有）。
+    // 空对话引导卡（浮层顶部）整卡可点直接打开技能库 —— 上传/导入
+    // 自定义技能的入口在面板顶部，两轮真机反馈均找不到，需跨组件触发。 ----
+    var aiSkillsOpen by rememberSaveable { mutableStateOf(false) }
+
     // ---- media pickers ----
     // "添加素材" accepts ALL media types (video / image / audio): audio files
     // become independent audio-layer clips, so no separate audio import entry
@@ -455,6 +460,7 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             if (state.activePanel == PanelKind.AI_CHAT && aiOverlayVisible) {
                 AiChatOverlay(
                     vm = vm,
+                    onOpenSkills = { aiSkillsOpen = true },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -634,6 +640,8 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                     overlayVisible = aiOverlayVisible,
                     onToggleOverlay = { aiOverlayVisible = !aiOverlayVisible },
                     onClose = { vm.openPanel(null) },
+                    skillsOpen = aiSkillsOpen,
+                    onSkillsOpenChange = { aiSkillsOpen = it },
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
             } else {
