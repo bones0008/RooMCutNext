@@ -431,13 +431,118 @@ class EditToolsTest {
     fun toolSchemasExposeAllTools() {
         val names = tools.toolSchemas().toString()
         listOf(
-            "get_draft_overview", "split_clip", "delete_clip", "trim_clip", "move_clip",
-            "set_clip_speed", "set_clip_volume", "set_clip_look", "set_transition",
+            "get_draft_overview", "split_clip", "delete_clip", "trim_clip", "restore_clip",
+            "move_clip", "set_clip_speed", "set_clip_volume", "set_clip_look", "set_transition",
             "remove_transition", "add_black_clip", "add_text", "update_text", "delete_text",
             "set_audio_volume", "trim_audio", "delete_audio", "seek",
         ).forEach { assertTrue("missing $names", names.contains("\"$it\"")) }
         // zoom 转场 v1.5.5 已移除，不应对 agent 开放。
         assertFalse(names.contains("\"zoom_in\""))
         assertFalse(names.contains("\"zoom_out\""))
+    }
+
+    // ------------------------------------------------------------------
+    // v1.6.12: 原始素材可见性 + restore_clip（用户真机反馈：修建后让 AI
+    // 恢复原始长度，AI 却说“素材现在就是完整长度”——概览里根本没有
+    // 原始时长/窗口信息，模型只能瞎猜。修剪本是非破坏性窗口。）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun overviewShowsSourceWindowAndTrimmedFlag() {
+        val p = project(
+            listOf(
+                clip("c1", "a1", inUs = 2_000_000L, outUs = 6_000_000L), // 修建过
+                clip("c2", "a2"),                                        // 全长 0..10s
+                clip("c3", "aimg", outUs = 8_000_000L),                  // 图片
+            ),
+            listOf(asset("a1"), asset("a2"), asset("aimg", durUs = 0L, type = MediaType.IMAGE)),
+        )
+        val d = EditTools.Draft(p)
+        val clips = tools.overviewJson(d)["clips"]!!.jsonArray
+        val c1 = clips[0].toString()
+        assertTrue(c1, c1.contains("\"source_duration_sec\":10.0"))
+        assertTrue(c1, c1.contains("\"source_in_sec\":2.0"))
+        assertTrue(c1, c1.contains("\"source_out_sec\":6.0"))
+        assertTrue(c1, c1.contains("\"trimmed\":true"))
+        val c2 = clips[1].toString()
+        assertTrue(c2, c2.contains("\"source_duration_sec\":10.0"))
+        assertFalse(c2, c2.contains("\"trimmed\""))
+        // 图片没有“原始时长”概念，不报告窗口字段。
+        val c3 = clips[2].toString()
+        assertFalse(c3, c3.contains("source_duration_sec"))
+    }
+
+    @Test
+    fun restoreClipReopensFullSourceWindow() {
+        val p = project(
+            listOf(clip("c1", "a1", inUs = 2_000_000L, outUs = 6_000_000L).copy(speed = 2f, volume = 0.5f)),
+            listOf(asset("a1")),
+        )
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "restore_clip", args("clip_id" to "c1"))
+        assertTrue(r.json.toString(), r.ok)
+        val c = d.project.clips.single()
+        assertEquals(0L, c.sourceInUs)
+        assertEquals(10_000_000L, c.sourceOutUs)
+        // 只还原窗口：速度/音量等其它属性一概不动。
+        assertEquals(2f, c.speed)
+        assertEquals(0.5f, c.volume)
+        assertEquals(5_000_000L, c.durationUs) // 10s 源 @2x = 5s 时间线
+        assertEquals(10.0, r.json.num("source_duration_sec")!!, 1e-9)
+        assertEquals(5.0, r.json.num("duration_sec")!!, 1e-9)
+        assertTrue(d.journal.single().startsWith("restore_clip"))
+        assertEquals(1, d.changeCount)
+    }
+
+    @Test
+    fun restoreClipAlreadyFullIsHonestNoOp() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "restore_clip", args("clip_id" to "c1"))
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals("true", r.json["already_full"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(10.0, r.json.num("source_duration_sec")!!, 1e-9)
+        assertEquals(0, d.changeCount)
+        assertFalse(d.changed)
+    }
+
+    @Test
+    fun restoreClipImageResetsToDefaultDuration() {
+        val p = project(
+            listOf(clip("c1", "aimg", outUs = 10_000_000L)),
+            listOf(asset("aimg", durUs = 0L, type = MediaType.IMAGE)),
+        )
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "restore_clip", args("clip_id" to "c1"))
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals(0L, d.project.clips[0].sourceInUs)
+        assertEquals(3_000_000L, d.project.clips[0].sourceOutUs) // 图片默认展示 3s
+        assertEquals(3.0, r.json.num("duration_sec")!!, 1e-9)
+    }
+
+    @Test
+    fun restoreClipInvalidIdIsError() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "restore_clip", args("clip_id" to "nope"))
+        assertFalse(r.ok)
+        assertTrue(r.json.toString().contains("clip_id 无效"))
+        assertEquals(0, d.changeCount)
+    }
+
+    @Test
+    fun systemPromptExplainsSourceSemantics() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val prompt = tools.systemPrompt(d, 0L)
+        // 规则 8：原始素材可见性 + “禁止谎称无法恢复”。
+        assertTrue(prompt.contains("restore_clip"))
+        assertTrue(prompt.contains("source_duration_sec"))
+        assertTrue(prompt.contains("NEVER claim"))
+        // 概览内嵌：全长片段报告原始时长；概览 JSON 段里不出现 trimmed 标记
+        // （规则 8 文本里带引号的 "trimmed" 字样在概览段之前，不算）。
+        assertTrue(prompt.contains("\"source_duration_sec\":10.0"))
+        val overviewPart = prompt.substringAfter("Current draft overview (JSON):\n")
+        assertFalse(overviewPart.contains("\"trimmed\""))
     }
 }

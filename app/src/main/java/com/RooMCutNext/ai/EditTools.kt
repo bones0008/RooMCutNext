@@ -1,9 +1,11 @@
 package com.RooMCutNext.ai
 
 import com.RooMCutNext.core.model.AudioClip
+import com.RooMCutNext.core.model.BLACK_DEFAULT_DURATION_US
 import com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID
 import com.RooMCutNext.core.model.BLACK_FRAME_FILE_NAME
 import com.RooMCutNext.core.model.Clip
+import com.RooMCutNext.core.model.IMAGE_DEFAULT_DURATION_US
 import com.RooMCutNext.core.model.IMAGE_MAX_DURATION_US
 import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.MediaType
@@ -50,10 +52,15 @@ val TOOL_NAMES: Set<String> =
         .map { it.get(null) as String }
         .toSet()
 
-/** 技能 steps 中允许出现的非工具 snake_case 标识符（参数名白名单）。 */
+/**
+ * 技能 steps 中允许出现的非工具 snake_case 标识符（参数名 + 概览 JSON 键白名单）。
+ * v1.6.12：新增概览键 source_in_sec / source_out_sec / source_duration_sec，
+ * 供「恢复原长」等配方精确引用窗口语义。
+ */
 val SKILL_PARAM_WHITELIST: Set<String> = setOf(
     "anchor_clip_id", "duration_sec", "start_sec", "new_start_sec", "new_end_sec",
     "to_index", "font_size_ratio", "x_ratio", "y_ratio", "color_hex",
+    "source_in_sec", "source_out_sec", "source_duration_sec",
 )
 
 class EditTools(
@@ -167,8 +174,19 @@ class EditTools(
                 "desired timeline positions of the clip's start/end edges; omit the edge you " +
                 "don't move. NOTE: the timeline is a gapless film strip - trimming the head " +
                 "shortens the clip and shifts later clips earlier (no gap is created); " +
-                "values are clamped to the source media bounds.",
+                "values are clamped to the source media bounds. To give the clip back its " +
+                "full original length, prefer restore_clip instead of computing the edges.",
             mapOf("clip_id" to "string", "new_start_sec" to "number", "new_end_sec" to "number"),
+            listOf("clip_id"),
+        ))
+        add(schema(
+            T.RESTORE_CLIP,
+            "Restore a clip to its ORIGINAL full length: reopen the trim window to the " +
+                "whole source media (source_in_sec 0 → source_duration_sec). Speed, volume, " +
+                "looks and other edits stay untouched. Image clips return to their default " +
+                "display duration (3s; black frames 2s). Safe to call on an already-full " +
+                "clip (returns already_full=true, changes nothing).",
+            mapOf("clip_id" to "string"),
             listOf("clip_id"),
         ))
         add(schema(
@@ -283,6 +301,7 @@ class EditTools(
         const val SPLIT = "split_clip"
         const val DELETE_CLIP = "delete_clip"
         const val TRIM_CLIP = "trim_clip"
+        const val RESTORE_CLIP = "restore_clip"
         const val MOVE_CLIP = "move_clip"
         const val SPEED = "set_clip_speed"
         const val VOLUME = "set_clip_volume"
@@ -318,8 +337,8 @@ class EditTools(
             else -> clipTools(draft, name, args) ?: textTools(draft, name, args)
                 ?: audioTools(draft, name, args) ?: errJson(
                     "未知工具 \"$name\"。可用: " +
-                        listOf(T.OVERVIEW, T.SPLIT, T.DELETE_CLIP, T.TRIM_CLIP, T.MOVE_CLIP,
-                            T.SPEED, T.VOLUME, T.LOOK, T.TRANSITION, T.REMOVE_TRANSITION,
+                        listOf(T.OVERVIEW, T.SPLIT, T.DELETE_CLIP, T.TRIM_CLIP, T.RESTORE_CLIP,
+                            T.MOVE_CLIP, T.SPEED, T.VOLUME, T.LOOK, T.TRANSITION, T.REMOVE_TRANSITION,
                             T.ADD_BLACK, T.ADD_TEXT, T.UPDATE_TEXT, T.DELETE_TEXT, T.AUDIO_VOLUME,
                             T.AUDIO_TRIM, T.DELETE_AUDIO, T.SEEK).joinToString(", "),
                 )
@@ -462,6 +481,48 @@ class EditTools(
                 okJson(
                     "timeline_start_sec" to usToSec(newSt[idx]),
                     "duration_sec" to usToSec(updated.durationUs),
+                )
+            }
+            T.RESTORE_CLIP -> {
+                // v1.6.11：恢复原始长度 —— 修剪是非破坏性窗口，源文件完整
+                // 存在项目媒体目录里；把窗口重开到整条源即可无损还原。
+                // 速度/音量/滤镜等其它属性一概不动（只还原窗口）。
+                val found = requireClip(p, clipId) ?: return errJson(
+                    "clip_id 无效。可用: ${clipIdList(p)}",
+                )
+                val (idx, clip) = found
+                val asset = p.assetById(clip.assetId)
+                    ?: return errJson("素材元数据缺失（${clip.assetId}），无法恢复")
+                if (!asset.isImage && asset.durationUs <= 0L) {
+                    return errJson("该素材时长未知（元数据损坏），无法恢复")
+                }
+                if (!asset.isImage && clip.sourceInUs == 0L && clip.sourceOutUs == asset.durationUs) {
+                    // 已经是全长：诚实告知，不动草稿（幂等无副作用）。
+                    return okJson(
+                        "duration_sec" to usToSec(clip.durationUs),
+                        "already_full" to true,
+                        "source_duration_sec" to usToSec(asset.durationUs),
+                    )
+                }
+                val fullOutUs = when {
+                    asset.isBlackFrame -> BLACK_DEFAULT_DURATION_US
+                    asset.isImage -> IMAGE_DEFAULT_DURATION_US
+                    else -> asset.durationUs
+                }
+                val restored = clip.copy(sourceInUs = 0L, sourceOutUs = fullOutUs)
+                val newClips = p.clips.toMutableList().also { it[idx] = restored }
+                draft.project = p.copy(clips = newClips)
+                val newSt = TimelineOps.starts(newClips)
+                bump(
+                    draft,
+                    "restore_clip: ${clip.id} → dur ${usToSec(restored.durationUs)}s",
+                )
+                okJson(
+                    "timeline_start_sec" to usToSec(newSt[idx]),
+                    "duration_sec" to usToSec(restored.durationUs),
+                    "source_duration_sec" to usToSec(
+                        if (asset.isImage) fullOutUs else asset.durationUs,
+                    ),
                 )
             }
             T.MOVE_CLIP -> {
@@ -803,6 +864,18 @@ class EditTools(
                         if (clipAsset?.isBlackFrame == true) put("black", true)
                         put("start_sec", usToSec(st[i]))
                         put("duration_sec", usToSec(c.durationUs))
+                        // v1.6.11：暴露原始素材信息 —— AI 必须能看出「被修建过」
+                        // 以及原始全长是多少，才能正确执行「恢复原始长度」。
+                        // 图片没有“原始时长”概念（默认展示 3s、可拉 0.1..60s），
+                        // 不报告窗口字段，避免误导模型。
+                        if (clipAsset != null && !clipAsset.isImage && clipAsset.durationUs > 0) {
+                            put("source_duration_sec", usToSec(clipAsset.durationUs))
+                            put("source_in_sec", usToSec(c.sourceInUs))
+                            put("source_out_sec", usToSec(c.sourceOutUs))
+                            if (c.sourceInUs > 0 || c.sourceOutUs < clipAsset.durationUs) {
+                                put("trimmed", true)
+                            }
+                        }
                         put("speed", c.speed.toDouble())
                         put("volume", c.volume.toDouble())
                         if (c.muted) put("muted", true)
@@ -868,12 +941,12 @@ class EditTools(
         return buildString {
             append(
                 "You are the AI editing assistant of RooMCutNext, a mobile video editor. " +
-                    "You edit the user's REAL project through tool calls: split, trim, delete, reorder, " +
-                    "speed, volume, LUT looks, transitions, black gaps (add_black_clip) and text " +
-                    "overlays. Deleting a clip RIPPLES the timeline closed - add a black gap clip " +
-                    "when the user wants a pause or breathing room. Edits apply immediately as ONE " +
-                    "undoable step - the user can revert everything with a single tap, so just do " +
-                    "the work directly.\n\n" +
+                    "You edit the user's REAL project through tool calls: split, trim, restore " +
+                    "full length, delete, reorder, speed, volume, LUT looks, transitions, black " +
+                    "gaps (add_black_clip) and text overlays. Deleting a clip RIPPLES the " +
+                    "timeline closed - add a black gap clip when the user wants a pause or " +
+                    "breathing room. Edits apply immediately as ONE undoable step - the user " +
+                    "can revert everything with a single tap, so just do the work directly.\n\n" +
                     "Rules:\n" +
                     "1. Times are seconds (float). Use ids EXACTLY as given in the overview.\n" +
                     "2. Call get_draft_overview when you need fresh state after edits.\n" +
@@ -888,6 +961,13 @@ class EditTools(
                     "7. The skill library below names editing techniques you know how to execute. " +
                     "When the user names one (or describes it), follow its recipe; when the user asks " +
                     "\"what can you do\", mention a few skill names in the user's language.\n\n" +
+                    // v1.6.11: 原始素材可见性 —— 修复「AI 称素材已是完整长度」幻觉。
+                    "8. Every video clip carries source_in_sec/source_out_sec (the source window it " +
+                    "currently uses) and source_duration_sec (the ORIGINAL full length); a clip " +
+                    "marked \"trimmed\" lost part of it. Trimming is non-destructive and the FULL " +
+                    "source file is always kept in the project, so restoring a clip to its " +
+                    "original length is ALWAYS possible via restore_clip - NEVER claim it is " +
+                    "already full or impossible: check the trimmed flag and the window instead.\n\n" +
                     EditSkills.promptBlock(customSkills) +
                     "\nCurrent draft overview (JSON):\n",
             )

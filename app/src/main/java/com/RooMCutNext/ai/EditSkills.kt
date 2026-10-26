@@ -5,7 +5,7 @@ package com.RooMCutNext.ai
  *
  * 复刻 OpenChatCut 的 skill 模块思路：剪辑"技巧"不需要训练进模型，
  * 而是写成结构化配方（名字 + 适用场景 + 具体步骤），随 system prompt
- * 注入。模型照配方用现有 18 个编辑工具组合执行 —— 对用户而言就是
+ * 注入。模型照配方用现有 19 个编辑工具组合执行 —— 对用户而言就是
  * "AI 学会了这一招"。换任何 OpenAI 兼容模型（智谱 / DeepSeek / Kimi /
  * GPT / 本地网关）都即刻生效，零额外成本。
  *
@@ -162,6 +162,23 @@ object EditSkills {
                 "Keep the first clip's head if it is an intentional opening shot.",
             ),
         ),
+        // v1.6.11：恢复原长 —— 修复用户反馈「AI 说素材已是完整长度无法恢复」：
+        // 修剪是非破坏性窗口，源文件完整保留在项目里，恢复永远可行。
+        EditSkill(
+            id = "restore_full_length", nameZh = "恢复原长", nameEn = "restore full length",
+            aliasesZh = listOf("恢复原始长度", "恢复全长", "还原素材"),
+            category = SkillCategory.STORY,
+            oneLinerZh = "把修建过的片段还原成原始素材的完整长度",
+            oneLinerEn = "Give a trimmed clip back its full original length.",
+            steps = listOf(
+                "get_draft_overview and find the clip the user named - compare its " +
+                    "source_in_sec/source_out_sec window with source_duration_sec to see " +
+                    "how much was trimmed away (the trimmed flag marks such clips).",
+                "restore_clip on it - the window reopens to the whole source; speed, " +
+                    "volume and looks stay untouched.",
+                "seek to the clip so the user immediately sees the restored length.",
+            ),
+        ),
         EditSkill(
             id = "hook_first", nameZh = "高潮前置", nameEn = "hook first",
             aliasesZh = listOf("精彩前置", "钩子开头"),
@@ -284,7 +301,7 @@ object EditSkills {
 
     /**
      * 注入 system prompt 的紧凑技能块（英文指令 + 双语匹配名）。
-     * 全量 15 技能约 1k tokens，相对概览 JSON 可忽略。
+     * 全量 16 技能约 1k tokens，相对概览 JSON 可忽略。
      *
      * v1.6.6 content-blind 规则（用户问“看不到画面怎么高潮前置”）：
      * 对话里可能带、也可能不带视觉消息。v1.6.9 起视觉消息可能是

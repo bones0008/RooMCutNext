@@ -165,9 +165,10 @@ object CustomSkillCodec {
                 if (token !in TOOL_NAMES && token !in SKILL_PARAM_WHITELIST) {
                     return OneError(
                         "$at（$id）：步骤引用了不存在的工具 \"$token\"。" +
-                            "可用工具：split_clip、trim_clip、delete_clip、move_clip、set_clip_speed、" +
-                            "set_clip_volume、set_transition、add_black_clip、add_text、update_text、" +
-                            "delete_text、set_audio_volume、trim_audio、delete_audio、seek、get_draft_overview 等",
+                            "可用工具：split_clip、trim_clip、restore_clip、delete_clip、move_clip、" +
+                            "set_clip_speed、set_clip_volume、set_transition、add_black_clip、" +
+                            "add_text、update_text、delete_text、set_audio_volume、trim_audio、" +
+                            "delete_audio、seek、get_draft_overview 等",
                     )
                 }
             }
