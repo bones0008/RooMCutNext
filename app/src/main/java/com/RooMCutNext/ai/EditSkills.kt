@@ -5,7 +5,7 @@ package com.RooMCutNext.ai
  *
  * 复刻 OpenChatCut 的 skill 模块思路：剪辑"技巧"不需要训练进模型，
  * 而是写成结构化配方（名字 + 适用场景 + 具体步骤），随 system prompt
- * 注入。模型照配方用现有 19 个编辑工具组合执行 —— 对用户而言就是
+ * 注入。模型照配方用现有 20 个编辑工具组合执行 —— 对用户而言就是
  * "AI 学会了这一招"。换任何 OpenAI 兼容模型（智谱 / DeepSeek / Kimi /
  * GPT / 本地网关）都即刻生效，零额外成本。
  *
@@ -205,6 +205,29 @@ object EditSkills {
                     "frames or the user; when blind, ASK which segments matter most before deleting.",
                 "trim_clip what remains; keep the story spine: opening - action - payoff.",
                 "get_draft_overview to check the new total, then report the duration in plain words.",
+            ),
+        ),
+        // v1.6.13：素材成片 —— 素材库工作流（用户："让 AI 分析素材库里的
+        // 内容，自己判断需要用什么素材，放到时间线上进行剪辑，这样更
+        // 精确"）：素材先进库，AI 看库（library 数组 + 未用资产代表帧）
+        // 自己挑素材、自己排顺序上时间线。
+        EditSkill(
+            id = "build_from_library", nameZh = "素材成片", nameEn = "build from library",
+            aliasesZh = listOf("挑素材", "用素材库剪一条", "帮我选素材", "素材库成片"),
+            category = SkillCategory.STORY,
+            oneLinerZh = "AI 分析素材库，自己挑素材排顺序，拼成一条成片",
+            oneLinerEn = "Study the media library, pick and order footage into an edit.",
+            steps = listOf(
+                "get_draft_overview and read the library array - every imported asset with " +
+                    "used_count (0 = not on the timeline yet); WITH frames, watch the LIBRARY " +
+                    "attachments to judge each unused asset's content; WITHOUT frames rely on " +
+                    "names/durations and the user's wording, and ASK when unsure which asset matters.",
+                "Decide the selection and order (story spine: opening - action - payoff), then " +
+                    "add_clip_from_library for each chosen asset in order - optional " +
+                    "source_in_sec/source_out_sec keep only the best segment.",
+                "Clean up: split_clip or trim_clip the rough edges, set_transition between " +
+                    "clips where it helps.",
+                "get_draft_overview to verify the assembled edit, then seek to 0 and summarize.",
             ),
         ),
         // ------------------------------------------------ 声音

@@ -53,6 +53,12 @@ data class AiClipFrame(
     val midSec: Double,
     /** base64 JPEG（无 data: 前缀）。 */
     val b64Jpeg: String,
+    /**
+     * v1.6.13 素材库：true = 素材库里还未上时间线的资产代表帧（clipId 即
+     * 概览 library 数组里的 asset id）—— 多模态模型由此“看到”库内容，
+     * 自主判断用哪段素材。false（默认）= 时间线片段帧，语义不变。
+     */
+    val fromLibrary: Boolean = false,
 )
 
 /**
@@ -266,7 +272,9 @@ class AiChatController(
         frames: List<AiClipFrame>,
         videos: List<AiClipVideo>,
     ) {
-        val d = EditTools.Draft(ctx.project)
+        // v1.6.13：Draft 带上 playhead —— add_clip_from_library 把音频资产
+        // 加到独立音频轨时从当前指针位置开始（与手动添加行为一致）。
+        val d = EditTools.Draft(ctx.project, ctx.playheadUs)
         val wire = mutableListOf(
             WireMessage("system", tools.systemPrompt(d, ctx.playheadUs, customSkillsProvider())),
         )
@@ -347,6 +355,11 @@ class AiChatController(
 
     /** v1.6.9: 混合 vision 消息 — 视频代理（原生视频模型）+ 补齐帧。 */
     private fun visionMessage(frames: List<AiClipFrame>, videos: List<AiClipVideo>): WireMessage {
+        // v1.6.13: 帧分两组 — 时间线片段帧 + 素材库未用资产帧。库里帧的
+        // id 对应概览 library 数组的 asset id，模型看完可直接用
+        // add_clip_from_library 把选中的素材放上时间线。
+        val timelineFrames = frames.filter { !it.fromLibrary }
+        val libraryFrames = frames.filter { it.fromLibrary }
         val text = buildString {
             append("Visual context of the current timeline. ")
             if (videos.isNotEmpty()) {
@@ -365,12 +378,21 @@ class AiChatController(
                 append("tools (split/trim) and verify with get_draft_overview instead of ")
                 append("pixel-peeping.")
             }
-            if (frames.isNotEmpty()) {
+            if (timelineFrames.isNotEmpty()) {
                 if (videos.isNotEmpty()) append("\n")
                 append("IMAGE parts follow (one MIDDLE frame per remaining clip, in timeline ")
                 append("order) - use them to judge content where no video is attached: ")
-                frames.forEach { f ->
+                timelineFrames.forEach { f ->
                     append("\n[${f.clipId} \"${f.assetName}\" at ${"%.1f".format(f.midSec)}s]")
+                }
+            }
+            if (libraryFrames.isNotEmpty()) {
+                append("\nLIBRARY parts follow - one representative frame per UNUSED media-")
+                append("library asset. Each id matches an entry of the library array in the ")
+                append("overview: watch them, decide WHICH assets belong in the edit, then ")
+                append("place them with add_clip_from_library: ")
+                libraryFrames.forEach { f ->
+                    append("\n[library ${f.clipId} \"${f.assetName}\" at ${"%.1f".format(f.midSec)}s]")
                 }
             }
             append("\nClips with no attachment here are black gaps, audio-only, or extraction failed.")
@@ -439,6 +461,7 @@ class AiChatController(
                 val s = args["duration_sec"]?.let { (it as? JsonPrimitive)?.doubleOrNull }
                 if (s != null) "加了 ${"%.1f".format(s).trimEnd('0').trimEnd('.')} 秒黑场停顿" else "加了一段黑场停顿"
             }
+            EditTools.T.ADD_FROM_LIBRARY -> "从素材库挑了一段素材放上时间线"
             else -> "做了操作：${call.name}"
         }
     }

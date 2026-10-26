@@ -59,6 +59,7 @@ import com.RooMCutNext.export.ExportService
 import com.RooMCutNext.media.FontRegistry
 import com.RooMCutNext.media.LutRegistry
 import com.RooMCutNext.media.MediaImporter
+import com.RooMCutNext.media.ThumbnailGenerator
 import com.RooMCutNext.media.ThumbnailStore
 import com.RooMCutNext.playback.OverlayPreviewController
 import com.RooMCutNext.playback.PlaybackController
@@ -85,6 +86,9 @@ private const val AI_MAX_FRAMES = 10
 private const val AI_FRAME_EDGE = 384
 private const val AI_FRAME_CACHE_MAX = 64
 
+/** v1.6.13 素材库：未用资产代表帧上限（时间线帧之外追加，token 护栏）。 */
+private const val AI_MAX_LIBRARY_FRAMES = 8
+
 /**
  * v1.6.9 整段视频直传：代理规格与流量护栏。
  *
@@ -105,7 +109,7 @@ private const val AI_VIDEO_TOTAL_B64 = 12_000_000
 private const val AI_VIDEO_CACHE_MAX = 6
 private const val AI_VIDEO_PROXY_TIMEOUT_MS = 120_000L
 
-enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP, TRANSITION, MOSAIC, AI_CHAT }
+enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP, TRANSITION, MOSAIC, AI_CHAT, LIBRARY }
 
 data class ImportingState(val done: Int, val total: Int, val current: String)
 
@@ -338,6 +342,11 @@ class EditorViewModel(
      * 内容足够，精确边界仍靠模型工具）；图片：直接解码整图；黑场与
      * 音频跳过（无画面信息）。段数超过 [AI_MAX_FRAMES] 时均匀采样，
      * 保持时间线分布。单段失败不阻塞整轮（缓存空串 = 该段无帧）。
+     *
+     * v1.6.13 素材库：未上时间线的素材每资产再提一帧（≤[AI_MAX_LIBRARY_FRAMES]，
+     * 视频取中点、图片取整图），fromLibrary=true —— 多模态模型由此
+     * “看到”素材库内容，用户让 AI 挑素材时才有判断依据。时间线为空
+     * 也照发库帧（原实现空时间线提前返回，会把库帧一起吞掉）。
      */
     private suspend fun aiCollectFrames(project: Project): List<AiClipFrame> =
         withContext(Dispatchers.IO) {
@@ -348,11 +357,10 @@ class EditorViewModel(
                 if (asset.id == BLACK_FRAME_ASSET_ID || asset.type == MediaType.AUDIO) return@mapNotNull null
                 clip to asset
             }
-            if (candidates.isEmpty()) return@withContext emptyList()
             val selected = if (candidates.size <= AI_MAX_FRAMES) candidates else {
                 (0 until AI_MAX_FRAMES).map { i -> candidates[i * candidates.size / AI_MAX_FRAMES] }
             }
-            selected.mapNotNull { (clip, asset) ->
+            val timelineFrames = selected.mapNotNull { (clip, asset) ->
                 val midUs = (clip.sourceInUs + clip.sourceOutUs) / 2
                 val key = "${asset.id}:${midUs / 100_000}"
                 val b64 = aiFrameCache.getOrPut(key) {
@@ -366,6 +374,30 @@ class EditorViewModel(
                     b64Jpeg = b64,
                 )
             }
+            // v1.6.13: 素材库未用资产代表帧 —— id 用 asset id（与概览
+            // library 数组一致），fromLibrary 分组标注。
+            val usedIds = project.clips.map { it.assetId }.toSet() +
+                project.audios.map { it.assetId }.toSet() +
+                project.pips.map { it.assetId }.toSet()
+            val unusedAssets = project.assets.filter {
+                it.id !in usedIds && it.id != BLACK_FRAME_ASSET_ID && it.type != MediaType.AUDIO
+            }.take(AI_MAX_LIBRARY_FRAMES)
+            val libraryFrames = unusedAssets.mapNotNull { asset ->
+                val midUs = if (asset.isImage) 0L else asset.durationUs / 2
+                val key = "${asset.id}:${midUs / 100_000}"
+                val b64 = aiFrameCache.getOrPut(key) {
+                    if (aiFrameCache.size > AI_FRAME_CACHE_MAX) aiFrameCache.clear()
+                    extractFrameB64(File(dir, asset.fileName), asset, midUs).orEmpty()
+                }
+                if (b64.isEmpty()) null else AiClipFrame(
+                    clipId = asset.id,
+                    assetName = asset.displayName,
+                    midSec = midUs / 1_000_000.0,
+                    b64Jpeg = b64,
+                    fromLibrary = true,
+                )
+            }
+            timelineFrames + libraryFrames
         }
 
     /** 解码一帧并压到 ≤[AI_FRAME_EDGE] 边长的 JPEG base64（失败 null）。 */
@@ -835,8 +867,12 @@ class EditorViewModel(
     // ------------------------------------------------------------------
 
     /**
-     * Import files. Default: video/image assets append to the timeline,
-     * audio becomes independent-layer clips.
+     * Import files. v1.6.13 素材库工作流（用户反馈：正常剪辑软件都是素材
+     * 先进素材库、用户手动拖上时间线，而我们的 APP 直接拉上时间线没有
+     * 库概念）：导入只**入库**（Project.assets，文件早已完整拷贝进项目
+     * 私有目录），导入完自动弹开素材库面板，用户点素材才上时间线
+     * （[addAssetToTimeline]）——AI 也由此能在库里挑素材（概览 library
+     * 数组 + add_clip_from_library 工具 + 库代表帧）。
      *
      * v1.2.2 [asPip]: import FOR the picture-in-picture panel — assets go
      * into the library and are inserted directly as PiP layers at the
@@ -863,22 +899,9 @@ class EditorViewModel(
                 }
                 val playheadUs = _state.value.playheadUs.coerceAtLeast(0L)
                 var lastPipId: String? = null
-                mutate(if (asPip) "导入画中画素材" else "导入素材") { p ->
+                mutate(if (asPip) "导入画中画素材" else "导入素材到素材库") { p ->
                     var np = p.copy(assets = p.assets + outcome.assets)
                     val visuals = outcome.assets.filter { !it.isAudio }
-                    if (!asPip && np.clips.isEmpty() && visuals.isNotEmpty()) {
-                        val firstVideo = visuals.firstOrNull { !it.isImage }
-                        if (firstVideo != null) {
-                            np = np.copy(
-                                fps = snapProjectFps(firstVideo.fps),
-                                width = firstVideo.width,
-                                height = firstVideo.height,
-                            )
-                        } else {
-                            val firstImage = visuals.first()
-                            np = np.copy(width = firstImage.width, height = firstImage.height)
-                        }
-                    }
                     if (asPip) {
                         // Straight into PiP layers at the playhead — the timeline
                         // is not touched (v1.2.2 workflow fix).
@@ -893,42 +916,25 @@ class EditorViewModel(
                             lastPipId = layer.id
                             np = np.copy(pips = TimelineOps.insertPip(np.pips, layer))
                         }
-                    } else {
-                        // Video / image assets append as timeline clips.
-                        visuals.forEach { asset -> np = np.copy(clips = np.clips + newClipFor(asset)) }
                     }
-                    // Audio assets become independent-layer audio clips
-                    // placed sequentially FROM THE PLAYHEAD (v1.5.5: the
-                    // cursor used to start at max(clipsDuration, playhead),
-                    // so an import into a populated timeline always landed
-                    // AFTER the last clip — "每次导入音频一定在素材的最后面".
-                    // Overlapping existing audio is fine: audioLanes packs
-                    // independent layers into lanes, exactly like a BGM bed
-                    // under a voiceover).
-                    if (outcome.assets.any { it.isAudio }) {
-                        var cursor = playheadUs
-                        outcome.assets.filter { it.isAudio }.forEach { asset ->
-                            np = np.copy(
-                                audios = TimelineOps.insertAudio(
-                                    np.audios,
-                                    AudioClip(
-                                        id = IdGen.new("aud"),
-                                        assetId = asset.id,
-                                        startUs = cursor,
-                                        sourceInUs = 0L,
-                                        sourceOutUs = asset.durationUs,
-                                    ),
-                                )
-                            )
-                            cursor += asset.durationUs
-                        }
-                    }
+                    // v1.6.13: 普通导入只入库，不再自动上时间线 —— 上时间线由
+                    // addAssetToTimeline（手动点击）或 add_clip_from_library
+                    // （AI）完成；画布/帧率也改到首个片段真正落轨时初始化。
                     np
                 }
                 if (asPip && lastPipId != null) {
                     // Select the newly imported layer so its sliders show up.
                     _state.update {
                         it.copy(selectedPipId = lastPipId, selectedClipId = null, selectedTextId = null, selectedAudioId = null)
+                    }
+                } else if (!asPip) {
+                    // v1.6.13: 素材入库 → 自动弹开素材库面板，新素材一目
+                    // 了然，点击即上时间线（素材库工作流的引导步）。
+                    _state.update {
+                        it.copy(
+                            activePanel = PanelKind.LIBRARY,
+                            toast = "已导入 ${outcome.assets.size} 个素材到素材库，点击素材即可上时间线",
+                        )
                     }
                 }
                 viewModelScope.launch { preloadThumbnails(outcome.assets) }
@@ -937,6 +943,115 @@ class EditorViewModel(
                 _state.update {
                     it.copy(toast = "无法导入 ${outcome.failedNames.size} 个文件：${outcome.failedNames.joinToString().take(60)}")
                 }
+            }
+        }
+    }
+
+    /**
+     * v1.6.13 素材库：把库里的一个资产放上时间线（素材库面板点击行）。
+     *
+     * 视频/图片 → 追加到视频轨末尾（空轨时由该素材初始化画布/帧率，对齐
+     * v1.6.13 之前首次导入的行为）；音频 → 从 playhead 起加到独立音频轨
+     * （对齐旧 importUris 的音频落点语义）。上轨即选中新片段。
+     */
+    fun addAssetToTimeline(assetId: String) {
+        val asset = _state.value.project.assets.firstOrNull { it.id == assetId } ?: return
+        val playheadUs = _state.value.playheadUs.coerceAtLeast(0L)
+        var newClipId: String? = null
+        mutate("从素材库添加到时间线") { p ->
+            var np = p
+            if (asset.isAudio) {
+                np = np.copy(
+                    audios = TimelineOps.insertAudio(
+                        np.audios,
+                        AudioClip(
+                            id = IdGen.new("aud"),
+                            assetId = asset.id,
+                            startUs = playheadUs,
+                            sourceInUs = 0L,
+                            sourceOutUs = asset.durationUs,
+                        ),
+                    )
+                )
+            } else {
+                val firstVisual = np.clips.isEmpty()
+                val clip = newClipFor(asset)
+                newClipId = clip.id
+                np = np.copy(clips = np.clips + clip)
+                if (firstVisual) {
+                    if (!asset.isImage) {
+                        np = np.copy(fps = snapProjectFps(asset.fps), width = asset.width, height = asset.height)
+                    } else {
+                        np = np.copy(width = asset.width, height = asset.height)
+                    }
+                }
+            }
+            np
+        }
+        if (newClipId != null) {
+            _state.update {
+                it.copy(selectedClipId = newClipId, selectedTextId = null, selectedAudioId = null, selectedPipId = null)
+            }
+        }
+    }
+
+    /**
+     * v1.6.13 素材库：一键把所有**未使用**的视频/图片素材按导入顺序追加
+     * 到视频轨末尾（快速开工；音频不上 —— 音频从指针落点更合理，可逐个
+     * 点击添加）。全部上轨后收起面板直接看时间线效果。
+     */
+    fun addUnusedAssetsToTimeline() {
+        val p0 = _state.value.project
+        val used = p0.clips.map { it.assetId }.toSet() +
+            p0.audios.map { it.assetId }.toSet() +
+            p0.pips.map { it.assetId }.toSet()
+        val unusedVisuals = p0.assets.filter {
+            it.id !in used && !it.isAudio && it.id != BLACK_FRAME_ASSET_ID
+        }
+        if (unusedVisuals.isEmpty()) {
+            _state.update { it.copy(toast = "素材库里没有未使用的视频/图片素材") }
+            return
+        }
+        mutate("素材库全部添加到时间线") { p ->
+            var np = p
+            unusedVisuals.forEach { asset ->
+                val firstVisual = np.clips.isEmpty()
+                np = np.copy(clips = np.clips + newClipFor(asset))
+                if (firstVisual) {
+                    if (!asset.isImage) {
+                        np = np.copy(fps = snapProjectFps(asset.fps), width = asset.width, height = asset.height)
+                    } else {
+                        np = np.copy(width = asset.width, height = asset.height)
+                    }
+                }
+            }
+            np
+        }
+        _state.update { it.copy(activePanel = null) }
+    }
+
+    /**
+     * v1.6.13 素材库：删除一个**未使用**的资产（记录 + 源文件 + 缩略图）。
+     * 正在被时间线/音频轨/画中画引用的素材拒绝删除（先删引用再删库），
+     * 内置黑场工具素材不可删。文件删除在 IO 线程，不阻塞 UI。
+     */
+    fun deleteAssetFromLibrary(assetId: String) {
+        val p = _state.value.project
+        val asset = p.assets.firstOrNull { it.id == assetId } ?: return
+        if (asset.id == BLACK_FRAME_ASSET_ID) return
+        val inUse = p.clips.any { it.assetId == assetId } ||
+            p.audios.any { it.assetId == assetId } ||
+            p.pips.any { it.assetId == assetId }
+        if (inUse) {
+            _state.update { it.copy(toast = "素材正在时间线上使用，先删除对应片段") }
+            return
+        }
+        mutate("从素材库删除素材") { it.copy(assets = it.assets.filterNot { a -> a.id == assetId }) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val dir = repo.mediaDir(projectId)
+            runCatching {
+                File(dir, asset.fileName).delete()
+                ThumbnailGenerator.thumbFiles(dir, asset).forEach { f -> f.delete() }
             }
         }
     }

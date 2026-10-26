@@ -13,6 +13,7 @@ import com.RooMCutNext.core.model.Project
 import com.RooMCutNext.core.model.TextOverlayItem
 import com.RooMCutNext.core.model.TextStyleSpec
 import com.RooMCutNext.core.model.TransitionStyle
+import com.RooMCutNext.core.model.snapProjectFps
 import com.RooMCutNext.core.ops.TimelineOps
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
@@ -56,11 +57,14 @@ val TOOL_NAMES: Set<String> =
  * 技能 steps 中允许出现的非工具 snake_case 标识符（参数名 + 概览 JSON 键白名单）。
  * v1.6.12：新增概览键 source_in_sec / source_out_sec / source_duration_sec，
  * 供「恢复原长」等配方精确引用窗口语义。
+ * v1.6.13：新增 asset_id / position（add_clip_from_library 参数）与
+ * used_count（素材库概览键），供「素材成片」类配方引用。
  */
 val SKILL_PARAM_WHITELIST: Set<String> = setOf(
     "anchor_clip_id", "duration_sec", "start_sec", "new_start_sec", "new_end_sec",
     "to_index", "font_size_ratio", "x_ratio", "y_ratio", "color_hex",
     "source_in_sec", "source_out_sec", "source_duration_sec",
+    "asset_id", "position", "used_count",
 )
 
 class EditTools(
@@ -76,7 +80,7 @@ class EditTools(
         .filter { it != TransitionStyle.ZOOM_IN && it != TransitionStyle.ZOOM_OUT }
         .map { it.id }
 
-    class Draft(val base: Project) {
+    class Draft(val base: Project, val playheadUs: Long = 0L) {
         var project: Project = base
         val journal = mutableListOf<String>()
         var seekUs: Long? = null
@@ -241,6 +245,21 @@ class EditTools(
             emptyList(),
         ))
         add(schema(
+            T.ADD_FROM_LIBRARY,
+            "Add a clip from the project's media LIBRARY onto the timeline. The library " +
+                "array in the overview lists every imported asset (used_count 0 = not on the " +
+                "timeline yet) - pick asset_id from there. Optional source_in_sec/source_out_sec " +
+                "use only a SEGMENT of the asset (seconds within the source; default = whole " +
+                "asset, images default to 3s display). position: \"before\" or \"after\" the " +
+                "anchor clip (default after); with no anchor_clip_id, appends at the end. " +
+                "Audio assets join the independent audio track at the playhead.",
+            mapOf(
+                "asset_id" to "string", "anchor_clip_id" to "string", "position" to "string",
+                "source_in_sec" to "number", "source_out_sec" to "number",
+            ),
+            listOf("asset_id"),
+        ))
+        add(schema(
             T.ADD_TEXT,
             "Add a text overlay (title/caption). font_id one of: ${fonts.joinToString(" | ") { it.first }}. " +
                 "color_hex like \"#FFFFFF\". x_ratio/y_ratio: 0-1 canvas position. " +
@@ -309,6 +328,7 @@ class EditTools(
         const val TRANSITION = "set_transition"
         const val REMOVE_TRANSITION = "remove_transition"
         const val ADD_BLACK = "add_black_clip"
+        const val ADD_FROM_LIBRARY = "add_clip_from_library"
         const val ADD_TEXT = "add_text"
         const val UPDATE_TEXT = "update_text"
         const val DELETE_TEXT = "delete_text"
@@ -339,8 +359,8 @@ class EditTools(
                     "未知工具 \"$name\"。可用: " +
                         listOf(T.OVERVIEW, T.SPLIT, T.DELETE_CLIP, T.TRIM_CLIP, T.RESTORE_CLIP,
                             T.MOVE_CLIP, T.SPEED, T.VOLUME, T.LOOK, T.TRANSITION, T.REMOVE_TRANSITION,
-                            T.ADD_BLACK, T.ADD_TEXT, T.UPDATE_TEXT, T.DELETE_TEXT, T.AUDIO_VOLUME,
-                            T.AUDIO_TRIM, T.DELETE_AUDIO, T.SEEK).joinToString(", "),
+                            T.ADD_BLACK, T.ADD_FROM_LIBRARY, T.ADD_TEXT, T.UPDATE_TEXT, T.DELETE_TEXT,
+                            T.AUDIO_VOLUME, T.AUDIO_TRIM, T.DELETE_AUDIO, T.SEEK).joinToString(", "),
                 )
         }
     }
@@ -356,6 +376,13 @@ class EditTools(
 
     private fun clipIdList(p: Project): String =
         p.clips.take(8).joinToString(", ") { it.id } + if (p.clips.size > 8) " …" else ""
+
+    /** 素材库 id 摘要（排除内置黑场）：id(名称)，供模型选 asset_id。 */
+    private fun libraryIdList(p: Project): String {
+        val lib = p.assets.filter { it.id != BLACK_FRAME_ASSET_ID }
+        return lib.take(8).joinToString(", ") { "${it.id}(${it.displayName.take(12)})" } +
+            if (lib.size > 8) " …" else ""
+    }
 
     /**
      * v1.6.1: 草稿会话内的黑场资产模板（纯 Kotlin，无文件系统依赖）。
@@ -449,6 +476,88 @@ class EditTools(
                         (if (anchorIdx >= 0) "${if (afterPos) "after" else "before"} $anchorId" else "at end"),
                 )
                 okJson("new_clip_id" to newId, "duration_sec" to usToSec(durUs))
+            }
+            T.ADD_FROM_LIBRARY -> {
+                // v1.6.13 素材库：AI 自己从库里挑素材上时间线 —— 导入即入库
+                // （Project.assets），本工具把库里的资产变成时间线内容。
+                val assetId = args.str("asset_id")
+                    ?: return errJson("缺少参数 asset_id")
+                val asset = p.assets.firstOrNull { it.id == assetId && it.id != BLACK_FRAME_ASSET_ID }
+                    ?: return errJson(
+                        "asset_id \"$assetId\" 无效。素材库可用: ${libraryIdList(p)}",
+                    )
+                val posRaw = args.str("position") ?: "after"
+                val afterPos = when (posRaw.lowercase()) {
+                    "before", "前" -> false
+                    "after", "后" -> true
+                    else -> return errJson("position 只能是 \"before\" 或 \"after\"")
+                }
+                // 锚点参数名兼容（同 add_black_clip）：anchor_clip_id 或 clip_id。
+                val anchorId = args.str("anchor_clip_id") ?: clipId
+                val anchorIdx = if (anchorId != null) {
+                    requireClip(p, anchorId)?.first
+                        ?: return errJson("anchor_clip_id 无效。可用: ${clipIdList(p)}")
+                } else -1
+
+                if (asset.isAudio) {
+                    // 音频资产 → 独立音频轨，从 playhead 起（与手动添加一致）。
+                    val newId = idFactory()
+                    val audio = AudioClip(
+                        id = newId,
+                        assetId = asset.id,
+                        startUs = draft.playheadUs.coerceAtLeast(0L),
+                        sourceInUs = 0L,
+                        sourceOutUs = asset.durationUs,
+                    )
+                    draft.project = p.copy(audios = TimelineOps.insertAudio(p.audios, audio))
+                    bump(draft, "add_clip_from_library: audio \"${asset.displayName}\"")
+                    okJson(
+                        "audio_id" to newId,
+                        "start_sec" to usToSec(audio.startUs),
+                        "duration_sec" to usToSec(audio.durationUs),
+                    )
+                } else {
+                    // 视频/图片 → 时间线 clip。可选窗口：视频取源内一段，
+                    // 图片 source_out_sec 即展示时长（0.1..60s，默认 3s）。
+                    val newId = idFactory()
+                    val (inUs, outUs) = if (asset.isImage) {
+                        val displaySec = args.num("source_out_sec") ?: 3.0
+                        0L to (displaySec * 1e6).roundToLong()
+                            .coerceIn(MIN_SPAN, IMAGE_MAX_DURATION_US)
+                    } else {
+                        val inReq = secToUs(args.num("source_in_sec")) ?: 0L
+                        val outReq = secToUs(args.num("source_out_sec"))
+                            ?: (asset.durationUs).coerceAtLeast(MIN_SPAN)
+                        val inClamped = inReq.coerceIn(0L, (asset.durationUs - MIN_SPAN).coerceAtLeast(0L))
+                        inClamped to outReq.coerceIn(inClamped + MIN_SPAN, asset.durationUs)
+                    }
+                    val clip = Clip(id = newId, assetId = asset.id, sourceInUs = inUs, sourceOutUs = outUs)
+                    val insertAt = if (anchorIdx < 0) p.clips.size
+                    else if (afterPos) anchorIdx + 1 else anchorIdx
+                    val newClips = TimelineOps.insert(p.clips, clip, insertAt)
+                    // 空时间线上第一个视觉片段决定画布/帧率（同手动导入）。
+                    val np = if (p.clips.isEmpty()) {
+                        if (asset.isImage) p.copy(width = asset.width, height = asset.height)
+                        else p.copy(
+                            fps = snapProjectFps(asset.fps),
+                            width = asset.width,
+                            height = asset.height,
+                        )
+                    } else p
+                    draft.project = np.copy(clips = newClips)
+                    bump(
+                        draft,
+                        "add_clip_from_library: \"${asset.displayName}\" " +
+                            "${usToSec(inUs)}s-${usToSec(outUs)}s @${insertAt}",
+                    )
+                    okJson(
+                        "new_clip_id" to newId,
+                        "index" to insertAt,
+                        "duration_sec" to usToSec(clip.durationUs),
+                        "source_in_sec" to usToSec(inUs),
+                        "source_out_sec" to usToSec(outUs),
+                    )
+                }
             }
             T.TRIM_CLIP -> {
                 val found = requireClip(p, clipId) ?: return errJson(
@@ -919,6 +1028,32 @@ class EditTools(
                     })
                 }
             })
+            // v1.6.13 素材库：全部已导入素材（含未上时间线的），AI 由此
+            // 自主选素材（asset_id）并用 add_clip_from_library 上时间线。
+            // used_count = clips+audios+pips 引用次数，0 = 还在库里没用。
+            put("library", buildJsonArray {
+                val libAssets = p.assets.filter { it.id != BLACK_FRAME_ASSET_ID }
+                libAssets.take(MAX_LIBRARY_IN_OVERVIEW).forEach { a ->
+                    val uses = p.clips.count { it.assetId == a.id } +
+                        p.audios.count { it.assetId == a.id } +
+                        p.pips.count { it.assetId == a.id }
+                    add(buildJsonObject {
+                        put("id", a.id)
+                        put("name", a.displayName.take(24))
+                        put("type", a.type.name.lowercase())
+                        if (!a.isImage && a.durationUs > 0) {
+                            put("duration_sec", usToSec(a.durationUs))
+                        }
+                        put("size", "${a.width}x${a.height}")
+                        if (a.fps > 0f) put("fps", a.fps.toInt())
+                        if (!a.isImage && !a.hasAudio) put("no_audio", true)
+                        put("used_count", uses)
+                    })
+                }
+                if (libAssets.size > MAX_LIBRARY_IN_OVERVIEW) {
+                    add(JsonPrimitive("…+${libAssets.size - MAX_LIBRARY_IN_OVERVIEW} assets"))
+                }
+            })
             put("available_luts", buildJsonArray {
                 luts.forEach { add(buildJsonObject { put("id", it.first); put("name", it.second) }) }
             })
@@ -943,7 +1078,8 @@ class EditTools(
                 "You are the AI editing assistant of RooMCutNext, a mobile video editor. " +
                     "You edit the user's REAL project through tool calls: split, trim, restore " +
                     "full length, delete, reorder, speed, volume, LUT looks, transitions, black " +
-                    "gaps (add_black_clip) and text overlays. Deleting a clip RIPPLES the " +
+                    "gaps (add_black_clip), text overlays and adding clips from the media " +
+                    "library (add_clip_from_library). Deleting a clip RIPPLES the " +
                     "timeline closed - add a black gap clip when the user wants a pause or " +
                     "breathing room. Edits apply immediately as ONE undoable step - the user " +
                     "can revert everything with a single tap, so just do the work directly.\n\n" +
@@ -954,8 +1090,10 @@ class EditTools(
                     "4. When done, reply in the user's language with ONE or TWO short, plain, friendly " +
                     "sentences describing what changed - like a video-editor buddy talking to a friend. " +
                     "NO bullet lists, NO markdown, NO tool ids, NO technical terms or parameter names.\n" +
-                    "5. If the request needs a capability you have no tool for (importing new media, " +
-                    "generating audio/video, keyframes, PiP geometry), say so plainly.\n" +
+                    "5. Media ALREADY imported lives in the project library (the \"library\" array " +
+                    "below) - add any of it to the timeline with add_clip_from_library. Only " +
+                    "importing NEW media from the device, generating audio/video, keyframes or " +
+                    "PiP geometry are beyond your tools; say so plainly when asked.\n" +
                     "6. Reply in the user's language (Chinese in, Chinese out; English in, English out).\n\n" +
                     // v1.6.5: 技能库 —— 命名剪辑技巧配方，用户可点名调用。
                     "7. The skill library below names editing techniques you know how to execute. " +
@@ -968,6 +1106,14 @@ class EditTools(
                     "source file is always kept in the project, so restoring a clip to its " +
                     "original length is ALWAYS possible via restore_clip - NEVER claim it is " +
                     "already full or impossible: check the trimmed flag and the window instead.\n\n" +
+                    // v1.6.13: 素材库 —— AI 自主选素材（用户反馈：让 AI 分析素材库、
+                    // 自己判断用什么素材上时间线，比只看时间线更精确）。
+                    "9. The library array lists EVERY imported asset with used_count (0 = not on " +
+                    "the timeline yet). When the user asks you to pick/arrange their footage " +
+                    "(\"帮我选素材\", \"用素材库剪一条\"), study the library - names, durations, " +
+                    "and attached visual frames of unused assets - choose the right assets and " +
+                    "place them with add_clip_from_library (optional source_in_sec/source_out_sec " +
+                    "to use just the best segment). Never invent asset ids: use the listed ones.\n\n" +
                     EditSkills.promptBlock(customSkills) +
                     "\nCurrent draft overview (JSON):\n",
             )
@@ -987,5 +1133,6 @@ class EditTools(
         const val MAX_CLIPS_IN_OVERVIEW = 80
         const val MAX_TEXTS_IN_OVERVIEW = 40
         const val MAX_PIPS_IN_OVERVIEW = 20
+        const val MAX_LIBRARY_IN_OVERVIEW = 40
     }
 }

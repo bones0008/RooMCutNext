@@ -321,6 +321,19 @@
     <!-- v1.6.0: AI agent editing (BYOK, OpenAI-compatible endpoints) -->
     <string name="action_ai">AI 剪辑</string>
     <string name="panel_ai_title">AI 剪辑</string>
+    <!-- v1.6.13: 媒体库（素材库）—— 导入即入库，点击素材上时间线 -->
+    <string name="action_library">素材库</string>
+    <string name="panel_library_title">素材库</string>
+    <string name="library_import">导入素材</string>
+    <string name="library_add_all">全部添加到时间线</string>
+    <string name="library_hint">点击素材即上时间线：视频/图片追加到末尾，音频加到指针处。AI 也能分析素材库帮你挑素材。</string>
+    <string name="library_empty">素材库还是空的\n点「导入素材」把手机里的视频、图片、音乐加进来：文件会完整保存进项目，上时间线即可开始剪辑</string>
+    <string name="library_type_video">视频</string>
+    <string name="library_type_image">图片</string>
+    <string name="library_type_audio">音频</string>
+    <string name="library_unused">未使用</string>
+    <string name="library_used_fmt">已用 %1$d 次</string>
+    <string name="library_delete">从素材库删除</string>
     <string name="ai_hint_title">对话式 AI 剪辑</string>
     <string name="ai_hint_body">用一句话描述想要的剪辑，AI 会直接在时间线上完成分割、删除、变速、转场、滤镜、字幕等操作。修改先进入草稿，确认后一键应用（整组可撤销）。\n\n使用前请配置一个大模型 API Key（自带密钥，仅保存在本机，只访问你配置的模型服务）。</string>
     <string name="ai_hint_config">配置模型</string>

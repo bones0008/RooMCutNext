@@ -433,8 +433,8 @@ class EditToolsTest {
         listOf(
             "get_draft_overview", "split_clip", "delete_clip", "trim_clip", "restore_clip",
             "move_clip", "set_clip_speed", "set_clip_volume", "set_clip_look", "set_transition",
-            "remove_transition", "add_black_clip", "add_text", "update_text", "delete_text",
-            "set_audio_volume", "trim_audio", "delete_audio", "seek",
+            "remove_transition", "add_black_clip", "add_clip_from_library", "add_text", "update_text",
+            "delete_text", "set_audio_volume", "trim_audio", "delete_audio", "seek",
         ).forEach { assertTrue("missing $names", names.contains("\"$it\"")) }
         // zoom 转场 v1.5.5 已移除，不应对 agent 开放。
         assertFalse(names.contains("\"zoom_in\""))
@@ -544,5 +544,189 @@ class EditToolsTest {
         assertTrue(prompt.contains("\"source_duration_sec\":10.0"))
         val overviewPart = prompt.substringAfter("Current draft overview (JSON):\n")
         assertFalse(overviewPart.contains("\"trimmed\""))
+    }
+
+    // ------------------------------------------------------------------
+    // v1.6.13: 素材库 —— AI 看得见库里全部素材并可自主上时间线
+    //（用户反馈：素材应先进素材库，AI 分析库内容自己挑素材更精确）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun overviewListsLibraryWithUsedCount() {
+        val p = project(
+            clips = listOf(clip("c1", "a1"), clip("c2", "a1")),
+            assets = listOf(asset("a1"), asset("a2"), asset("aimg", durUs = 0L, type = MediaType.IMAGE)),
+            audios = listOf(AudioClip(id = "aud1", assetId = "a2", startUs = 0L, sourceInUs = 0L, sourceOutUs = 5_000_000L)),
+        )
+        val d = EditTools.Draft(p)
+        val library = tools.overviewJson(d)["library"]!!.jsonArray
+        assertEquals(3, library.size)
+        val a1 = library[0].toString()
+        assertTrue(a1, a1.contains("\"id\":\"a1\""))
+        assertTrue(a1, a1.contains("\"used_count\":2"))
+        assertTrue(a1, a1.contains("\"duration_sec\":10.0"))
+        assertTrue(a1, a1.contains("\"type\":\"video\""))
+        // 未上时间线的资产 used_count = 0（音频引用也计数）。
+        val a2 = library[1].toString()
+        assertTrue(a2, a2.contains("\"used_count\":1"))
+        val aimg = library[2].toString()
+        assertTrue(aimg, aimg.contains("\"type\":\"image\""))
+        assertFalse(aimg.contains("duration_sec"))
+        // system prompt 讲清 library 语义与挑素材流程。
+        val prompt = tools.systemPrompt(d, 0L)
+        assertTrue(prompt.contains("add_clip_from_library"))
+        assertTrue(prompt.contains("library array"))
+    }
+
+    @Test
+    fun overviewLibraryHidesBlackFrameToolAsset() {
+        val blackAsset = MediaAsset(
+            id = com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID,
+            fileName = com.RooMCutNext.core.model.BLACK_FRAME_FILE_NAME,
+            displayName = "黑场", type = MediaType.IMAGE,
+            durationUs = 0L, width = 1920, height = 1080, fps = 0f, hasAudio = false,
+        )
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1"), blackAsset))
+        val d = EditTools.Draft(p)
+        val library = tools.overviewJson(d)["library"]!!.jsonArray
+        assertEquals(1, library.size)
+        assertFalse(library.toString().contains(com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID))
+    }
+
+    @Test
+    fun addClipFromLibraryAppendsAtEnd() {
+        val p = project(
+            listOf(clip("c1", "a1")),
+            listOf(asset("a1"), asset("a2")),
+        )
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "add_clip_from_library", args("asset_id" to "a2"))
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals(2, d.project.clips.size)
+        val added = d.project.clips[1]
+        assertEquals("a2", added.assetId)
+        assertEquals(0L, added.sourceInUs)
+        assertEquals(10_000_000L, added.sourceOutUs)
+        assertEquals(1.0, r.json.num("index")!!, 1e-9)
+        assertEquals(10.0, r.json.num("duration_sec")!!, 1e-9)
+        assertTrue(d.journal.single().startsWith("add_clip_from_library"))
+        assertEquals(1, d.changeCount)
+    }
+
+    @Test
+    fun addClipFromLibraryBeforeAnchor() {
+        val p = project(
+            listOf(clip("c1", "a1"), clip("c2", "a1")),
+            listOf(asset("a1"), asset("a2")),
+        )
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "add_clip_from_library",
+            args("asset_id" to "a2", "anchor_clip_id" to "c2", "position" to "before"),
+        )
+        assertTrue(r.json.toString(), r.ok)
+        // 插在 c2 之前：[c1, 新(a2), c2]，新片段在 index 1。
+        assertEquals(1.0, r.json.num("index")!!, 1e-9)
+        assertEquals("c1", d.project.clips[0].id)
+        assertEquals("a2", d.project.clips[1].assetId)
+        assertEquals("c2", d.project.clips[2].id)
+    }
+
+    @Test
+    fun addClipFromLibraryUsesSourceSegmentAndCanvas() {
+        val a = MediaAsset(
+            id = "a1", fileName = "a1.mp4", displayName = "Asset a1", type = MediaType.VIDEO,
+            durationUs = 10_000_000L, width = 1080, height = 1920, fps = 24f, hasAudio = true,
+        )
+        val p = project(emptyList(), listOf(a))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "add_clip_from_library",
+            args("asset_id" to "a1", "source_in_sec" to 2.0, "source_out_sec" to 5.0),
+        )
+        assertTrue(r.json.toString(), r.ok)
+        val c = d.project.clips.single()
+        assertEquals(2_000_000L, c.sourceInUs)
+        assertEquals(5_000_000L, c.sourceOutUs)
+        // 空时间线首片段初始化画布/帧率（同手动导入语义）。
+        assertEquals(1080, d.project.width)
+        assertEquals(1920, d.project.height)
+        assertEquals(24, d.project.fps)
+    }
+
+    @Test
+    fun addClipFromLibraryClampsWindowToSource() {
+        val p = project(emptyList(), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "add_clip_from_library",
+            args("asset_id" to "a1", "source_in_sec" to -3.0, "source_out_sec" to 99.0),
+        )
+        assertTrue(r.json.toString(), r.ok)
+        val c = d.project.clips.single()
+        assertEquals(0L, c.sourceInUs)
+        assertEquals(10_000_000L, c.sourceOutUs)
+    }
+
+    @Test
+    fun addClipFromLibraryAudioAtPlayhead() {
+        val p = project(
+            listOf(clip("c1", "a1")),
+            listOf(asset("a1"), asset("am", type = MediaType.AUDIO)),
+        )
+        val d = EditTools.Draft(p, playheadUs = 4_000_000L)
+        val r = tools.execute(d, "add_clip_from_library", args("asset_id" to "am"))
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals(4.0, r.json.num("start_sec")!!, 1e-9)
+        assertEquals(10.0, r.json.num("duration_sec")!!, 1e-9)
+        val aud = d.project.audios.single()
+        assertEquals(4_000_000L, aud.startUs)
+        assertEquals(0L, aud.sourceInUs)
+        assertEquals(10_000_000L, aud.sourceOutUs)
+        // 音频资产不动视频轨。
+        assertEquals(1, d.project.clips.size)
+    }
+
+    @Test
+    fun addClipFromLibraryImageDisplayDuration() {
+        val p = project(emptyList(), listOf(asset("aimg", durUs = 0L, type = MediaType.IMAGE)))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "add_clip_from_library", args("asset_id" to "aimg"))
+        assertTrue(r.json.toString(), r.ok)
+        assertEquals(3_000_000L, d.project.clips.single().sourceOutUs) // 图片默认展示 3s
+        // 指定展示时长直接生效。
+        val d2 = EditTools.Draft(p)
+        val r2 = tools.execute(d2, "add_clip_from_library", args("asset_id" to "aimg", "source_out_sec" to 5.0))
+        assertTrue(r2.json.toString(), r2.ok)
+        assertEquals(5_000_000L, d2.project.clips.single().sourceOutUs)
+    }
+
+    @Test
+    fun addClipFromLibraryInvalidAssetListsLibrary() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(d, "add_clip_from_library", args("asset_id" to "nope"))
+        assertFalse(r.ok)
+        // 错误信息列出可用 asset，模型可自纠。
+        assertTrue(r.json.toString().contains("a1"))
+        assertEquals(0, d.changeCount)
+    }
+
+    @Test
+    fun addClipFromLibraryRejectsBlackFrameAsset() {
+        val blackAsset = MediaAsset(
+            id = com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID,
+            fileName = com.RooMCutNext.core.model.BLACK_FRAME_FILE_NAME,
+            displayName = "黑场", type = MediaType.IMAGE,
+            durationUs = 0L, width = 1920, height = 1080, fps = 0f, hasAudio = false,
+        )
+        val p = project(emptyList(), listOf(asset("a1"), blackAsset))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "add_clip_from_library",
+            args("asset_id" to com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID),
+        )
+        assertFalse(r.ok)
+        assertEquals(0, d.changeCount)
     }
 }

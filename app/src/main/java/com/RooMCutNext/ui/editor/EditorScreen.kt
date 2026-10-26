@@ -58,6 +58,7 @@ import androidx.compose.material.icons.filled.Square
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
@@ -652,6 +653,9 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
                     onImportLut = { pickLut.launch(lutMimeTypes) },
                     onImportFont = { pickFont.launch(fontMimeTypes) },
                     onAddMusic = { pickAudio.launch(audioMimeTypes) },
+                    // v1.6.13: 素材库面板内的「导入素材」→ 同一个统一选择器
+                    // （视频/图片/音频全收，导入即入库）。
+                    onImportMedia = { launchMediaPicker() },
                     onImportPipMedia = { pickPipMedia.launch(mediaMimeTypes) },
                     onRecord = {
                         // v1.1.4: mic permission gate before the take starts.
@@ -690,6 +694,8 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             ActionToolbar(
             state = state,
             onAddMedia = { launchMediaPicker() },
+            // v1.6.13: 素材库面板（导入即入库的浏览/上轨入口）。
+            onLibrary = { vm.openPanel(PanelKind.LIBRARY) },
             // v1.6.0: AI 剪辑 — 对话式 agent（不要求选中目标，agent 自己读项目）。
             onAi = { vm.openPanel(PanelKind.AI_CHAT) },
             // v1.6.1: 黑场 — 删除已改为收拢贴合，黑色停顿作为显式素材插入。
@@ -887,6 +893,7 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
 private fun ActionToolbar(
     state: EditorUiState,
     onAddMedia: () -> Unit,
+    onLibrary: () -> Unit,
     onAi: () -> Unit,
     onBlackGap: () -> Unit,
     onSpeed: () -> Unit,
@@ -918,6 +925,8 @@ private fun ActionToolbar(
     ) {
         Spacer(Modifier.width(8.dp))
         ToolbarButton(Icons.Filled.Add, stringResource(R.string.timeline_add_media), enabled = true, active = false, onClick = onAddMedia)
+        // v1.6.13: 素材库 —— 导入即入库，点击素材上时间线；AI 同库选材。
+        ToolbarButton(Icons.Filled.VideoLibrary, stringResource(R.string.action_library), enabled = true, active = active == PanelKind.LIBRARY, onClick = onLibrary)
         // v1.6.0: AI 剪辑放在最前面 — 对话即剪辑的入口。
         ToolbarButton(Icons.Filled.AutoAwesome, stringResource(R.string.action_ai), enabled = true, active = active == PanelKind.AI_CHAT, onClick = onAi)
         ToolbarButton(Icons.Filled.TextFields, stringResource(R.string.action_text), enabled = true, active = active == PanelKind.TEXT, onClick = onText)
@@ -1011,6 +1020,7 @@ private fun ToolPanelHost(
     onImportLut: () -> Unit,
     onImportFont: () -> Unit,
     onAddMusic: () -> Unit,
+    onImportMedia: () -> Unit,
     onImportPipMedia: () -> Unit,
     onRecord: () -> Unit,
     onReplace: () -> Unit,
@@ -1030,6 +1040,7 @@ private fun ToolPanelHost(
         PanelKind.TRANSITION -> R.string.panel_transition_title
         PanelKind.MOSAIC -> R.string.panel_mosaic_title
         PanelKind.AI_CHAT -> R.string.panel_ai_title
+        PanelKind.LIBRARY -> R.string.panel_library_title
     }
     // The timeline is hidden while the panel is open, so the header shows
     // WHICH clip the clip-targeted tools are editing.
@@ -1122,6 +1133,7 @@ private fun ToolPanelHost(
                     PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = onAddMusic, onRecord = onRecord)
                     PanelKind.INFO -> InfoSheet(vm, state, onReplace = onReplace)
                     PanelKind.GOTO -> GotoSheet(vm, state)
+                    PanelKind.LIBRARY -> LibrarySheet(vm, state, onImportMedia = onImportMedia)
                     PanelKind.EXPORT -> ExportSheet(
                         vm = vm,
                         state = state,

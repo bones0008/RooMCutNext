@@ -2,6 +2,7 @@
 package com.RooMCutNext.ui.editor
 
 import android.content.Intent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,12 +24,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Flip
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -38,8 +42,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -47,12 +53,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.RooMCutNext.R
+import com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID
 import com.RooMCutNext.core.model.CropSpec
+import com.RooMCutNext.core.model.MediaAsset
 import com.RooMCutNext.core.model.snapProjectFps
 import com.RooMCutNext.core.util.FileSize
 import com.RooMCutNext.core.util.TimeCode
@@ -1389,6 +1400,191 @@ fun GotoSheet(vm: EditorViewModel, state: EditorUiState) {
 // ===========================================================================
 // Export
 // ===========================================================================
+
+// ===========================================================================
+// Media library (v1.6.13 素材库)
+// ===========================================================================
+
+/**
+ * v1.6.13 素材库面板 — 项目导入的全部素材（含未上时间线的）。
+ *
+ * 导入即入库（文件完整拷贝进项目私有目录，不因相册权限过期丢素材）；
+ * 点击素材行即上时间线（视频/图片追加到视频轨末尾，音频从指针落点
+ * 加入独立音频轨）；未使用的素材可删（连同源文件与缩略图）。
+ * AI 剪辑看到的是同一个库（概览 library 数组 + add_clip_from_library
+ * 工具 + 未用素材代表帧），用户可让 AI 直接挑素材成片。
+ */
+@Composable
+fun LibrarySheet(vm: EditorViewModel, state: EditorUiState, onImportMedia: () -> Unit) {
+    val project = state.project
+    val assets = project.assets.filter { it.id != BLACK_FRAME_ASSET_ID }
+    val usedCount = remember(project) {
+        val counts = mutableMapOf<String, Int>()
+        project.clips.forEach { counts[it.assetId] = (counts[it.assetId] ?: 0) + 1 }
+        project.audios.forEach { counts[it.assetId] = (counts[it.assetId] ?: 0) + 1 }
+        project.pips.forEach { counts[it.assetId] = (counts[it.assetId] ?: 0) + 1 }
+        counts
+    }
+    val hasUnusedVisual = assets.any { (usedCount[it.id] ?: 0) == 0 && !it.isAudio }
+
+    // 缩略图异步装载（同 TimelineView 的 peek/load + 本地 revision 模式）。
+    var thumbRevision by remember { mutableIntStateOf(0) }
+    val context = LocalContext.current
+    LaunchedEffect(project.id, assets.size) {
+        val app = context.applicationContext as android.app.Application
+        val dir = java.io.File(app.filesDir, "projects/${project.id}/media")
+        var loadedAny = false
+        assets.forEach { asset ->
+            if (!asset.isAudio && vm.thumbnails.peek(asset.id) == null) {
+                if (vm.thumbnails.load(dir, asset).isNotEmpty()) loadedAny = true
+            }
+        }
+        if (loadedAny) thumbRevision++
+    }
+
+    // ---- 顶部操作行：导入素材 + 一键全部上轨 ----
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Button(onClick = onImportMedia) {
+            Text(stringResource(R.string.library_import))
+        }
+        Spacer(Modifier.weight(1f))
+        if (hasUnusedVisual) {
+            OutlinedButton(onClick = { vm.addUnusedAssetsToTimeline() }) {
+                Text(stringResource(R.string.library_add_all))
+            }
+        }
+    }
+    Text(
+        stringResource(R.string.library_hint),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp),
+    )
+    Spacer(Modifier.height(2.dp))
+
+    if (assets.isEmpty()) {
+        Text(
+            stringResource(R.string.library_empty),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 28.dp),
+        )
+        return
+    }
+
+    assets.forEach { asset ->
+        LibraryRow(
+            asset = asset,
+            used = usedCount[asset.id] ?: 0,
+            // 读一次 revision 建立重组依赖（缩略图异步装完后刷新）。
+            thumb = { thumbRevision; if (asset.isAudio) null else vm.thumbnails.peek(asset.id)?.firstOrNull() },
+            onAdd = { vm.addAssetToTimeline(asset.id) },
+            onDelete = { vm.deleteAssetFromLibrary(asset.id) },
+        )
+    }
+    Spacer(Modifier.height(12.dp))
+}
+
+@Composable
+private fun LibraryRow(
+    asset: MediaAsset,
+    used: Int,
+    thumb: () -> ImageBitmap?,
+    onAdd: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val typeLabel = stringResource(
+        when {
+            asset.isImage -> R.string.library_type_image
+            asset.isAudio -> R.string.library_type_audio
+            else -> R.string.library_type_video
+        }
+    )
+    val durationLabel = if (!asset.isImage && asset.durationUs > 0) {
+        " · %.1fs".format(asset.durationUs / 1_000_000.0)
+    } else ""
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onAdd)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val bitmap = thumb()
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = asset.displayName,
+                modifier = Modifier
+                    .size(width = 64.dp, height = 40.dp)
+                    .clip(MaterialTheme.shapes.small),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Box(
+                Modifier
+                    .size(width = 64.dp, height = 40.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.MusicNote,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+        Column(
+            Modifier
+                .weight(1f)
+                .padding(horizontal = 12.dp)
+        ) {
+            Text(
+                asset.displayName,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "$typeLabel$durationLabel · ${asset.techSummary()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (used == 0) {
+                Text(
+                    stringResource(R.string.library_unused),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AccentColor,
+                )
+            } else {
+                Text(
+                    stringResource(R.string.library_used_fmt, used),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        // 仅未使用的素材可从库里删（正在时间线/音频轨/画中画上的先删引用）。
+        if (used == 0) {
+            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    Icons.Filled.Delete,
+                    stringResource(R.string.library_delete),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
 
 @Composable
 fun ExportSheet(vm: EditorViewModel, state: EditorUiState, onNeedPermission: () -> Unit) {
