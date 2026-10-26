@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -41,6 +43,11 @@ import com.RooMCutNext.ai.AiSettings
  *  - AI 面板输入行齿轮（剪辑中途随时改）。
  * 读写都走宿主传入的 onDismiss/onSave（最终落到 SettingsRepository，
  * 本机 SharedPreferences 持久化，一次保存全程生效）。
+ *
+ * v1.6.10: 表单加 verticalScroll —— v1.6.6~v1.6.9 连续三版向对话框加了
+ * 画面理解三档、画面方式两档、视频格式两档与提示文案后，内容总高已超
+ * 小屏可用高度，AlertDialog 的 text 槽不滚动导致底部被硬裁剪；与
+ * AiSkillsSheet 同一范式（fillMaxWidth + verticalScroll），超出即可上下拖动。
  */
 @Composable
 internal fun AiSettingsDialog(
@@ -97,7 +104,12 @@ internal fun AiSettingsDialog(
             }
         },
         text = {
-            Column(Modifier.fillMaxWidth()) {
+            // v1.6.10: 内容超出屏高时可上下拖动（此前被硬裁剪，见真机截图反馈）。
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Text(
                     stringResource(R.string.ai_settings_provider),
                     style = MaterialTheme.typography.labelMedium,

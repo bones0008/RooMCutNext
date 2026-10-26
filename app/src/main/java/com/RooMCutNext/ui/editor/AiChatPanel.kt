@@ -653,7 +653,12 @@ private fun AiSkillImportDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.ai_skills_import_title)) },
         text = {
-            Column(Modifier.fillMaxWidth()) {
+            // v1.6.10: 与设置弹窗同理加固 —— 文本框拉满 + 键盘弹出时小屏同样会裁剪。
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
