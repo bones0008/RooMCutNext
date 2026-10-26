@@ -46,10 +46,11 @@
     <string name="time_total_symbol">/</string>
 
     <!-- Timeline -->
-    <string name="timeline_add_media">添加素材</string>
-    <string name="timeline_empty_hint">点按 ＋ 导入视频或图片</string>
-    <string name="timeline_import_videos">选择视频/图片</string>
-    <string name="timeline_import_files">从文件管理器选择</string>
+    <!-- v1.6.15: 「添加素材」入口已删（与素材库重复）——素材导入唯一
+         路径 = 素材库面板顶部「导入素材」行（多选）。空时间线大 +
+         钮改为打开素材库。 -->
+    <string name="timeline_open_library">打开素材库</string>
+    <string name="timeline_empty_hint">素材先入素材库，点素材上时间线</string>
     <string name="timeline_text_track">文字</string>
     <string name="timeline_clip_missing">源文件缺失</string>
     <string name="timeline_insert_hint">插入到这里</string>
@@ -324,10 +325,10 @@
     <!-- v1.6.13: 媒体库（素材库）—— 导入即入库，点击素材上时间线 -->
     <string name="action_library">素材库</string>
     <string name="panel_library_title">素材库</string>
-    <string name="library_import">导入素材</string>
+    <string name="library_import">导入素材（可多选）</string>
     <string name="library_add_all">全部添加到时间线</string>
     <string name="library_hint">点击素材即上时间线：视频/图片追加到末尾，音频加到指针处。AI 也能分析素材库帮你挑素材。</string>
-    <string name="library_empty">素材库还是空的\n点「导入素材」把手机里的视频、图片、音乐加进来：文件会完整保存进项目，上时间线即可开始剪辑</string>
+    <string name="library_empty">素材库还是空的\n点「导入素材（可多选）」把手机里的视频、照片、图片加进来：文件会完整保存进项目，点素材上时间线即可开始剪辑</string>
     <string name="library_type_video">视频</string>
     <string name="library_type_image">图片</string>
     <string name="library_type_audio">音频</string>

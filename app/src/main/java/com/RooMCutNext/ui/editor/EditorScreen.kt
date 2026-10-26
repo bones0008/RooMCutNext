@@ -29,7 +29,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BlurOn
@@ -151,9 +150,10 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris -> vm.importUris(uris) }
 
-    val openDocuments = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris -> vm.importUris(uris) }
+    // v1.6.15: 「添加素材」入口已删（用户反馈：与素材库重复多此一举）——
+    // 素材导入唯一路径 = 素材库面板顶部「导入素材」行，走同一个
+    // pickMedia（多选，视频/图片/音频全收）。旧的 openDocuments
+    // launcher 与「从文件管理器选择」旁路一并清理。
 
     val pickAudio = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -627,10 +627,9 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             if (panel == null) {
                 TimelineView(
                     vm = vm,
-                    onAddMedia = { launchMediaPicker() },
-                    onImportFromFileManager = {
-                        openDocuments.launch(mediaMimeTypes)
-                    },
+                    // v1.6.15: 空时间线大 + 钮 → 打开素材库面板（导入
+                    // 唯一路径），不再直接弹系统选择器。
+                    onOpenLibrary = { vm.openPanel(PanelKind.LIBRARY) },
                 )
             } else if (panel == PanelKind.AI_CHAT) {
                 // v1.6.3: 微信式输入底栏（忙碌行 + 输入行 + 浮层开关）。
@@ -693,8 +692,8 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
         if (state.activePanel != PanelKind.AI_CHAT) {
             ActionToolbar(
             state = state,
-            onAddMedia = { launchMediaPicker() },
-            // v1.6.13: 素材库面板（导入即入库的浏览/上轨入口）。
+            // v1.6.15: 素材库面板（导入即入库的浏览/上轨入口；「添加
+            // 素材」按钮已删——导入唯一路径，见素材库面板顶部导入行）。
             onLibrary = { vm.openPanel(PanelKind.LIBRARY) },
             // v1.6.0: AI 剪辑 — 对话式 agent（不要求选中目标，agent 自己读项目）。
             onAi = { vm.openPanel(PanelKind.AI_CHAT) },
@@ -892,7 +891,6 @@ private fun PlaybackBar(vm: EditorViewModel, state: EditorUiState) {
 @Composable
 private fun ActionToolbar(
     state: EditorUiState,
-    onAddMedia: () -> Unit,
     onLibrary: () -> Unit,
     onAi: () -> Unit,
     onBlackGap: () -> Unit,
@@ -914,8 +912,10 @@ private fun ActionToolbar(
     // while the timeline area is showing the panel instead.
     val active = state.activePanel
     // v1.0.10: 分割/删除/复制 moved up into the timecode row; 文字/音频 moved
-    // right next to 添加素材 (they are the most-used actions and used to hide
-    // off-screen in the scroll). Order: add, text, audio, then per-clip tools.
+    // right next to the 素材库 (they are the most-used actions and used to hide
+    // off-screen in the scroll). Order: library, text, audio, then per-clip tools.
+    // v1.6.15: 「添加素材」按钮已删（用户反馈与素材库重复）——素材库
+    // 是唯一素材入口，位置不变继续排首位。
     Row(
         Modifier
             .fillMaxWidth()
@@ -924,8 +924,8 @@ private fun ActionToolbar(
             .padding(vertical = 6.dp),
     ) {
         Spacer(Modifier.width(8.dp))
-        ToolbarButton(Icons.Filled.Add, stringResource(R.string.timeline_add_media), enabled = true, active = false, onClick = onAddMedia)
         // v1.6.13: 素材库 —— 导入即入库，点击素材上时间线；AI 同库选材。
+        // v1.6.15: 升格为唯一素材入口（添加素材已删）。
         ToolbarButton(Icons.Filled.VideoLibrary, stringResource(R.string.action_library), enabled = true, active = active == PanelKind.LIBRARY, onClick = onLibrary)
         // v1.6.0: AI 剪辑放在最前面 — 对话即剪辑的入口。
         ToolbarButton(Icons.Filled.AutoAwesome, stringResource(R.string.action_ai), enabled = true, active = active == PanelKind.AI_CHAT, onClick = onAi)

@@ -213,7 +213,6 @@ private sealed class DragMode {
     data class PipMove(val pipId: String) : DragMode()
     data class PipTrim(val pipId: String, val isLeft: Boolean) : DragMode()
     data object TapGallery : DragMode()
-    data object TapFiles : DragMode()
     /** v1.3.1: track-level mute toggles (tap-only chips left of 00:00). */
     data object TapVideoMute : DragMode()
     data object TapPipMute : DragMode()
@@ -233,8 +232,10 @@ private sealed class DragMode {
 @Composable
 fun TimelineView(
     vm: EditorViewModel,
-    onAddMedia: () -> Unit,
-    onImportFromFileManager: () -> Unit,
+    // v1.6.15: 「添加素材」入口已删（用户反馈与素材库重复）——空时间
+    // 状态大 + 钮现在打开素材库面板，导入唯一路径 = 面板顶部导入行
+    // （多选，视频/图片/音频全收）；「从文件管理器选择」旁路同删。
+    onOpenLibrary: () -> Unit,
 ) {
     val density = LocalDensity.current
     val viewConfig = LocalViewConfiguration.current
@@ -246,8 +247,7 @@ fun TimelineView(
     val isPlayingNow = collectIsPlaying(vm.state)
 
     val emptyHint = stringResource(R.string.timeline_empty_hint)
-    val addLabel = stringResource(R.string.timeline_add_media)
-    val filesLabel = stringResource(R.string.timeline_import_files)
+    val addLabel = stringResource(R.string.timeline_open_library)
 
     val scrollXState = remember { mutableFloatStateOf(0f) }
     // v1.5.4: vertical content scroll in px. Semantics live in
@@ -274,8 +274,7 @@ fun TimelineView(
      *  where it is drawn. NaN when no clip drag is active. */
     val clipGrabOffset = remember { mutableFloatStateOf(Float.NaN) }
 
-    val currentOnAddMedia by rememberUpdatedState(onAddMedia)
-    val currentOnFiles by rememberUpdatedState(onImportFromFileManager)
+    val currentOnOpenLibrary by rememberUpdatedState(onOpenLibrary)
     val currentVm by rememberUpdatedState(vm)
 
     val textPaint = remember {
@@ -413,12 +412,12 @@ fun TimelineView(
     fun hitTest(x: Float, y: Float): DragMode {
         val g = geom
         if (!g.hasAnyContent) {
+            // v1.6.15: 空状态整块点击区都打开素材库（原「从文件管理器
+            // 选择」pill 旁路已删——导入唯一路径）。
             val cx = g.viewportW / 2f
             val cy = g.viewportH / 2f
             val galleryRect = Rect(cx - 70f * dp, cy - 74f * dp, cx + 70f * dp, cy + 26f * dp)
             if (galleryRect.contains(Offset(x, y))) return DragMode.TapGallery
-            val filesRect = Rect(cx - 120f * dp, cy + 44f * dp, cx + 120f * dp, cy + 84f * dp)
-            if (filesRect.contains(Offset(x, y))) return DragMode.TapFiles
             return DragMode.TapGallery
         }
         if (y <= g.rulerBottom) return DragMode.Scrub
@@ -656,8 +655,7 @@ fun TimelineView(
     fun onTap(mode: DragMode, x: Float, y: Float) {
         val v = currentVm
         when (mode) {
-            is DragMode.TapGallery -> currentOnAddMedia()
-            is DragMode.TapFiles -> currentOnFiles()
+            is DragMode.TapGallery -> currentOnOpenLibrary()
             // v1.3.1: track-level mute toggles — audio lanes (BGM) are
             // deliberately NOT covered by these switches.
             is DragMode.TapVideoMute -> v.toggleVideoTrackMute()
@@ -865,7 +863,7 @@ fun TimelineView(
             thumbRevision.intValue // invalidate when thumbnails finish loading
 
             if (!g.hasAnyContent) {
-                drawEmptyState(g, emptyHint, addLabel, filesLabel, dp)
+                drawEmptyState(g, emptyHint, addLabel, dp)
                 return@Canvas
             }
 
@@ -1157,7 +1155,6 @@ private fun DrawScope.drawEmptyState(
     g: GeometryHolder,
     emptyHint: String,
     addLabel: String,
-    filesLabel: String,
     dp: Float,
 ) {
     val cx = g.viewportW / 2f
@@ -1170,6 +1167,8 @@ private fun DrawScope.drawEmptyState(
     drawLine(AccentColor, Offset(cx - plus / 2, cy), Offset(cx + plus / 2, cy), 5.dp.toPx())
     drawLine(AccentColor, Offset(cx, cy - plus / 2), Offset(cx, cy + plus / 2), 5.dp.toPx())
     // labels
+    // v1.6.15: 大 + 钮 → 打开素材库（导入唯一路径）；原「从文件
+    // 管理器选择」pill 已删（旁路入口，与素材库重复多此一举）。
     val canvas = drawContext.canvas.nativeCanvas
     val paint = Paint().apply {
         isAntiAlias = true
@@ -1180,25 +1179,6 @@ private fun DrawScope.drawEmptyState(
     canvas.drawText(addLabel, cx, cy + r + 24f * dp, paint)
     paint.textSize = 10f * dp
     canvas.drawText(emptyHint, cx, cy + r + 44f * dp, paint)
-    // file manager option pill
-    val pillW = 240f * dp
-    val pillH = 40f * dp
-    val pillTop = cy + r + 58f * dp
-    drawRoundRect(
-        color = SurfaceVariantColor,
-        topLeft = Offset(cx - pillW / 2, pillTop),
-        size = Size(pillW, pillH),
-        cornerRadius = CornerRadius(pillH / 2),
-    )
-    drawRoundRect(
-        color = ClipBorderColor,
-        topLeft = Offset(cx - pillW / 2, pillTop),
-        size = Size(pillW, pillH),
-        cornerRadius = CornerRadius(pillH / 2),
-        style = Stroke(1.dp.toPx()),
-    )
-    paint.color = android.graphics.Color.argb(0xF0, 0xEA, 0xF0, 0xF4)
-    canvas.drawText(filesLabel, cx, pillTop + pillH / 2 + 3.5f * dp, paint)
 }
 
 private fun DrawScope.drawRuler(project: Project, g: GeometryHolder, paint: Paint, dp: Float) {
