@@ -90,6 +90,7 @@ import com.RooMCutNext.ai.AiChatUiState
 import com.RooMCutNext.ai.CustomSkillCodec
 import com.RooMCutNext.ai.EditSkill
 import com.RooMCutNext.ai.EditSkills
+import com.RooMCutNext.ai.SkillMd
 import com.RooMCutNext.ui.settings.AiSettingsDialog
 import kotlinx.coroutines.launch
 
@@ -928,7 +929,7 @@ private fun AiSkillImportDialog(
                     isError = true
                 } else {
                     // 填入文本框让用户过目 —— 导入仍由“导入”键触发，
-                    // 选错文件（非 JSON）在解析层拦下。
+                    // 选错文件（非 JSON / Markdown）在解析层拦下。
                     text = content
                     message = null
                 }
@@ -964,6 +965,12 @@ private fun AiSkillImportDialog(
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // v1.6.20: 双格式示例 —— Markdown（SKILL.md）是推荐
+                    // 写法，JSON 保留兼容旧用户。
+                    TextButton(onClick = {
+                        text = SkillMd.SAMPLE_MD
+                        message = null
+                    }) { Text(stringResource(R.string.ai_skills_import_sample_md)) }
                     TextButton(onClick = {
                         text = CustomSkillCodec.SAMPLE_JSON
                         message = null

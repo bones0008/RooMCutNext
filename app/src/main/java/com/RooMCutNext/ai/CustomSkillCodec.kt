@@ -66,8 +66,15 @@ object CustomSkillCodec {
 
     fun parse(text: String, existing: List<EditSkill> = emptyList()): Result {
         if (text.isBlank()) return Result.Error("内容为空")
-        if (text.length > MAX_TEXT) return Result.Error("内容过长（超过 64KB）——请确认导入的是技能 JSON")
-        val root = runCatching { Json.parseToJsonElement(text.trim()) }.getOrElse {
+        if (text.length > MAX_TEXT) return Result.Error("内容过长（超过 64KB）——请确认导入的是技能文件")
+        val trimmed = text.trim()
+        // v1.6.20: 双格式 —— 以 { 或 [ 开头按 JSON 解析；否则按
+        // SKILL.md（Markdown + frontmatter）解析。手写 Markdown 远比
+        // 手写 JSON 友好（业界 Agent Skills 的事实形态），JSON 保留兼容。
+        if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+            return parseMarkdown(trimmed, existing)
+        }
+        val root = runCatching { Json.parseToJsonElement(trimmed) }.getOrElse {
             return Result.Error("不是合法的 JSON：${it.message?.take(120) ?: "格式错误"}")
         }
         val objs: List<JsonObject> = when (root) {
@@ -110,6 +117,37 @@ object CustomSkillCodec {
     private data class OneOk(val skill: EditSkill) : One
     private class OneError(val message: String) : One {
         fun toResult() = Result.Error(message)
+    }
+
+    /**
+     * v1.6.20 SKILL.md（Markdown）路径：[SkillMd] 负责解析与防护，
+     * 这里只做结果转换 + 与 JSON 路径一致的覆盖提示语义。
+     */
+    private fun parseMarkdown(text: String, existing: List<EditSkill>): Result {
+        val p = SkillMd.parse(text)
+        val skill = p.skill ?: return Result.Error(
+            when (p.error) {
+                SkillMd.Error.MISSING_NAME ->
+                    "缺少技能名：在文件开头写 name: 技能名（或正文第一行用 # 标题）"
+                SkillMd.Error.EMPTY_STEPS ->
+                    "没有步骤：正文需要列表（如「- xxx」或「1. xxx」）或分段落写"
+                SkillMd.Error.BAD_FRONT_MATTER ->
+                    "文件开头的 --- 没有成对闭合，请补上第二个 ---"
+                SkillMd.Error.CLASH_BUILTIN ->
+                    "名字或别名「${p.detail ?: ""}」与内置技能冲突，请换个名字"
+                SkillMd.Error.HALLUCINATED_TOOL ->
+                    "步骤引用了不存在的工具 \"${p.detail ?: ""}\"。" +
+                        "可用工具：split_clip、trim_clip、delete_clip、move_clip、" +
+                        "set_clip_speed、set_clip_volume、set_transition、add_black_clip、" +
+                        "add_text、update_text、delete_text、set_audio_volume、trim_audio、" +
+                        "delete_audio、seek、get_draft_overview 等"
+                null -> "无法解析"
+            }
+        )
+        val warnings = if (skill.id in existing.map { it.id }) {
+            listOf("「${skill.nameZh}」覆盖了已有的同名技能")
+        } else emptyList()
+        return Result.Success(listOf(skill), warnings)
     }
 
     private fun parseOne(

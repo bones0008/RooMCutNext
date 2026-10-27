@@ -388,7 +388,7 @@
     <!-- v1.6.11: entry discoverability — labeled chip in the input row + empty-chat hint card -->
     <string name="ai_skills_chip">Skills</string>
     <string name="ai_empty_hint_title">How to use AI editing</string>
-    <string name="ai_empty_hint_skills">Skills: tap the "⚡ Skills" chip at the left of the input box, or tap this card — 15+ built-in recipes, and you can upload / import custom skills (JSON) at the top of that sheet</string>
+    <string name="ai_empty_hint_skills">Skills: tap the "⚡ Skills" chip at the left of the input box, or tap this card — 15+ built-in recipes, and you can upload / import custom skills (SKILL.md or JSON) at the top of that sheet</string>
     <string name="ai_empty_hint_examples">Or just say it your way: "jump-cut it", "trim the heads and tails", "put the best part first"</string>
     <string name="ai_empty_hint_open">Tap this card to open the skill library →</string>
     <string name="ai_skills_close">Close</string>
@@ -396,13 +396,14 @@
     <!-- v1.6.8: custom skill import (new techniques as JSON, injected into the prompt for any model) -->
     <string name="ai_skills_import">Upload / import custom skills…</string>
     <string name="ai_skills_import_title">Import custom skills</string>
-    <string name="ai_skills_import_hint">Paste skill JSON here, or tap "From file" to pick a .json file</string>
-    <string name="ai_skills_import_sample">Insert sample</string>
+    <string name="ai_skills_import_hint">Paste a SKILL.md (Markdown) or JSON skill here, or tap "From file" to pick one (the format is detected automatically)</string>
+    <string name="ai_skills_import_sample">Insert JSON sample</string>
+    <string name="ai_skills_import_sample_md">Insert SKILL.md sample</string>
     <string name="ai_skills_import_file">From file</string>
     <string name="ai_skills_import_do">Import</string>
     <string name="ai_skills_import_ok_fmt">Imported %1$d skill(s) — the AI can use them in your very next message</string>
     <string name="ai_skills_file_error">Could not read the selected file (corrupt or larger than 256KB)</string>
-    <string name="ai_skills_import_format">Format: id, names (nameZh/nameEn), a one-liner, and steps (English instructions for the model; only real tool names allowed). Tap "Insert sample" and adapt it.</string>
+    <string name="ai_skills_import_format">Either format works: ① SKILL.md (Markdown, recommended) — name/aliases/category at the top, a numbered step list as the body (only real tool names allowed); ② JSON — id, names, a one-liner, and steps. Tap a sample button and adapt it.</string>
     <string name="ai_skills_delete">Delete this skill</string>
     <!-- v1.6.1: black frame clip (stretchable solid black, replaces implicit delete-holes) -->
     <string name="black_frame_name">Black</string>

@@ -387,7 +387,7 @@
     <!-- v1.6.11: 入口可发现性 —— 输入框闪电胶囊文字 + 空对话引导卡 -->
     <string name="ai_skills_chip">技能</string>
     <string name="ai_empty_hint_title">AI 剪辑怎么用</string>
-    <string name="ai_empty_hint_skills">技能库：点输入框左端的「⚡ 技能」，或点这张卡 —— 15+ 项内置技巧，面板顶部可上传 / 导入自定义技能（JSON）</string>
+    <string name="ai_empty_hint_skills">技能库：点输入框左端的「⚡ 技能」，或点这张卡 —— 15+ 项内置技巧，面板顶部可上传 / 导入自定义技能（SKILL.md 或 JSON）</string>
     <string name="ai_empty_hint_examples">也可以直接用自己的话说，例如：「跳剪一下」「把第二段掐头去尾」「高潮前置」</string>
     <string name="ai_empty_hint_open">点这张卡打开技能库 →</string>
     <string name="ai_skills_close">关闭</string>
@@ -395,13 +395,14 @@
     <!-- v1.6.8: 自定义技能导入（新剪辑技巧写成 JSON 导入，随 prompt 注入，任意模型即可用） -->
     <string name="ai_skills_import">上传 / 导入自定义技能…</string>
     <string name="ai_skills_import_title">导入自定义技能</string>
-    <string name="ai_skills_import_hint">把技能 JSON 粘贴到这里，或点“从文件导入”选择 .json 文件</string>
-    <string name="ai_skills_import_sample">填入示例</string>
+    <string name="ai_skills_import_hint">把技能 SKILL.md（Markdown）或 JSON 粘贴到这里，或点“从文件导入”选文件（自动识别格式）</string>
+    <string name="ai_skills_import_sample">填入 JSON 示例</string>
+    <string name="ai_skills_import_sample_md">填入 SKILL.md 示例</string>
     <string name="ai_skills_import_file">从文件导入</string>
     <string name="ai_skills_import_do">导入</string>
     <string name="ai_skills_import_ok_fmt">已导入 %1$d 个技能，AI 下一句话即可使用</string>
     <string name="ai_skills_file_error">无法读取所选文件（可能损坏或超过 256KB）</string>
-    <string name="ai_skills_import_format">格式：id、名字（nameZh/nameEn）、一句话说明、steps（英文写给模型的步骤，只能引用真实工具名）。点“填入示例”照着改最快。</string>
+    <string name="ai_skills_import_format">两种写法都行：① SKILL.md（Markdown，推荐）—— 开头写 name/别名/分类，正文写步骤列表（如「1. get_draft_overview …」，只能引用真实工具名）；② JSON —— id、名字、一句话说明、steps。点“填入示例”照着改最快。</string>
     <string name="ai_skills_delete">删除此技能</string>
     <!-- v1.6.1: 黑场素材（可拉伸的纯黑图片，替代"删除留洞"的隐式黑场） -->
     <string name="black_frame_name">黑场</string>
