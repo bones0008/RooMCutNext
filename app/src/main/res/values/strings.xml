@@ -221,6 +221,19 @@
 
     <!-- Mosaic regions (v1.2.2) -->
     <string name="action_mosaic">马赛克</string>
+    <string name="action_dolly">希区柯克</string>
+    <string name="panel_dolly_title">希区柯克变焦</string>
+    <string name="panel_dolly_none">无</string>
+    <string name="panel_dolly_push">推近</string>
+    <string name="panel_dolly_pull">拉远还原</string>
+    <string name="panel_dolly_duration">效果时长</string>
+    <string name="panel_dolly_sec_fmt">%1$.1f 秒</string>
+    <string name="panel_dolly_scale">最大放大</string>
+    <string name="panel_dolly_scale_fmt">%1$.1fx</string>
+    <string name="panel_dolly_center_x">中心点 · 横</string>
+    <string name="panel_dolly_center_y">中心点 · 纵</string>
+    <string name="panel_dolly_pos_fmt">%1$.2f</string>
+    <string name="panel_dolly_hint">拍摄时边变焦边移动，再把中心点对准主体，就是真·希区柯克眩晕感；普通素材则表现为平滑推近。放大采用裁剪实现，建议用 4K 素材更清晰。</string>
     <string name="panel_mosaic_title">马赛克</string>
     <string name="panel_mosaic_add">＋ 添加区域</string>
     <string name="panel_mosaic_full">每段素材最多 4 个马赛克区域</string>

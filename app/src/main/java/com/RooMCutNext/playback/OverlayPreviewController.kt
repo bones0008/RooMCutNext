@@ -487,6 +487,19 @@ class OverlayPreviewController(private val context: Context) {
     private var headTransitionEffect: TransitionEffect? = null
 
     /**
+     * v1.6.21: session-stable dolly-zoom effect for the head chain — same
+     * value-stability pattern as [headTransitionEffect] (param-blind equals,
+     * @Volatile parameters mutated at retarget). Mounted UNCONDITIONALLY in
+     * the head chain (idling at the identity window when the clip has no
+     * dolly) so the effect-list LENGTH never flips between dolly / non-dolly
+     * clips — a length flip re-registers the input stream, and a project
+     * alternating dolly and plain clips would re-arm the v1.5.7 chain-rebuild
+     * storm on every window. Deliberately NOT cleared by releaseHeadPlayer
+     * (plain data, survives the bounded recycle).
+     */
+    private var headDollyEffect: com.RooMCutNext.export.effects.DollyZoomEffect? = null
+
+    /**
      * v1.5.7: retarget cycles the persistent head player has served since it
      * was built. media3's input-stream switch rolls a documented release race
      * each cycle (InputSwitcher TODO b/417680219 — the texture manager may
@@ -1509,6 +1522,14 @@ class OverlayPreviewController(private val context: Context) {
         }
         return buildList {
             addAll(lookEffects)
+            // v1.6.21: dolly zoom — source space, after the look effects and
+            // BEFORE the canvas Presentation, the same mount order the export
+            // head item uses (buildClipItem). UNCONDITIONALLY present (idle
+            // identity when the clip has no dolly) so the list length never
+            // flips between clips — see headDollyEffect's doc.
+            if (!headEffectsFallback) {
+                add(stableHeadDollyEffectFor(clip))
+            }
             if (canvasPresentationInChain) {
                 // v1.5.7: memoized — same value-stability reasoning as the
                 // look effects (constant per project dims).
@@ -1568,6 +1589,45 @@ class OverlayPreviewController(private val context: Context) {
             return created
         }
         existing.updateWindow(active.type, spanUs, -1L)
+        return existing
+    }
+
+    /**
+     * v1.6.21: the session-stable dolly effect, re-pointed at [clip]'s spec
+     * (null → durationUs 0 = identity window). Item-local source-clock
+     * convention (globalStartUs = -1): the head item's position 0 IS the
+     * clip's timeline start, so progress = position / (D * speed) — at the
+     * head window's end this equals the body's global-clock progress
+     * (DollyZoomMath.boundaryProgressMatch), keeping the surface handoff
+     * seamless. First construction seeds a NON-ZERO duration so isNoOp is
+     * false when media3 builds the chain (an idle-built program can be
+     * re-windowed later; the reverse cannot be revived — see
+     * DollyZoomEffect.isNoOp).
+     */
+    private fun stableHeadDollyEffectFor(clip: Clip): com.RooMCutNext.export.effects.DollyZoomEffect {
+        val d = clip.dollyZoom
+        var existing = headDollyEffect
+        if (existing == null) {
+            val created = com.RooMCutNext.export.effects.DollyZoomEffect(
+                durationUs = 1L,
+                globalStartUs = -1L,
+                zoomIn = d?.zoomIn ?: true,
+                maxScale = d?.maxScale ?: 2f,
+                centerX = d?.centerX ?: 0.5f,
+                centerY = d?.centerY ?: 0.5f,
+                sessionStable = true,
+            )
+            headDollyEffect = created
+            existing = created
+        }
+        existing.updateWindow(
+            durationUs = if (d == null) 0L else (d.durationUs * clip.speed).toLong().coerceAtLeast(0L),
+            globalStartUs = -1L,
+            zoomIn = d?.zoomIn ?: true,
+            maxScale = d?.maxScale ?: 2f,
+            centerX = d?.centerX ?: 0.5f,
+            centerY = d?.centerY ?: 0.5f,
+        )
         return existing
     }
 

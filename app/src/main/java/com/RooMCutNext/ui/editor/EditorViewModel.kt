@@ -109,7 +109,7 @@ private const val AI_VIDEO_TOTAL_B64 = 12_000_000
 private const val AI_VIDEO_CACHE_MAX = 6
 private const val AI_VIDEO_PROXY_TIMEOUT_MS = 120_000L
 
-enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP, TRANSITION, MOSAIC, AI_CHAT, LIBRARY }
+enum class PanelKind { SPEED, ROTATE, CROP, ADJUST, TEXT, AUDIO, INFO, EXPORT, GOTO, PIP, TRANSITION, MOSAIC, DOLLY, AI_CHAT, LIBRARY }
 
 data class ImportingState(val done: Int, val total: Int, val current: String)
 
@@ -1605,6 +1605,27 @@ class EditorViewModel(
                 if (clips === p.clips) p else p.copy(clips = clips)
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 希区柯克变焦（v1.6.21）
+    // ------------------------------------------------------------------
+
+    /**
+     * v1.6.21: set / clear the selected clip's dolly-zoom spec. spec = null
+     * removes the effect. Slider drags preview live (commit = false);
+     * onValueChangeFinished commits one undo record — the same drag/commit
+     * contract as setClipTransition. Duration/maxScale are pre-clamped by
+     * the panel (DollyZoomMath.clamp*) so the model only ever sees legal
+     * values; AI-path clamping happens in EditTools.
+     */
+    fun setClipDollyZoom(clipId: String, spec: com.RooMCutNext.core.model.DollyZoomSpec?, commit: Boolean = true) {
+        val apply: (Project) -> Project = { p ->
+            val idx = p.clips.indexOfFirst { it.id == clipId }
+            if (idx < 0) p
+            else p.copy(clips = TimelineOps.update(p.clips, clipId) { it.copy(dollyZoom = spec) })
+        }
+        if (commit) commitOrMutate("希区柯克变焦") { apply(it) } else previewTransform { apply(it) }
     }
 
     // ------------------------------------------------------------------

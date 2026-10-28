@@ -202,6 +202,10 @@ object CompositionBuilder {
                     audioFadeOutUs = if (tUs > 0L) 0L else clip.fadeOutMs * 1000L,
                     stripEffects = stripEffects,
                     liveTextLookup = liveTextLookup,
+                    // v1.6.21: dolly starts at the CLIP's timeline start —
+                    // before this body item's own window when a transition
+                    // head exists (default would use clipStart + T).
+                    dollyStartUs = clipStartUs,
                 )
             }
 
@@ -546,6 +550,13 @@ object CompositionBuilder {
         stripEffects: Boolean,
         liveTextLookup: ((id: String) -> TextOverlayItem?)? = null,
         transitionStyleId: String = com.RooMCutNext.core.model.TransitionStyle.DISSOLVE.id,
+        /**
+         * v1.6.21: the CLIP's timeline start (same value for the head AND
+         * body items of a transitioned clip) — the dolly-zoom window's
+         * globalStartUs. NOT the item window's start: the body item starts
+         * at clipStart + T while dolly begins at clipStart.
+         */
+        dollyStartUs: Long = timelineStartUs,
     ): EditedMediaItem {
         val uri = Uri.fromFile(file)
 
@@ -571,6 +582,26 @@ object CompositionBuilder {
         // speed and mute stay so the timeline geometry is preserved)
         val videoEffects = mutableListOf<Effect>()
         videoEffects += clipLookEffects(clip, stripEffects)
+
+        // ---- v1.6.21: dolly zoom (希区柯克变焦) — AFTER the look effects
+        // (crop defines the composition first, then dolly magnifies it —
+        // mosaic included so a privacy region scales WITH the face it
+        // covers), BEFORE the canvas Presentation (source space). Global-
+        // clock convention: the window starts at the CLIP's timeline start,
+        // which for a transitioned clip lies inside the head window — hence
+        // the dollyStartUs parameter (identical for both items).
+        if (!stripEffects) {
+            clip.dollyZoom?.let { dolly ->
+                videoEffects += com.RooMCutNext.export.effects.DollyZoomEffect(
+                    durationUs = dolly.durationUs,
+                    globalStartUs = dollyStartUs,
+                    zoomIn = dolly.zoomIn,
+                    maxScale = dolly.maxScale,
+                    centerX = dolly.centerX,
+                    centerY = dolly.centerY,
+                )
+            }
+        }
 
         // ---- canvas fit (v1.2.2, STRUCTURAL: also active in degraded mode) ----
         // Letterboxes the clip onto the project canvas with transparent bars

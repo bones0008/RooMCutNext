@@ -5,6 +5,7 @@ import com.RooMCutNext.core.model.BLACK_DEFAULT_DURATION_US
 import com.RooMCutNext.core.model.BLACK_FRAME_ASSET_ID
 import com.RooMCutNext.core.model.BLACK_FRAME_FILE_NAME
 import com.RooMCutNext.core.model.Clip
+import com.RooMCutNext.core.model.DollyZoomSpec
 import com.RooMCutNext.core.model.IMAGE_DEFAULT_DURATION_US
 import com.RooMCutNext.core.model.IMAGE_MAX_DURATION_US
 import com.RooMCutNext.core.model.MediaAsset
@@ -15,6 +16,7 @@ import com.RooMCutNext.core.model.TextStyleSpec
 import com.RooMCutNext.core.model.TransitionStyle
 import com.RooMCutNext.core.model.snapProjectFps
 import com.RooMCutNext.core.ops.TimelineOps
+import com.RooMCutNext.core.util.DollyZoomMath
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import kotlinx.serialization.json.JsonArray
@@ -65,6 +67,8 @@ val SKILL_PARAM_WHITELIST: Set<String> = setOf(
     "to_index", "font_size_ratio", "x_ratio", "y_ratio", "color_hex",
     "source_in_sec", "source_out_sec", "source_duration_sec",
     "asset_id", "position", "used_count",
+    // v1.6.21: dolly-zoom 工具参数（set_clip_dolly_zoom）。
+    "max_scale", "direction", "center_x", "center_y",
 )
 
 class EditTools(
@@ -313,6 +317,32 @@ class EditTools(
             mapOf("sec" to "number"),
             listOf("sec"),
         ))
+        add(schema(
+            T.DOLLY,
+            "Hitchcock dolly-zoom on a clip: time-animated magnification of the frame over " +
+                "duration_sec from the clip's start. direction in = push in (background closes " +
+                "on the subject - the Vertigo look); out = reverse settle. max_scale (1.2..4) is " +
+                "the final magnification; center_x/center_y (0..1) pick the FIXED point - put " +
+                "them ON the subject. BEST on 4K footage shot while actually zooming (that " +
+                "combination is the real dolly-zoom); on ordinary footage it reads as a smooth " +
+                "Ken-Burns push. All params optional - omitted ones keep the clip's current " +
+                "values (defaults on a fresh set: 2s, 2x, in, center).",
+            mapOf(
+                "clip_id" to "string",
+                "duration_sec" to "number",
+                "max_scale" to "number",
+                "direction" to "string",
+                "center_x" to "number",
+                "center_y" to "number",
+            ),
+            listOf("clip_id"),
+        ))
+        add(schema(
+            T.DOLLY_REMOVE,
+            "Remove the dolly-zoom effect from a clip (no-op if absent).",
+            mapOf("clip_id" to "string"),
+            listOf("clip_id"),
+        ))
     }
 
     internal object T {
@@ -336,6 +366,8 @@ class EditTools(
         const val AUDIO_TRIM = "trim_audio"
         const val DELETE_AUDIO = "delete_audio"
         const val SEEK = "seek"
+        const val DOLLY = "set_clip_dolly_zoom"
+        const val DOLLY_REMOVE = "remove_clip_dolly_zoom"
     }
 
     // ------------------------------------------------------------------
@@ -354,13 +386,77 @@ class EditTools(
                 draft.journal.add("seek → ${usToSec(draft.seekUs!!)}s")
                 okJson("sec" to usToSec(draft.seekUs!!))
             }
+            T.DOLLY -> {
+                val clipId = args.str("clip_id") ?: return errJson("缺少参数 clip_id")
+                val found = requireClip(p, clipId) ?: return errJson(
+                    "clip_id 无效。可用: ${clipIdList(p)}",
+                )
+                val (_, clip) = found
+                val current = clip.dollyZoom
+                val durationSec = args.num("duration_sec")
+                val scale = args.num("max_scale")
+                val dirRaw = args.str("direction")?.lowercase()
+                val zoomIn: Boolean = when (dirRaw) {
+                    null, "" -> current?.zoomIn ?: true
+                    "in", "push_in", "zoom_in" -> true
+                    "out", "pull_out", "zoom_out" -> false
+                    else -> return errJson(
+                        "direction 无效（in=推近 / out=拉远还原），收到 \"$dirRaw\"",
+                    )
+                }
+                val cx = args.num("center_x")?.coerceIn(0.0, 1.0)
+                val cy = args.num("center_y")?.coerceIn(0.0, 1.0)
+                val spec = DollyZoomSpec(
+                    durationUs = DollyZoomMath.clampDurationUs(
+                        durationSec?.let { (it * 1e6).roundToLong() }
+                            ?: current?.durationUs ?: 2_000_000L,
+                    ),
+                    zoomIn = zoomIn,
+                    maxScale = DollyZoomMath.clampMaxScale(
+                        (scale ?: current?.maxScale?.toDouble() ?: 2.0).toFloat(),
+                    ),
+                    centerX = (cx ?: current?.centerX?.toDouble() ?: 0.5).toFloat(),
+                    centerY = (cy ?: current?.centerY?.toDouble() ?: 0.5).toFloat(),
+                )
+                val newClips = TimelineOps.update(p.clips, clip.id) {
+                    it.copy(dollyZoom = spec)
+                }
+                draft.project = p.copy(clips = newClips)
+                bump(
+                    draft,
+                    "set_clip_dolly_zoom: $clipId ${usToSec(spec.durationUs)}s " +
+                        "${spec.maxScale}x ${if (spec.zoomIn) "推近" else "拉远"}",
+                )
+                okJson(
+                    "duration_sec" to usToSec(spec.durationUs),
+                    "max_scale" to spec.maxScale.toDouble(),
+                    "direction" to if (spec.zoomIn) "in" else "out",
+                    "center_x" to spec.centerX.toDouble(),
+                    "center_y" to spec.centerY.toDouble(),
+                )
+            }
+            T.DOLLY_REMOVE -> {
+                val clipId = args.str("clip_id") ?: return errJson("缺少参数 clip_id")
+                val found = requireClip(p, clipId) ?: return errJson(
+                    "clip_id 无效。可用: ${clipIdList(p)}",
+                )
+                val (_, clip) = found
+                val had = clip.dollyZoom != null
+                val newClips = TimelineOps.update(p.clips, clip.id) {
+                    it.copy(dollyZoom = null)
+                }
+                draft.project = p.copy(clips = newClips)
+                bump(draft, "remove_clip_dolly_zoom: $clipId")
+                okJson("removed" to had)
+            }
             else -> clipTools(draft, name, args) ?: textTools(draft, name, args)
                 ?: audioTools(draft, name, args) ?: errJson(
                     "未知工具 \"$name\"。可用: " +
                         listOf(T.OVERVIEW, T.SPLIT, T.DELETE_CLIP, T.TRIM_CLIP, T.RESTORE_CLIP,
                             T.MOVE_CLIP, T.SPEED, T.VOLUME, T.LOOK, T.TRANSITION, T.REMOVE_TRANSITION,
                             T.ADD_BLACK, T.ADD_FROM_LIBRARY, T.ADD_TEXT, T.UPDATE_TEXT, T.DELETE_TEXT,
-                            T.AUDIO_VOLUME, T.AUDIO_TRIM, T.DELETE_AUDIO, T.SEEK).joinToString(", "),
+                            T.AUDIO_VOLUME, T.AUDIO_TRIM, T.DELETE_AUDIO, T.SEEK,
+                            T.DOLLY, T.DOLLY_REMOVE).joinToString(", "),
                 )
         }
     }
@@ -991,6 +1087,17 @@ class EditTools(
                         if (c.transitionInUs > 0) {
                             put("transition_in_sec", usToSec(c.transitionInUs))
                             put("transition_type", c.transitionType)
+                        }
+                        // v1.6.21: dolly-zoom 状态 —— agent 能看出哪些素材已有
+                        // 希区柯克变焦及参数，避免重复设置/盲目覆盖。
+                        c.dollyZoom?.let { dz ->
+                            put("dolly_zoom", buildJsonObject {
+                                put("duration_sec", usToSec(dz.durationUs))
+                                put("max_scale", dz.maxScale.toDouble())
+                                put("direction", if (dz.zoomIn) "in" else "out")
+                                put("center_x", dz.centerX.toDouble())
+                                put("center_y", dz.centerY.toDouble())
+                            })
                         }
                         c.adjust.lutId?.let { put("lut", it) }
                     })

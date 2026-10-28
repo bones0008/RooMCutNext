@@ -84,6 +84,14 @@ data class Clip(
     val transitionType: String = TransitionStyle.DISSOLVE.id,
     /** Per-clip mosaic regions (v1.2.2), normalized to this clip's frame. */
     val mosaics: List<MosaicRegion> = emptyList(),
+    /**
+     * v1.6.21: 希区柯克变焦（dolly zoom）— a time-animated magnification of
+     * the clip's frame over [DollyZoomSpec.durationUs] from the clip's
+     * TIMELINE start (the transition head included). null = no effect (also
+     * what every pre-v1.6.21 project JSON decodes to — the field is absent
+     * there). See [DollyZoomSpec] for the semantics.
+     */
+    val dollyZoom: DollyZoomSpec? = null,
 ) {
     /** Span of source media used by this clip, microseconds. */
     val sourceSpanUs: Long get() = sourceOutUs - sourceInUs
@@ -189,6 +197,48 @@ data class MosaicRegion(
     /** Mosaic block size, fraction of frame width (see class doc). */
     val blockRatio: Float = 0.03f,
 )
+
+/**
+ * v1.6.21 — 希区柯克变焦（Hitchcock / dolly zoom）spec.
+ *
+ * 语义：在 [durationUs] 内对素材画面做时间驱动的放大——采样窗口（居中于
+ * [centerX]/[centerY]，边长从全幅线性走向 1/[maxScale]）扫过素材，输出=窗
+ * 内容拉满整帧。数学的唯一权威是 [com.RooMCutNext.core.util.DollyZoomMath]
+ * （JVM 可测），GL 侧只做逐帧转录（WYSIWYG 铁律）。
+ *
+ * 真正的希区柯克观感来自素材本身：拍摄时"边变焦边移动"（或边走边推拉变焦
+ * 滑杆），编辑器反向裁剪抵消主体尺寸变化后，剩下的就是背景视野的剧烈胀缩。
+ * 对普通素材（拍摄时没变焦）本效果退化为匀速推近/拉远（Ken Burns 式）。
+ * 放大是裁剪实现 → 建议用 4K 素材（1080p 素材放大 2x 会明显变软）。
+ *
+ * [zoomIn] = true：窗口从全幅收到 1/maxScale（画面推近、背景向中心收拢，
+ * 《迷魂记》正方向）；false：反向展开（从放大态还原到全景）。
+ */
+@Serializable
+data class DollyZoomSpec(
+    /** 效果窗口时长，从素材时间线起点起算，0.3s..8s。 */
+    val durationUs: Long = 2_000_000L,
+    /** true = 推近（窗口收缩/画面放大），false = 拉远还原（窗口展开）。 */
+    val zoomIn: Boolean = true,
+    /** 终点放大倍数 1.2..4（采样窗终点边长 = 1/maxScale）。 */
+    val maxScale: Float = 2.0f,
+    /** 采样窗中心 X，0..1（素材帧域，0=左）。窗口越界部分被画幅钳制。 */
+    val centerX: Float = 0.5f,
+    /** 采样窗中心 Y，0..1（0=上）。 */
+    val centerY: Float = 0.5f,
+)
+
+/** v1.6.21: dolly-zoom 效果窗口时长下限（0.3s — 更短读不出胀缩过程）。 */
+const val DOLLY_MIN_DURATION_US: Long = 300_000L
+
+/** v1.6.21: dolly-zoom 效果窗口时长上限（8s）。 */
+const val DOLLY_MAX_DURATION_US: Long = 8_000_000L
+
+/** v1.6.21: 终点放大倍数下限。 */
+const val DOLLY_MIN_SCALE: Float = 1.2f
+
+/** v1.6.21: 终点放大倍数上限（再大会明显糊 + 眩晕过头）。 */
+const val DOLLY_MAX_SCALE: Float = 4.0f
 
 /** Transitions are disabled when the hole in front of a clip is at least this long. */
 const val TRANSITION_MIN_GAP_US: Long = 20_000L

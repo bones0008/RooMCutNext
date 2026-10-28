@@ -986,6 +986,113 @@ private fun TransitionHint(text: String) {
 }
 
 // ===========================================================================
+// 希区柯克变焦（v1.6.21）
+// ===========================================================================
+
+/**
+ * v1.6.21: dolly-zoom sheet. Direction chips (无 / 推近 / 拉远) + duration /
+ * strength / center sliders. The center sliders matter most when the effect
+ * is combined with zoomed footage (put the center ON the subject so the
+ * reverse crop cancels its size change — that cancellation is what reads as
+ * the Vertigo effect). Slider drags preview live (commit = false), release
+ * commits one undo record.
+ */
+@Composable
+fun DollySheet(vm: EditorViewModel, state: EditorUiState) {
+    val clip = state.selectedClip ?: return
+    SheetTitle(stringResource(R.string.panel_dolly_title))
+    val d = clip.dollyZoom
+
+    // Direction chips: none / push in / pull back. Tapping a direction on a
+    // clip without one seeds the default spec (2s / 2x / center) so the
+    // sliders below immediately have something to drag.
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FilterChip(
+            selected = d == null,
+            onClick = { vm.setClipDollyZoom(clip.id, null) },
+            label = { Text(stringResource(R.string.panel_dolly_none)) },
+        )
+        FilterChip(
+            selected = d?.zoomIn == true,
+            onClick = {
+                val base = d ?: com.RooMCutNext.core.model.DollyZoomSpec()
+                vm.setClipDollyZoom(clip.id, base.copy(zoomIn = true))
+            },
+            label = { Text(stringResource(R.string.panel_dolly_push)) },
+        )
+        FilterChip(
+            selected = d?.zoomIn == false,
+            onClick = {
+                val base = d ?: com.RooMCutNext.core.model.DollyZoomSpec()
+                vm.setClipDollyZoom(clip.id, base.copy(zoomIn = false))
+            },
+            label = { Text(stringResource(R.string.panel_dolly_pull)) },
+        )
+    }
+
+    if (d != null) {
+        val math = com.RooMCutNext.core.util.DollyZoomMath
+
+        LabeledSlider(
+            label = stringResource(R.string.panel_dolly_duration),
+            value = (d.durationUs / 1_000_000f).coerceIn(0.3f, 8f),
+            valueRange = 0.3f..8f,
+            valueLabel = stringResource(R.string.panel_dolly_sec_fmt, d.durationUs / 1_000_000f),
+            onValueChange = {
+                vm.setClipDollyZoom(
+                    clip.id,
+                    d.copy(durationUs = math.clampDurationUs((it * 1_000_000f).toLong())),
+                    commit = false,
+                )
+            },
+            onValueChangeFinished = { vm.setClipDollyZoom(clip.id, d) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_dolly_scale),
+            value = d.maxScale.coerceIn(1.2f, 4f),
+            valueRange = 1.2f..4f,
+            valueLabel = stringResource(R.string.panel_dolly_scale_fmt, d.maxScale),
+            onValueChange = {
+                vm.setClipDollyZoom(clip.id, d.copy(maxScale = math.clampMaxScale(it)), commit = false)
+            },
+            onValueChangeFinished = { vm.setClipDollyZoom(clip.id, d) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_dolly_center_x),
+            value = d.centerX,
+            valueRange = 0f..1f,
+            valueLabel = stringResource(R.string.panel_dolly_pos_fmt, d.centerX),
+            onValueChange = {
+                vm.setClipDollyZoom(clip.id, d.copy(centerX = it.coerceIn(0f, 1f)), commit = false)
+            },
+            onValueChangeFinished = { vm.setClipDollyZoom(clip.id, d) },
+        )
+        LabeledSlider(
+            label = stringResource(R.string.panel_dolly_center_y),
+            value = d.centerY,
+            valueRange = 0f..1f,
+            valueLabel = stringResource(R.string.panel_dolly_pos_fmt, d.centerY),
+            onValueChange = {
+                vm.setClipDollyZoom(clip.id, d.copy(centerY = it.coerceIn(0f, 1f)), commit = false)
+            },
+            onValueChangeFinished = { vm.setClipDollyZoom(clip.id, d) },
+        )
+
+        // 中心点提示：把中心对准主体（配合拍摄时变焦的素材 = 真·希区柯克）。
+        Text(
+            stringResource(R.string.panel_dolly_hint),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+// ===========================================================================
 // Mosaic regions (v1.2.2)
 // ===========================================================================
 

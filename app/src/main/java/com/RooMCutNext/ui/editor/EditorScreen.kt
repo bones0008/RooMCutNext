@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CompareArrows
 import androidx.compose.material.icons.filled.ContentCopy
@@ -708,6 +709,8 @@ fun EditorScreen(projectId: String, onExit: () -> Unit) {
             onTransition = { vm.openPanel(PanelKind.TRANSITION) },
             // v1.2.2: per-clip mosaic regions (face / logo pixelation).
             onMosaic = { vm.openPanel(PanelKind.MOSAIC) },
+            // v1.6.21: 希区柯克变焦 — per-clip dolly zoom（方向/时长/强度/中心）。
+            onDolly = { vm.openPanel(PanelKind.DOLLY) },
             // v1.2: picture-in-picture / sticker tool — always available;
             // the sheet itself offers the asset picker when nothing is
             // selected yet.
@@ -900,6 +903,7 @@ private fun ActionToolbar(
     onAdjust: () -> Unit,
     onTransition: () -> Unit,
     onMosaic: () -> Unit,
+    onDolly: () -> Unit,
     onText: () -> Unit,
     onPip: () -> Unit,
     onAudio: () -> Unit,
@@ -950,6 +954,9 @@ private fun ActionToolbar(
         // player family the head belongs to.
         ToolbarButton(Icons.Filled.CompareArrows, stringResource(R.string.action_transition), enabled = hasClip, active = active == PanelKind.TRANSITION, onClick = onTransition)
         ToolbarButton(Icons.Filled.BlurOn, stringResource(R.string.action_mosaic), enabled = hasClip, active = active == PanelKind.MOSAIC, onClick = onMosaic)
+        // v1.6.21: 希区柯克变焦 — CenterFocusStrong（对焦框语义：画面推近、
+        // 背景向主体收拢）。
+        ToolbarButton(Icons.Filled.CenterFocusStrong, stringResource(R.string.action_dolly), enabled = hasClip, active = active == PanelKind.DOLLY, onClick = onDolly)
         ToolbarButton(Icons.Filled.Info, stringResource(R.string.action_info), enabled = hasClip, active = active == PanelKind.INFO, onClick = onInfo)
         ToolbarButton(Icons.Filled.GpsFixed, stringResource(R.string.action_goto), enabled = true, active = active == PanelKind.GOTO, onClick = onGoto)
         Spacer(Modifier.width(8.dp))
@@ -1009,7 +1016,7 @@ private fun ToolbarButton(
 /** Panels that operate on the selected video clip (guard + header badge). */
 private val CLIP_PANELS = setOf(
     PanelKind.SPEED, PanelKind.ROTATE, PanelKind.CROP, PanelKind.ADJUST, PanelKind.INFO,
-    PanelKind.TRANSITION, PanelKind.MOSAIC,
+    PanelKind.TRANSITION, PanelKind.MOSAIC, PanelKind.DOLLY,
 )
 
 @Composable
@@ -1039,6 +1046,7 @@ private fun ToolPanelHost(
         PanelKind.GOTO -> R.string.panel_goto_title
         PanelKind.TRANSITION -> R.string.panel_transition_title
         PanelKind.MOSAIC -> R.string.panel_mosaic_title
+        PanelKind.DOLLY -> R.string.panel_dolly_title
         PanelKind.AI_CHAT -> R.string.panel_ai_title
         PanelKind.LIBRARY -> R.string.panel_library_title
     }
@@ -1130,6 +1138,7 @@ private fun ToolPanelHost(
                     PanelKind.PIP -> PipSheet(vm, state, onImportMedia = onImportPipMedia)
                     PanelKind.TRANSITION -> TransitionSheet(vm, state)
                     PanelKind.MOSAIC -> MosaicSheet(vm, state)
+                    PanelKind.DOLLY -> DollySheet(vm, state)
                     PanelKind.AUDIO -> AudioSheet(vm, state, onAddMusic = onAddMusic, onRecord = onRecord)
                     PanelKind.INFO -> InfoSheet(vm, state, onReplace = onReplace)
                     PanelKind.GOTO -> GotoSheet(vm, state)

@@ -729,4 +729,102 @@ class EditToolsTest {
         assertFalse(r.ok)
         assertEquals(0, d.changeCount)
     }
+
+    // ------------------------------------------------------------------
+    // v1.6.21: dolly-zoom 工具
+    // ------------------------------------------------------------------
+
+    @Test
+    fun dollySetFullParamsAppliesClampedSpec() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        val r = tools.execute(
+            d, "set_clip_dolly_zoom",
+            args(
+                "clip_id" to "c1", "duration_sec" to 4.0, "max_scale" to 3.0,
+                "direction" to "out", "center_x" to 0.25, "center_y" to 0.75,
+            ),
+        )
+        assertTrue(r.ok)
+        val spec = d.project.clips[0].dollyZoom
+        assertNotNull(spec)
+        assertEquals(4_000_000L, spec!!.durationUs)
+        assertEquals(false, spec.zoomIn)
+        assertEquals(3.0f, spec.maxScale, 1e-6f)
+        assertEquals(0.25f, spec.centerX, 1e-6f)
+        assertEquals(0.75f, spec.centerY, 1e-6f)
+        assertEquals(1, d.changeCount)
+    }
+
+    @Test
+    fun dollySetDefaultsAndDomainClamps() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        // 仅 clip_id：默认 2s / 2x / 推近 / 中心。
+        var r = tools.execute(d, "set_clip_dolly_zoom", args("clip_id" to "c1"))
+        assertTrue(r.ok)
+        var spec = d.project.clips[0].dollyZoom!!
+        assertEquals(2_000_000L, spec.durationUs)
+        assertEquals(true, spec.zoomIn)
+        assertEquals(2.0f, spec.maxScale, 1e-6f)
+        // 域钳制：99s → 8s；0.5x → 1.2x；center 越界 → 0/1。
+        r = tools.execute(
+            d, "set_clip_dolly_zoom",
+            args(
+                "clip_id" to "c1", "duration_sec" to 99.0, "max_scale" to 0.5,
+                "center_x" to -1.0, "center_y" to 2.0,
+            ),
+        )
+        assertTrue(r.ok)
+        spec = d.project.clips[0].dollyZoom!!
+        assertEquals(8_000_000L, spec.durationUs)
+        assertEquals(1.2f, spec.maxScale, 1e-6f)
+        assertEquals(0f, spec.centerX, 1e-6f)
+        assertEquals(1f, spec.centerY, 1e-6f)
+    }
+
+    @Test
+    fun dollySetOmittedParamsKeepCurrentValues() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        tools.execute(
+            d, "set_clip_dolly_zoom",
+            args("clip_id" to "c1", "direction" to "out", "max_scale" to 3.0, "center_x" to 0.3),
+        )
+        // 只改时长：方向/强度/中心保留。
+        tools.execute(d, "set_clip_dolly_zoom", args("clip_id" to "c1", "duration_sec" to 5.0))
+        val spec = d.project.clips[0].dollyZoom!!
+        assertEquals(5_000_000L, spec.durationUs)
+        assertEquals(false, spec.zoomIn)
+        assertEquals(3.0f, spec.maxScale, 1e-6f)
+        assertEquals(0.3f, spec.centerX, 1e-6f)
+    }
+
+    @Test
+    fun dollySetRejectsBadDirectionAndClip() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        var d = EditTools.Draft(p)
+        var r = tools.execute(
+            d, "set_clip_dolly_zoom", args("clip_id" to "c1", "direction" to "sideways"),
+        )
+        assertFalse(r.ok)
+        assertEquals(0, d.changeCount)
+        d = EditTools.Draft(p)
+        r = tools.execute(d, "set_clip_dolly_zoom", args("clip_id" to "nope"))
+        assertFalse(r.ok)
+        assertEquals(0, d.changeCount)
+    }
+
+    @Test
+    fun dollyRemoveClearsAndReports() {
+        val p = project(listOf(clip("c1", "a1")), listOf(asset("a1")))
+        val d = EditTools.Draft(p)
+        tools.execute(d, "set_clip_dolly_zoom", args("clip_id" to "c1"))
+        val r = tools.execute(d, "remove_clip_dolly_zoom", args("clip_id" to "c1"))
+        assertTrue(r.ok)
+        assertNull(d.project.clips[0].dollyZoom)
+        // 已无效果的再删：幂等成功，removed=false。
+        val r2 = tools.execute(d, "remove_clip_dolly_zoom", args("clip_id" to "c1"))
+        assertTrue(r2.ok)
+    }
 }

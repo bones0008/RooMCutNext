@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v1.6.21: cleartext HTTP is PERMITTED app-wide.
+
+  Why: the AI panel is strictly BYOK — the only network egress this app has
+  is the LLM endpoint THE USER configures, and self-hosted / LAN endpoints
+  (http://10.x.x.x, http://192.168.x.x, ollama/llama.cpp boxes) are plain
+  HTTP by nature. Android 9+ blocks cleartext by default, which produced
+  "UnknownServiceException: cleartext communication to 10.115.1.99 not
+  permitted by network security policy" for every local model. Android's
+  network security config cannot express "private IP ranges" (no CIDR
+  support — only exact hosts), and the app has no other cleartext surface
+  (no telemetry, no accounts, no ads; cloud APIs are https and unaffected),
+  so the honest scope is the whole app rather than a fake enumeration of
+  LAN addresses. Cloud https endpoints are NOT downgraded in any way
+  (cleartext permission only affects connections actually made over http).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

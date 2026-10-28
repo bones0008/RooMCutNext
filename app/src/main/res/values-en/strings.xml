@@ -222,6 +222,19 @@
 
     <!-- Mosaic regions (v1.2.2) -->
     <string name="action_mosaic">Mosaic</string>
+    <string name="action_dolly">Dolly zoom</string>
+    <string name="panel_dolly_title">Hitchcock zoom</string>
+    <string name="panel_dolly_none">None</string>
+    <string name="panel_dolly_push">Push in</string>
+    <string name="panel_dolly_pull">Pull back</string>
+    <string name="panel_dolly_duration">Duration</string>
+    <string name="panel_dolly_sec_fmt">%1$.1f s</string>
+    <string name="panel_dolly_scale">Max zoom</string>
+    <string name="panel_dolly_scale_fmt">%1$.1fx</string>
+    <string name="panel_dolly_center_x">Center · X</string>
+    <string name="panel_dolly_center_y">Center · Y</string>
+    <string name="panel_dolly_pos_fmt">%1$.2f</string>
+    <string name="panel_dolly_hint">Shoot while zooming (move + zoom), then put the center point on the subject — that combination is the true Vertigo look; ordinary footage reads as a smooth push-in. The magnification is crop-based, so 4K sources stay sharpest.</string>
     <string name="panel_mosaic_title">Mosaic</string>
     <string name="panel_mosaic_add">＋ Add region</string>
     <string name="panel_mosaic_full">At most 4 mosaic regions per clip</string>

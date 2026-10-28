@@ -136,6 +136,23 @@ object EditSkills {
             ),
         ),
         EditSkill(
+            id = "dolly_zoom", nameZh = "希区柯克变焦", nameEn = "dolly zoom",
+            aliasesZh = listOf("眩晕变焦", "滑动变焦", "希区柯克"),
+            category = SkillCategory.TRANSITION,
+            oneLinerZh = "画面推近中背景向主体收拢的眩晕感（《迷魂记》式）",
+            oneLinerEn = "The Vertigo-style push where the background collapses onto the subject.",
+            steps = listOf(
+                "get_draft_overview and pick the clip the user wants the effect on - if several clips "+
+                    "and no clear hint, ASK which one.",
+                "set_clip_dolly_zoom on it: direction in, duration_sec 1.5-3, max_scale 2-3, and "+
+                    "center_x/center_y ON the subject (WITH frames estimate the subject position from the "+
+                    "middle frame; WITHOUT frames default to 0.5/0.5 and TELL the user to fine-tune the center).",
+                "Tell the user the honest physics: the true Vertigo look needs footage shot while zooming; "+
+                    "ordinary footage reads as a smooth push-in. Suggest 4K source for sharpness.",
+                "seek to the clip's start so the effect is immediately visible.",
+            ),
+        ),
+        EditSkill(
             id = "hard_beats", nameZh = "硬切连击", nameEn = "hard beats",
             aliasesZh = listOf("连续快切", "快切"),
             category = SkillCategory.TRANSITION,
